@@ -7,7 +7,7 @@
 ## [fix7+] - 当前开发版
 
 ### 修复
-- **Bug8 - 隐藏楼层多两层**：`ensureRecentFloorsVisible` 内层函数调用 `getChatMessages` 时缺 `hide_state` 参数，隐藏后查询只能看到可见消息，导致解除隐藏了错误楼层。添加 `hide_state:'all'`
+- **Bug8 - 隐藏楼层多两层**：`ensureRecentFloorsVisible` 内层函数调用 `getChatMessages` 只查可见消息，被隐藏的最新楼层查不到。改为合并可见+隐藏两个查询结果，确保能覆盖所有楼层
 
 ### 已还原
 - 还原 `addSummary` v1 核心记忆合并修改（恢复原版逻辑）
@@ -62,7 +62,3 @@
 - **Bug1 - 我们按钮**：`c.value=!c.value` 切换逻辑修复
 
 ---
-
-## 待修复
-
-- **Bug8** - 每轮对话结束多两层隐藏楼层：`ensureRecentFloorsVisible` 中 `getChatMessages` 不带 `hide_state` 参数，隐藏后查询只能看到可见消息，导致解除隐藏了错误的楼层（已定位，待实施）
