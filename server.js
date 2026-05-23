@@ -20,12 +20,15 @@ try {
 }
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/' || req.url === '/index.js') {
+  const urlPath = req.url.split('?')[0];
+  if (urlPath === '/' || urlPath === '/index.js') {
     console.log('Request:', req.url, '- serving', cachedContent.length, 'bytes');
     res.writeHead(200, {
       'Content-Type': 'application/javascript',
       'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
       'Content-Length': cachedContent.length
     });
     res.end(cachedContent);
