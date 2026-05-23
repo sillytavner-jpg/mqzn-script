@@ -1,0 +1,29 @@
+# 临时脚本
+temp-*.js
+check-*.js
+find-*.js
+revert-*.js
+verify-*.js
+apply-*.js
+do-*.js
+diff-*.js
+full-compare.js
+final-compare.js
+compare-*.js
+*.tmp
+
+# Node
+node_modules/
+
+# 无关文件
+test-dl.js
+备份.rar
+新建 文本文档.txt
+新建文件夹/
+
+# IDE
+.idea/
+
+# 系统文件
+Thumbs.db
+Desktop.ini
