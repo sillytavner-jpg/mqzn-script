@@ -7,31 +7,22 @@ const scriptPath = path.join(__dirname, 'index.js');
 
 console.log('Server starting...');
 console.log('__dirname:', __dirname);
-console.log('Reading:', scriptPath);
-
-// Pre-load the file at startup
-let cachedContent = null;
-try {
-  cachedContent = fs.readFileSync(scriptPath);
-  console.log('Loaded OK:', cachedContent.length, 'bytes');
-} catch (e) {
-  console.error('Failed to load:', e.message);
-  process.exit(1);
-}
+console.log('Serving:', scriptPath);
 
 const server = http.createServer((req, res) => {
   const urlPath = req.url.split('?')[0];
   if (urlPath === '/' || urlPath === '/index.js') {
-    console.log('Request:', req.url, '- serving', cachedContent.length, 'bytes');
+    const content = fs.readFileSync(scriptPath);
+    console.log('Request:', req.url, '- serving', content.length, 'bytes');
     res.writeHead(200, {
       'Content-Type': 'application/javascript',
       'Access-Control-Allow-Origin': '*',
       'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
       'Pragma': 'no-cache',
       'Expires': '0',
-      'Content-Length': cachedContent.length
+      'Content-Length': content.length
     });
-    res.end(cachedContent);
+    res.end(content);
   } else {
     res.writeHead(404);
     res.end('Not Found');
