@@ -1,5 +1,8 @@
 # 临时脚本
 temp-*.js
+tmp-*.js
+temp_*.js
+tmp_*.js
 check-*.js
 find-*.js
 revert-*.js
@@ -11,6 +14,7 @@ full-compare.js
 final-compare.js
 compare-*.js
 *.tmp
+tmp_api.json
 
 # Node
 node_modules/
@@ -20,6 +24,8 @@ test-dl.js
 备份.rar
 新建 文本文档.txt
 新建文件夹/
+7+捕获/
+原版_*.js
 
 # IDE
 .idea/
