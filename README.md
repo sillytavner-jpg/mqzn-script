@@ -4,21 +4,38 @@
 
 ## 快速开始
 
-### 1. 环境要求
+### 方式一：CDN 直链（推荐，无需安装任何东西）
+
+在 SillyTavern 扩展设置中，添加自定义脚本：
+
+```
+https://cdn.jsdelivr.net/gh/sillytavner-jpg/mqzn-script@master/index.js
+```
+
+保存刷新即可，无需 Node.js、无需本地服务器。
+
+### 方式二：本地服务器
+
+<details>
+<summary>点击展开</summary>
+
+#### 1. 环境要求
 
 - [Node.js](https://nodejs.org)（推荐 LTS 版本）
 
-### 2. 启动
+#### 2. 启动
 
 双击 `start.bat` 一键启动本地服务器。
 
-### 3. 配置 SillyTavern
+#### 3. 配置 SillyTavern
 
 在 SillyTavern 扩展设置中，添加自定义脚本：
 
 ```
 http://localhost:8888/index.js
 ```
+
+</details>
 
 ## 文件说明
 
