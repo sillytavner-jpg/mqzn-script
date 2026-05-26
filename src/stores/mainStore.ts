@@ -186,47 +186,42 @@ function migrateOldFormatToChatData(oldData: Record<string, unknown>): ChatData 
   return ChatDataSchema.parse(oldData);
 }
 
-const GLOBAL_CHAT_KEY = 'mqzn_chat_data';
-const GLOBAL_SETTINGS_KEY = 'mqzn_settings';
-/** 硬编码稳定ID，用于回退存储——不依赖 getScriptId()，换版本也不变 */
+const CHAT_DATA_KEY = 'mqzn_chat_data';
+const SETTINGS_KEY = 'mqzn_settings';
+/** 跨版本恢复用的稳定ID，不依赖 getScriptId() */
 const STABLE_ID = 'mqzn-script-data';
 
-function tryReadData(): { chatData: any; settings: any; migrated: boolean } {
-  // 1. 优先 global（版本无关，最稳定）
-  const g = getVariables({ type: 'global' }) ?? {};
-  if (g[GLOBAL_CHAT_KEY]) {
-    return { chatData: g[GLOBAL_CHAT_KEY], settings: g[GLOBAL_SETTINGS_KEY] ?? {}, migrated: false };
+function tryReadData(currentScriptId: string): { chatData: any; settings: any; migrated: boolean } {
+  // 1. 主存储：当前脚本的 type:'chat' + type:'script'（正常情况，script_id 不变）
+  const primaryChat = getVariables({ type: 'chat' });
+  const primaryScript = getVariables({ type: 'script', script_id: currentScriptId }) ?? {};
+  if (primaryChat && Object.keys(primaryChat).length > 0) {
+    return { chatData: primaryChat, settings: primaryScript, migrated: false };
+  }
+  if (primaryScript && Object.keys(primaryScript).length > 0) {
+    return { chatData: {}, settings: primaryScript, migrated: false };
   }
 
-  // 2. 回退：硬编码 script_id（跨版本稳定）
+  // 2. 跨版本恢复：硬编码 script_id（换版本后 script_id 变了，从这里恢复）
   const stable = getVariables({ type: 'script', script_id: STABLE_ID }) ?? {};
-  if (stable[GLOBAL_CHAT_KEY]) {
-    console.info('[智脑] 从硬编码ID恢复数据，迁移到 global...');
-    return { chatData: stable[GLOBAL_CHAT_KEY], settings: stable[GLOBAL_SETTINGS_KEY] ?? {}, migrated: true };
-  }
-
-  // 3. 回退：旧格式 type:'chat'（仅 script_id 没变时有效）
-  const oldChat = getVariables({ type: 'chat' });
-  if (oldChat && Object.keys(oldChat).length > 0) {
-    console.info('[智脑] 从旧 type:chat 迁移数据...');
-    return { chatData: oldChat, settings: getVariables({ type: 'script', script_id: getScriptId() }) ?? {}, migrated: true };
-  }
-
-  // 4. 回退：旧格式 type:'script'（仅 script_id 没变时有效）
-  const oldScript = getVariables({ type: 'script', script_id: getScriptId() });
-  if (oldScript && Object.keys(oldScript).length > 0) {
-    console.info('[智脑] 从旧 type:script 迁移数据...');
-    return { chatData: {}, settings: oldScript, migrated: true };
+  if (stable[CHAT_DATA_KEY] || (stable.personas && stable.personas.length > 0)) {
+    console.info('[智脑] 从跨版本备份恢复数据...');
+    return {
+      chatData: stable[CHAT_DATA_KEY] ?? {},
+      settings: stable[SETTINGS_KEY] ?? stable, // 兼容直接存的旧格式
+      migrated: true,
+    };
   }
 
   return { chatData: {}, settings: {}, migrated: false };
 }
 
 export const useMainStore = defineStore('main', () => {
-  // ========== 数据加载（三层回退：global → 硬编码ID → 旧格式） ==========
-  const { chatData: rawChatData, settings: rawSettings, migrated: migratedFromOld } = tryReadData();
-
+  const currentScriptId = getScriptId();
   const currentChatId = SillyTavern.getCurrentChatId();
+
+  // ========== 数据加载（主存储 → 跨版本备份回退） ==========
+  const { chatData: rawChatData, settings: rawSettings, migrated: migratedFromOld } = tryReadData(currentScriptId);
 
   // 旧格式迁移：旧版直接存扁平 ChatData，新版存 Record<chatId, ChatData>
   const needsMigration = rawChatData &&
@@ -240,15 +235,17 @@ export const useMainStore = defineStore('main', () => {
 
   const scriptData = ref<ScriptSettings>(ScriptSettingsSchema.parse(rawSettings ?? {}));
 
-  // 立即写入 global + 硬编码回退，双保险
+  // 迁移后立即写回，并同步到跨版本备份
   if (migratedFromOld || needsMigration) {
-    const saveData = {
-      [GLOBAL_CHAT_KEY]: klona(allChatsData.value),
-      [GLOBAL_SETTINGS_KEY]: klona(scriptData.value),
+    replaceVariables(klona(allChatsData.value), { type: 'chat' });
+    replaceVariables(klona(scriptData.value), { type: 'script', script_id: currentScriptId });
+    // 同步备份
+    const backup = {
+      [CHAT_DATA_KEY]: klona(allChatsData.value),
+      [SETTINGS_KEY]: klona(scriptData.value),
     };
-    replaceVariables(saveData, { type: 'global' });
-    replaceVariables(saveData, { type: 'script', script_id: STABLE_ID });
-    console.info('[智脑] 数据已写入 global + 硬编码回退');
+    replaceVariables(backup, { type: 'script', script_id: STABLE_ID });
+    console.info('[智脑] 数据已写回并同步跨版本备份');
   }
 
   // 从 allChatsData 中提取当前聊天的数据（不存在则初始化）
@@ -271,15 +268,18 @@ export const useMainStore = defineStore('main', () => {
   function setSummaryInProgress(v: boolean) { summaryInProgress.value = v; }
   function setDreamtalkInProgress(v: boolean) { dreamtalkInProgress.value = v; }
 
-  // 双写：global + 硬编码 script_id（换版本/刷新双重保险）
+  // 自动保存：主存储(chat+script) + 跨版本备份(hardcoded script_id)
   watchEffect(() => {
     allChatsData.value[currentChatId] = klona(chatData.value);
-    const saveData = {
-      [GLOBAL_CHAT_KEY]: klona(allChatsData.value),
-      [GLOBAL_SETTINGS_KEY]: klona(scriptData.value),
+    // 主存储
+    replaceVariables(klona(allChatsData.value), { type: 'chat' });
+    replaceVariables(klona(scriptData.value), { type: 'script', script_id: currentScriptId });
+    // 跨版本备份
+    const backup = {
+      [CHAT_DATA_KEY]: klona(allChatsData.value),
+      [SETTINGS_KEY]: klona(scriptData.value),
     };
-    replaceVariables(saveData, { type: 'global' });
-    replaceVariables(saveData, { type: 'script', script_id: STABLE_ID });
+    replaceVariables(backup, { type: 'script', script_id: STABLE_ID });
   });
 
   // ========== 便捷访问器 ==========
