@@ -202,6 +202,54 @@ function clearAllData() {
       </div>
     </div>
 
+    <!-- 自定义API -->
+    <div class="zhino-section">
+      <div class="zhino-section-title">自定义API（聊天补全）</div>
+
+      <label class="zhino-toggle-row">
+        <span class="zhino-toggle-label">使用自定义API</span>
+        <input type="checkbox"
+          :checked="store.settings.apiMode === 'custom'"
+          @change="store.updateSettings({
+            apiMode: ($event.target as HTMLInputElement).checked ? 'custom' : 'default'
+          })" />
+      </label>
+
+      <template v-if="store.settings.apiMode === 'custom'">
+        <div class="zhino-api-field">
+          <div class="zhino-detail-label">API地址</div>
+          <input
+            class="zhino-input"
+            :value="store.settings.customApiUrl"
+            @change="store.updateSettings({ customApiUrl: ($event.target as HTMLInputElement).value })"
+            placeholder="https://api.openai.com/v1"
+          />
+        </div>
+        <div class="zhino-api-field">
+          <div class="zhino-detail-label">API Key</div>
+          <input
+            class="zhino-input"
+            type="password"
+            :value="store.settings.customApiKey"
+            @change="store.updateSettings({ customApiKey: ($event.target as HTMLInputElement).value })"
+            placeholder="sk-..."
+          />
+        </div>
+        <div class="zhino-api-field">
+          <div class="zhino-detail-label">模型名称</div>
+          <input
+            class="zhino-input"
+            :value="store.settings.customApiModel"
+            @change="store.updateSettings({ customApiModel: ($event.target as HTMLInputElement).value })"
+            placeholder="gpt-4o"
+          />
+        </div>
+        <div class="zhino-api-hint">
+          填写API基础地址即可（/chat/completions 会自动补全，与酒馆原生行为一致）。<br/>自建提示词序列（大总结/梦呓/倒果为因/人格分析）通过此API发送。
+        </div>
+      </template>
+    </div>
+
     <!-- 用户人设（多配置） -->
     <div class="zhino-section">
       <div class="zhino-section-header">
@@ -603,5 +651,19 @@ function clearAllData() {
   max-width: 120px;
   padding: 2px 6px;
   font-size: 11px;
+}
+
+.zhino-api-field {
+  margin-top: 6px;
+}
+.zhino-api-hint {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(167, 139, 250, 0.06);
+  border: 1px solid rgba(167, 139, 250, 0.12);
+  border-radius: 4px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  line-height: 1.5;
 }
 </style>

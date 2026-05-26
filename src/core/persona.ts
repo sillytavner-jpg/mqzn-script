@@ -7,6 +7,8 @@
  * 3. 在 CHAT_COMPLETION_SETTINGS_READY 中，调用 injectPersona() 将人格画像注入提示词
  */
 
+import { callGenerateRaw } from '../utils/apiCaller';
+
 /**
  * 分析用户人设，生成结构化人格画像
  */
@@ -39,7 +41,7 @@ ${rawInput}
 
 请直接输出分析结果，不要有任何前言或解释。`;
 
-  const result = await generateRaw({
+  const result = await callGenerateRaw({
     user_input: userPrompt,
     ordered_prompts: [
       { role: 'system', content: systemPrompt },

@@ -18,6 +18,7 @@ import type {
 import type { NsfwCharacterMemory } from './nsfwIsolation';
 import { parseNsfwSection } from './nsfwIsolation';
 import { TUTORIAL_ESSENCE } from './tutorial-essence';
+import { callGenerateRaw } from '../utils/apiCaller';
 
 // ========== 破限头 (system) ==========
 
@@ -402,7 +403,7 @@ export async function executeGrandSummary(
   const instruction = buildSummaryInstruction(summaryVersion);
   const inputMaterial = buildInputMaterial(capturedContents, previousSummary); // 使用 generateRaw 自建提示词序列
 
-  const rawResult = await generateRaw({
+  const rawResult = await callGenerateRaw({
     user_input: inputMaterial,
     should_silence: true,
     max_chat_history: 0,

@@ -10,6 +10,7 @@
  */
 
 import { TUTORIAL_ESSENCE } from './tutorial-essence';
+import { callGenerateRaw } from '../utils/apiCaller';
 import { isNsfwActive } from './nsfwIsolation';
 import type { CapturedContent, GrandSummary } from '../stores/mainStore';
 
@@ -226,7 +227,7 @@ export async function executePlotFateAnalysis(
   const instruction = buildPlotFateInstruction(previousFates, currentRhythm);
   const inputMaterial = buildPlotFateMaterial(latestSummary, recentContents);
 
-  const rawResult = await generateRaw({
+  const rawResult = await callGenerateRaw({
     user_input: inputMaterial,
     should_silence: true,
     max_chat_history: 0,

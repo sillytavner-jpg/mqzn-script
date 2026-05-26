@@ -13,6 +13,7 @@ import type { CapturedContent } from '../stores/mainStore';
 import type { NsfwDreamtalkData } from './nsfwIsolation';
 import { parseNsfwDreamtalk } from './nsfwIsolation';
 import { TUTORIAL_ESSENCE } from './tutorial-essence';
+import { callGenerateRaw } from '../utils/apiCaller';
 
 // ========== 梦呓数据结构 ==========
 
@@ -253,7 +254,7 @@ export async function executeDreamtalkAnalysis(
   const instruction = buildDreamtalkInstruction();
   const inputMaterial = buildDreamtalkMaterial(userInputs, userPersonaRaw);
 
-  const rawResult = await generateRaw({
+  const rawResult = await callGenerateRaw({
     user_input: inputMaterial,
     should_silence: true,
     max_chat_history: 0,

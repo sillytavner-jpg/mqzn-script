@@ -110,6 +110,11 @@ export interface ScriptSettings {
     emotionEnabled: boolean;
     emotionInterval: number;
     summaryInterval: number;
+    // 自定义API
+    apiMode: string;
+    customApiUrl: string;
+    customApiKey: string;
+    customApiModel: string;
   };
 }
 
@@ -159,6 +164,11 @@ const ScriptSettingsSchema = z
         emotionEnabled: z.boolean().prefault(true),
         emotionInterval: z.coerce.number().prefault(6),
         summaryInterval: z.coerce.number().prefault(10),
+        // 自定义API
+        apiMode: z.string().prefault('default'),
+        customApiUrl: z.string().prefault(''),
+        customApiKey: z.string().prefault(''),
+        customApiModel: z.string().prefault(''),
       })
       .prefault({}),
   })
