@@ -176,6 +176,15 @@ const ScriptSettingsSchema = z
 
 // ========== Store ==========
 
+/**
+ * 旧格式迁移：旧版直接存储扁平 ChatData 对象（无 chatId 字段），
+ * 返回 ChatData 对象供调用方以当前 chatId 为 key 存入 Record。
+ */
+function migrateOldFormatToChatData(oldData: Record<string, unknown>): ChatData {
+  console.info('[智脑] 检测到旧格式聊天数据，正在迁移...');
+  return ChatDataSchema.parse(oldData);
+}
+
 export const useMainStore = defineStore('main', () => {
   // 从脚本变量加载全局设置
   const scriptData = ref<ScriptSettings>(
@@ -187,11 +196,24 @@ export const useMainStore = defineStore('main', () => {
    * 酒馆的 getVariables({ type: 'chat' }) 实际上按 script_id 全局存储，
    * 并非按聊天隔离，所以这里用一个 Record<chatId, ChatData> 来手动隔离。
    */
+  const currentChatId = SillyTavern.getCurrentChatId();
+  const rawData = getVariables({ type: 'chat' });
+
+  // 旧格式迁移：旧版直接存扁平 ChatData，新版存 Record<chatId, ChatData>
+  // 判断：旧格式顶层有 summaries/capturedContents 等 ChatData 属性，新格式顶层是 chatId 字符串
+  const needsMigration = rawData && (rawData.summaries !== undefined || rawData.capturedContents !== undefined);
+
   const allChatsData = ref<Record<string, ChatData>>(
-    getVariables({ type: 'chat' }) ?? {},
+    needsMigration
+      ? { [currentChatId]: migrateOldFormatToChatData(rawData) }
+      : (rawData ?? {}),
   );
 
-  const currentChatId = SillyTavern.getCurrentChatId();
+  // 迁移后立即写回存储，防止 watchEffect 读到旧格式后丢弃数据
+  if (needsMigration) {
+    replaceVariables(klona(allChatsData.value), { type: 'chat' });
+    console.info('[智脑] 旧格式数据已迁移并保存');
+  }
 
   // 从 allChatsData 中提取当前聊天的数据（不存在则初始化）
   const chatData = ref<ChatData>(
@@ -220,7 +242,9 @@ export const useMainStore = defineStore('main', () => {
 
   // 自动保存聊天变量（写入 allChatsData，以 chatId 为 key）
   watchEffect(() => {
-    const allData = getVariables({ type: 'chat' }) ?? {};
+    const raw = getVariables({ type: 'chat' }) ?? {};
+    // 存储中可能还有旧格式（扁平 ChatData），检测到则丢弃从头写新格式
+    const allData = (raw.summaries !== undefined || raw.capturedContents !== undefined) ? {} : raw;
     allData[currentChatId] = klona(chatData.value);
     replaceVariables(allData, { type: 'chat' });
   });
@@ -661,6 +685,12 @@ export const useMainStore = defineStore('main', () => {
       }
       if (parsed.chatData) {
         chatData.value = ChatDataSchema.parse(parsed.chatData);
+        // 旧版备份没有 chatId，补填当前聊天ID
+        if (!chatData.value.chatId) {
+          chatData.value.chatId = currentChatId;
+        }
+        console.info(`[智脑] 数据导入成功 (总结: ${chatData.value.summaries.length}, 梦呓: ${chatData.value.dreamtalk ? '有' : '无'}, 捕获: ${chatData.value.capturedContents.length})`);
+        return;
       }
       console.info('[智脑] 数据导入成功');
     } catch (e) {
