@@ -97,29 +97,32 @@ function buildSummaryInstruction(): string {
     '',
     '### 第二部分：角色记忆',
     '',
-    '每个对剧情有影响的角色，用符合该角色人设的第一人称视角，生成5-8条她/他与{{user}}之间的记忆。',
+    '每个对剧情有影响的角色，分两步完成。',
     '',
-    '每条记忆生成后，必须逐条对照以下5条"核心记忆判定标准"进行判断：',
+    '【步骤一：生成记忆】',
+    '为每个角色生成5-8条记忆，每条用数字编号（1. 2. 3...），符合该角色人设的第一人称视角。',
+    '此时不要标记核心或近期，只客观记录。',
     '',
-    '【核心记忆判定标准】',
+    '记忆书写规则：',
+    '- 喜欢{{user}}的角色：记住更多细节，会"美化"记忆，细节清晰到连当时的天气、对方穿什么都记得',
+    '- 厌恶{{user}}的角色：记忆存在恶意抹黑和偏差，选择性记住不舒服的地方，忽略或扭曲{{user}}的善意',
+    '- 中立的角色：对非重要的事"记不住"或只有"模糊的概念"',
+    '',
+    '【步骤二：核心判定】',
+    '所有角色记忆全部生成完毕后，再对每个角色的记忆逐条对照以下5项标准进行判定：',
+    '',
+    '核心记忆判定标准：',
     '1. 是否改变了角色对{{user}}的态度或看法？（态度转折点）',
     '2. 是否暴露了角色的核心恐惧、深层缺失或防御机制？（人格暴露）',
     '3. 角色是否产生了强烈情绪波动？（愤怒/喜悦/嫉妒/羞耻/恐惧等）',
     '4. 角色与{{user}}关系是否发生了质变？（关系节点）',
     '5. 角色是否做出了不符合平时行为模式的特殊举动？（反常行为）',
     '',
-    '满足以上任意1条 → 标记为[核心]',
-    '以上5条全部不满足 → 标记为[近期]',
-    '',
-    '【硬性限制】',
-    '- 每个角色每轮最多标记3条[核心]记忆',
-    '- 如果多条记忆满足核心标准（>3条），只保留最重要的3条标记为[核心]，其余降为[近期]',
-    '- 最少标记1条[核心]（除非该角色的所有记忆确实都不满足任何核心标准）',
-    '',
-    '【记忆书写规则】',
-    '- 喜欢{{user}}的角色：记住更多细节，会"美化"记忆，细节清晰到连当时的天气、对方穿什么都记得',
-    '- 厌恶{{user}}的角色：记忆存在恶意抹黑和偏差，选择性记住不舒服的地方，忽略或扭曲{{user}}的善意',
-    '- 中立的角色：对非重要的事"记不住"或只有"模糊的概念"',
+    '判定规则：',
+    '- 对照以上5条标准，检查每一条记忆分别满足哪些标准',
+    '- 满足任意标准的记忆为候选核心，完全不满足的为近期',
+    '- 从候选核心中挑选最重要的1-3条作为最终核心（最少1条，最多3条）',
+    '- 所有记忆都不满足任何标准时，也必须选1条最重要的标记为核心',
     '',
     '格式：',
     '```',
@@ -128,9 +131,14 @@ function buildSummaryInstruction(): string {
     '别名: {该角色的所有称呼，逗号分隔}',
     '态度: {like|dislike|neutral}',
     '关键词: {用于激活该角色记忆的关键词，逗号分隔，5-10个}',
-    '- [核心][剧情日期] {满足核心判定标准的记忆，最多3条}',
-    '- [近期][剧情日期] {不满足核心判定标准的记忆}',
+    '记忆:',
+    '1. [剧情日期] {第一人称记忆内容}',
+    '2. [剧情日期] {第一人称记忆内容}',
     '..',
+    '',
+    '核心判定:',
+    '{逐条说明各记忆满足哪些标准}',
+    '最终核心: {条目编号，逗号分隔，如 1, 3, 5}',
     '```',
     '',
     '---SECTION---',
@@ -290,7 +298,9 @@ function parseNarrativeSummarySection(section: string): TimelineEvent[] {
 }
 
 /**
- * 解析角色记忆部分（支持 [核心] 和 [近期] 标记）
+ * 解析角色记忆部分
+ * 新格式：AI 先生成编号记忆（1. 2. 3...），再在"最终核心:"中指定哪些是核心
+ * 代码据此将记忆分为 coreMemories / recentMemories
  */
 function parseCharacterMemorySection(section: string): CharacterMemory[] {
   const memories: CharacterMemory[] = [];
@@ -301,7 +311,6 @@ function parseCharacterMemorySection(section: string): CharacterMemory[] {
     if (lines.length === 0) continue;
 
     const characterName = lines[0].trim();
-    // 过滤掉非角色名的标题行
     if (!characterName) continue;
     if (/^\[.*\]$/.test(characterName)) continue;
     if (/部分|记忆|时间线|动态人设|剧情摘要|SECTION/i.test(characterName)) continue;
@@ -309,41 +318,98 @@ function parseCharacterMemorySection(section: string): CharacterMemory[] {
     let attitude: 'like' | 'dislike' | 'neutral' = 'neutral';
     let keywords: string[] = [];
     let aliases: string[] = [];
-    const coreMemoryItems: string[] = [];
-    const recentMemoryItems: string[] = [];
+    let coreIndices: Set<number> = new Set();
+    const numberedMemories: string[] = [];  // index 0 = 编号1
+
+    let inMemorySection = false;
+    let inJudgmentSection = false;
 
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
+      if (!line) continue;
+
       if (line.startsWith('别名:') || line.startsWith('别名：')) {
-        aliases = line
-          .replace(/^别名[:：]\s*/, '')
-          .split(/[,，、]/)
-          .map(k => k.trim())
-          .filter(Boolean);
-      } else if (line.startsWith('态度:') || line.startsWith('态度：')) {
-        const val = line
-          .replace(/^态度[:：]\s*/, '')
-          .trim()
-          .toLowerCase();
-        if (val === 'like' || val === 'dislike' || val === 'neutral') {
-          attitude = val;
+        aliases = line.replace(/^别名[:：]\s*/, '').split(/[,，、]/).map(k => k.trim()).filter(Boolean);
+        continue;
+      }
+      if (line.startsWith('态度:') || line.startsWith('态度：')) {
+        const val = line.replace(/^态度[:：]\s*/, '').trim().toLowerCase();
+        if (val === 'like' || val === 'dislike' || val === 'neutral') attitude = val;
+        continue;
+      }
+      if (line.startsWith('关键词:') || line.startsWith('关键词：')) {
+        keywords = line.replace(/^关键词[:：]\s*/, '').split(/[,，、]/).map(k => k.trim()).filter(Boolean);
+        continue;
+      }
+
+      // 进入记忆列表区
+      if (line === '记忆:' || line === '记忆：') {
+        inMemorySection = true;
+        inJudgmentSection = false;
+        continue;
+      }
+
+      // 进入核心判定区
+      if (line.startsWith('核心判定') || line.startsWith('最终核心')) {
+        inMemorySection = false;
+        inJudgmentSection = true;
+      }
+
+      if (inMemorySection) {
+        // 解析编号记忆：1. [日期] 内容
+        const numMatch = line.match(/^(\d+)\.\s*(.+)/);
+        if (numMatch) {
+          const num = parseInt(numMatch[1], 10);
+          const content = numMatch[2].trim();
+          // 确保数组足够大
+          while (numberedMemories.length < num) numberedMemories.push('');
+          numberedMemories[num - 1] = content;
         }
-      } else if (line.startsWith('关键词:') || line.startsWith('关键词：')) {
-        keywords = line
-          .replace(/^关键词[:：]\s*/, '')
-          .split(/[,，、]/)
-          .map(k => k.trim())
-          .filter(Boolean);
-      } else if (line.startsWith('- ')) {
-        const memContent = line.slice(2).trim();
-        // 检测 [核心] 或 [近期] 标记
-        if (memContent.startsWith('[核心]')) {
-          coreMemoryItems.push(memContent.replace(/^\[核心\]\s*/, ''));
-        } else if (memContent.startsWith('[近期]')) {
-          recentMemoryItems.push(memContent.replace(/^\[近期\]\s*/, ''));
+        continue;
+      }
+
+      if (inJudgmentSection) {
+        // 解析 "最终核心: 1, 3, 5" 或 "最终核心：1，3，5"
+        if (line.startsWith('最终核心')) {
+          const numsStr = line.replace(/^最终核心[:：]\s*/, '');
+          const nums = numsStr.split(/[,，、\s]+/).filter(Boolean);
+          for (const n of nums) {
+            const parsed = parseInt(n, 10);
+            if (!isNaN(parsed) && parsed >= 1) {
+              coreIndices.add(parsed);
+            }
+          }
+          // 硬上限：最多3条核心
+          if (coreIndices.size > 3) {
+            const sorted = [...coreIndices].sort((a, b) => a - b);
+            coreIndices = new Set(sorted.slice(0, 3));
+          }
+        }
+        continue;
+      }
+    }
+
+    // 分类记忆
+    const coreMemoryItems: string[] = [];
+    const recentMemoryItems: string[] = [];
+
+    if (numberedMemories.length > 0) {
+      for (let idx = 0; idx < numberedMemories.length; idx++) {
+        if (!numberedMemories[idx]) continue;
+        if (coreIndices.has(idx + 1)) {
+          coreMemoryItems.push(numberedMemories[idx]);
         } else {
-          // 无标记的默认归入近期记忆
-          recentMemoryItems.push(memContent);
+          recentMemoryItems.push(numberedMemories[idx]);
+        }
+      }
+
+      // 兜底：如果 AI 没有输出核心判定或核心为空，前3条当核心
+      if (coreMemoryItems.length === 0 && coreIndices.size === 0) {
+        const fallbackCore = numberedMemories.slice(0, Math.min(3, numberedMemories.length));
+        coreMemoryItems.push(...fallbackCore);
+        for (const core of fallbackCore) {
+          const idx = numberedMemories.indexOf(core);
+          if (idx !== -1) recentMemoryItems.splice(recentMemoryItems.indexOf(core), 1);
         }
       }
     }
@@ -549,7 +615,7 @@ export async function executeGrandSummary(
 
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
-    // 首次总结：AI 已自行标记核心/近期，直接使用
+    // 首次总结：parseCharacterMemorySection 已根据"最终核心"标注了核心/近期，直接使用
     newParsed.rawText = outputText;
   } else {
     // ===== 2. 代码拼接：AI 新输出 + 旧总结合并 =====
