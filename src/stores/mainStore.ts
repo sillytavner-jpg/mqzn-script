@@ -288,10 +288,11 @@ export const useMainStore = defineStore('main', () => {
     const previousSummary = getLatestSummary();
 
     // 记忆分层合并逻辑
-    if (summary.version ===1) {
-      // 第一次大总结：所有记忆都标记为核心记忆
+    if (summary.version === 1) {
+      // 第一次大总结：合并 core + recent（AI可能输出[核心]或[近期]或无标记），全部归为核心
       for (const mem of summary.characterMemories) {
-        mem.coreMemories = [...mem.recentMemories].slice(0, 5);
+        const allMemories = [...mem.coreMemories, ...mem.recentMemories];
+        mem.coreMemories = allMemories.slice(0, 5);
         mem.recentMemories = [];
       }
     } else if (previousSummary) {
@@ -303,12 +304,13 @@ export const useMainStore = defineStore('main', () => {
         if (prevMem) {
           // 保留之前的核心记忆
           mem.coreMemories = prevMem.coreMemories;
-          // 新生成的记忆作为近期记忆（最多保留8条）
-          mem.recentMemories = mem.recentMemories.slice(0, 8);
+          // 新生成的记忆作为近期记忆（最多保留8条，合并解析出的core+recent）
+          mem.recentMemories = [...mem.coreMemories, ...mem.recentMemories].slice(0, 8);
         } else {
-          // 新角色：前3条作为核心，其余作为近期
-          mem.coreMemories = mem.recentMemories.slice(0, 3);
-          mem.recentMemories = mem.recentMemories.slice(3, 11);
+          // 新角色：合并解析出的core+recent，前3条作为核心，其余作为近期
+          const allMemories = [...mem.coreMemories, ...mem.recentMemories];
+          mem.coreMemories = allMemories.slice(0, 3);
+          mem.recentMemories = allMemories.slice(3, 11);
         }
       }
     }
