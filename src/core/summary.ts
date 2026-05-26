@@ -42,26 +42,15 @@ const ASSISTANT_PREFILL = [
 ].join('\n');
 
 // ======== 大总结专项指令 =========
+// v2: AI 只总结新楼层，旧内容由代码拼接，大幅减少 token 消耗
 
-function buildSummaryInstruction(summaryVersion: number): string {
-  const isFirstSummary = summaryVersion === 1;
+function buildSummaryInstruction(): string {
   return [
     'Mingyue: 秋青子，现在需要你执行一项精准的数据整理任务。',
     '',
-    '## ⚠️ 最高优先级铁律（违反即任务失败）',
-    '',
-    isFirstSummary
-      ? '- 这是首次总结，所有内容均来自本次日志。'
-      : [
-          '- **你必须逐条完整输出前次大总结中的所有 [#序号] 剧情事件，一条都不能少！**',
-          '- 旧事件保持原有 [#序号] 和 [剧情日期] 完全不变（直接复制），新事件接着旧事件最大序号继续编号',
-          '- **先原样列出旧摘要的所有事件，再在后面追加新事件**——禁止跳过、省略、合并任何旧条目',
-          '- 前次大总结中的 [核心] 角色记忆必须原样保留，禁止删除或修改',
-        ].join('\n'),
-    '',
     '## 任务说明',
     '',
-    '你需要阅读我提供的剧情日志，将其整理为三个部分。这不是创作，是数据整理。',
+    '你需要阅读我提供的剧情日志，将其整理为四个部分。这不是创作，是数据整理。',
     '',
     '你必须先在<think></think>中进行思考分析，然后在</think>后的<content>标签内输出正式结果。',
     '',
@@ -75,26 +64,21 @@ function buildSummaryInstruction(summaryVersion: number): string {
     '5. 分析核心人格层：表层欲望、深层缺失、核心恐惧、防御机制',
     '6. 判定每个角色对{{user}}的态度（like/dislike/neutral）',
     '7. 提取关键事件并组织为叙事摘要（客观白描，保留关键对话原文）',
-    '8. 确认哪些是新增内容，哪些需要与前次大总结合并（旧事件保留原编号，新事件接续编号）',
     '',
     '## 输出格式（严格遵循，不得偏离）',
     '',
-    '在</think>后，你必须在<content>标签内按以下格式输出，用 `---SECTION---` 分隔三个部分：',
+    '在</think>后，你必须在<content>标签内按以下格式输出，用 `---SECTION---` 分隔四个部分：',
     '',
     '### 第一部分：剧情摘要',
     '',
     '以叙事方式概括剧情，每个事件段落以 [#序号][剧情日期] 开头，用1-3句话概括事件。',
-    isFirstSummary
-      ? '所有事件从 [#1] 开始按顺序编号。'
-      : '⚠️ **先原样列出前次大总结中的所有 [#序号] 事件（一字不改），再追加本次新事件。旧事件一个都不能少！**',
-    '所有事件从 [#1] 开始按顺序编号，新事件接着旧事件的最大编号继续编号（如旧总结最大为 [#5]，新事件从 [#6] 开始）。',
+    '事件从 [#1] 开始按顺序编号。',
     '**时间必须从正文中的时空栏（```地点·日期·星期·时间```）或 [时间 xxx] 标记中提取，这是剧情内时间，不是现实时间。**',
     '保留关键对话原文。禁止修辞比喻，客观白描。',
     '',
     '格式：',
     '```',
     '[剧情摘要]',
-    ...[isFirstSummary ? [] : ['[#1][剧情日期] （来自前次大总结，原样保留）角色A在某地做了某事。角色B说"关键对话原文"。']],
     '[#1][剧情日期] 角色A在某地做了某事。角色B说"关键对话原文"。角色A回应后离开。',
     '',
     '[#2][剧情日期] 后续事件的叙事概括。保留重要对话原文。',
@@ -103,7 +87,7 @@ function buildSummaryInstruction(summaryVersion: number): string {
     '```',
     '',
     '规则：',
-    '- 每个段落以 [#序号][剧情日期] 开头（日期精确到日），序号从1开始递增，每个事件独占一个序号',
+    '- 每个段落以 [#序号][剧情日期] 开头，序号从1开始递增，每个事件独占一个序号',
     '- 用1-3句话概括该时间段的核心事件',
     '- 保留关键对话原文（用引号标注）',
     '- 禁止修辞比喻，客观白描',
@@ -114,16 +98,13 @@ function buildSummaryInstruction(summaryVersion: number): string {
     '### 第二部分：角色记忆',
     '',
     '每个对剧情有影响的角色，用符合该角色人设的第一人称视角，记录她/他与{{user}}之间的记忆。',
-    '',
-    isFirstSummary
-      ? '**这是第一次大总结，所有记忆标记为 [核心]，每个角色3-5条核心记忆。**'
-      : '**记忆分为两类：[核心] 为永久记忆（保留前次的核心记忆不变），[近期] 为本次新增记忆（5-8条）。**',
+    '每个角色3-5条记忆。',
     '',
     '记忆规则：',
     '- 喜欢{{user}}的角色：记住更多细节，会"美化"记忆，细节清晰到连当时的天气、对方穿什么都记得',
     '- 厌恶{{user}}的角色：记忆存在恶意抹黑和偏差，选择性记住不舒服的地方，忽略或扭曲{{user}}的善意',
     '- 中立的角色：对非重要的事"记不住"或只有"模糊的概念"',
-    '- **每条记忆必须标注剧情时间和层级**，格式为 [核心][剧情日期] 或 [近期][剧情日期]（从时空栏提取）',
+    '- **每条记忆标注剧情时间**，格式为 [剧情日期]（从时空栏提取）',
     '',
     '格式：',
     '```',
@@ -132,9 +113,7 @@ function buildSummaryInstruction(summaryVersion: number): string {
     '别名: {该角色的所有称呼，逗号分隔}',
     '态度: {like|dislike|neutral}',
     '关键词: {用于激活该角色记忆的关键词，逗号分隔，5-10个}',
-    isFirstSummary
-      ? '- [核心][剧情日期] {第一人称记忆}'
-      : '- [核心][剧情日期] {保留的核心记忆}\n- [近期][剧情日期] {本次新增的近期记忆}',
+    '- [剧情日期] {第一人称记忆}',
     '..',
     '```',
     '',
@@ -174,14 +153,9 @@ function buildSummaryInstruction(summaryVersion: number): string {
     '',
     '## 铁律',
     '',
-    `- 这是第 ${summaryVersion} 次大总结`,
     '- 禁止创作新内容，只整理已有信息',
     '- 禁止使用任何修辞手法（剧情摘要部分）',
     '- 角色记忆必须用第一人称',
-    isFirstSummary
-      ? '- 所有记忆标记为 [核心]'
-      : '- 前次大总结中的 [核心] 记忆必须原样保留，只新增 [近期] 记忆',
-    '- 如果有前次大总结，按 [#序号] 顺序合并：旧事件保持原有编号不变，新事件从旧事件最大编号+1开始逐一递增',
     '- 路人NPC不保留，只保留对剧情有影响的角色',
   ].join('\n');
 }
@@ -215,28 +189,15 @@ function extractStoryTimeFromContent(content: string): string {
   return '';
 }
 
-// ========== 构建输入材料 ==========
+// ========== 构建输入材料（仅新楼层，旧内容由代码拼接） ==========
 
-function buildInputMaterial(capturedContents: CapturedContent[], previousSummary: GrandSummary | undefined): string {
+function buildInputMaterial(capturedContents: CapturedContent[]): string {
   const parts: string[] = [];
-
-  if (previousSummary) {
-    // 只保留前三个 SECTION（剧情摘要 + 角色记忆 + 动态人设），NSFW每次重新生成不需要喂回去
-    const sections = previousSummary.rawText.split(/---SECTION---/i);
-    const slimmedText = sections.slice(0, 3).join('\n---SECTION---\n');
-    parts.push('## ⚠️ 前次大总结（必须逐条原样列入新总结中，绝对不可遗漏！）');
-    parts.push('');
-    parts.push(slimmedText);
-    parts.push('');
-    parts.push('--- 以上旧摘要内容必须全部保留，新内容在下方 ---');
-    parts.push('');
-  }
 
   parts.push('## 本次剧情日志（共 ' + capturedContents.length + ' 条）');
   parts.push('');
 
   for (const item of capturedContents) {
-    // 从正文中提取剧情时间（时空栏格式：```地点·日期·星期·时间```）
     const storyTime = extractStoryTimeFromContent(item.content);
     const timeLabel = storyTime ? ` [${storyTime}]` : '';
     parts.push(`### 楼层 #${item.messageId}${timeLabel}`);
@@ -409,6 +370,56 @@ export function parseSummaryOutput(rawText: string, summaryVersion: number): Par
   return { timeline, characterMemories, dynamicProfiles, characterTable, nsfwMemories, rawText };
 }
 
+// ========== 代码拼接：新旧大总结合并 ==========
+
+/** 从旧 timeline 中提取最大事件序号 */
+function extractMaxTimelineNumber(timeline: TimelineEvent[]): number {
+  let maxNum = 0;
+  for (const e of timeline) {
+    if (e.time?.startsWith('#')) {
+      const num = parseInt(e.time.slice(1), 10);
+      if (!isNaN(num)) maxNum = Math.max(maxNum, num);
+    }
+  }
+  return maxNum;
+}
+
+/** 将文本中的 [#N] 序号统一加上偏移量 */
+function renumberEventsInText(text: string, offset: number): string {
+  if (offset <= 0) return text;
+  return text.replace(/\[#(\d+)\]/g, (_, num) => `[#${parseInt(num, 10) + offset}]`);
+}
+
+/** 从合并后的角色记忆中重建 SECTION 2 文本 */
+function buildMemorySectionText(memories: CharacterMemory[]): string {
+  const parts = ['[角色记忆]'];
+  for (const m of memories) {
+    parts.push(`### ${m.characterName}`);
+    if (m.aliases?.length) parts.push(`别名: ${m.aliases.join(', ')}`);
+    parts.push(`态度: ${m.attitude}`);
+    if (m.keywords?.length) parts.push(`关键词: ${m.keywords.join(', ')}`);
+    for (const core of m.coreMemories || []) {
+      parts.push(`- [核心]${core}`);
+    }
+    for (const recent of m.recentMemories || []) {
+      parts.push(`- [近期]${recent}`);
+    }
+    parts.push('');
+  }
+  return parts.join('\n');
+}
+
+/** 从合并后的动态人设中重建 SECTION 3 文本 */
+function buildProfileSectionText(profiles: DynamicProfile[]): string {
+  const parts = ['[动态人设]'];
+  for (const p of profiles) {
+    parts.push(`### ${p.characterName}`);
+    parts.push(p.dynamicContent);
+    parts.push('');
+  }
+  return parts.join('\n');
+}
+
 // ========== 主函数：执行大总结 ==========
 
 export async function executeGrandSummary(
@@ -416,72 +427,132 @@ export async function executeGrandSummary(
   previousSummary: GrandSummary | undefined,
 ): Promise<{ summary: GrandSummary; dynamicProfiles: DynamicProfile[]; nsfwMemories: NsfwCharacterMemory[] }> {
   const summaryVersion = (previousSummary?.version || 0) + 1;
+  const isFirstSummary = !previousSummary;
 
   if (capturedContents.length === 0) {
     throw new Error('没有可用的正文日志');
   }
 
-  const instruction = buildSummaryInstruction(summaryVersion);
-  const inputMaterial = buildInputMaterial(capturedContents, previousSummary); // 使用 generateRaw 自建提示词序列
+  // ===== 1. AI 仅总结新楼层（不喂旧总结，大幅减少 token）=====
+  const instruction = buildSummaryInstruction();
+  const inputMaterial = buildInputMaterial(capturedContents);
 
   const rawResult = await callGenerateRaw({
     user_input: inputMaterial,
     should_silence: true,
     max_chat_history: 0,
     ordered_prompts: [
-      // 破限头 (system)
       { role: 'system', content: JAILBREAK_HEAD },
-      // 道德自攻击 (assistant)
       { role: 'assistant', content: MORAL_ATTACK },
-      // 教程精华遵循资料 (system) — AI必须按此体系分析角色
       { role: 'system', content: TUTORIAL_ESSENCE },
-      // 大总结专项指令 (system)
       { role: 'system', content: instruction },
-      // 输入材料 (user)
       'user_input',
-      // 尾部 prefill (assistant) — 跳过原生思维链，进入自定义思维链
       { role: 'assistant', content: ASSISTANT_PREFILL },
     ],
-  }); // 剥离思维链，提取 <content> 内的正式输出
+  });
 
-  let outputText = rawResult; // 去掉 </think>之前的思维链部分
-
+  // 提取 <content> 内的正式输出
+  let outputText = rawResult;
   const thinkingEnd = outputText.indexOf('</think>');
   if (thinkingEnd !== -1) {
     outputText = outputText.slice(thinkingEnd + '</think>'.length);
-  } // 提取 <content> 内的内容
-
+  }
   const contentMatch = outputText.match(/<content>([\s\S]*?)(?:<\/content>|$)/i);
   if (contentMatch) {
     outputText = contentMatch[1].trim();
   } else {
     outputText = outputText.trim();
-  } // 解析输出
-
-  const parsed = parseSummaryOutput(outputText, summaryVersion);
-
-  // 解析校验：如果本次解析出的角色记忆比上次锐减超过50%，说明AI输出格式异常，拒绝写入
-  if (
-    previousSummary &&
-    parsed.characterMemories.length < previousSummary.characterMemories.length * 0.5
-  ) {
-    console.error(
-      '[智脑] 解析结果异常（角色记忆数量锐减超过50%），放弃本次总结',
-      { old: previousSummary.characterMemories.length, new: parsed.characterMemories.length },
-    );
-    throw new Error('解析失败：角色记忆异常减少，请检查 AI 输出格式');
   }
 
+  const newParsed = parseSummaryOutput(outputText, summaryVersion);
+
+  // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
+  if (isFirstSummary) {
+    // 首次总结：所有记忆归为核心（addSummary 也会处理，这里先归一化方便 rawText 重建）
+    for (const mem of newParsed.characterMemories) {
+      mem.coreMemories = [...mem.coreMemories, ...mem.recentMemories];
+      mem.recentMemories = [];
+    }
+  } else {
+    // ===== 2. 代码拼接：AI 新输出 + 旧总结合并 =====
+    const newSections = outputText.split(/---SECTION---/i);
+    const oldSections = previousSummary!.rawText.split(/---SECTION---/i);
+    const oldMemMap = new Map(
+      previousSummary!.characterMemories.map(m => [m.characterName, m]),
+    );
+
+    // --- Section 1：旧事件 + 重编号新事件 ---
+    const offset = extractMaxTimelineNumber(previousSummary!.timeline);
+    const newS1Renumbered = renumberEventsInText(newSections[0] || '', offset);
+    const mergedSection1 =
+      (oldSections[0] || '').trim() +
+      '\n\n' +
+      newS1Renumbered.replace(/^\[剧情摘要\]\s*/i, '').trim();
+
+    // --- Section 2：角色记忆合并 ---
+    // AI 输出的记忆全在 recentMemories（parseCharacterMemorySection 对无标记默认归入 recentMemories）
+    // addSummary 会从 store 的 previousSummary 恢复 coreMemories，这里只需做 rawText 展示用预合并
+    for (const newMem of newParsed.characterMemories) {
+      const oldMem = oldMemMap.get(newMem.characterName);
+      // AI 输出全部移入 recentMemories（parseCharacterMemorySection 可能部分在 coreMemories）
+      const aiAll = [...newMem.coreMemories, ...newMem.recentMemories];
+      if (oldMem) {
+        newMem.coreMemories = oldMem.coreMemories; // 展示用：核心记忆从旧总结取
+        newMem.recentMemories = aiAll;              // AI 新输出归为近期
+        oldMemMap.delete(newMem.characterName);
+      } else {
+        newMem.coreMemories = [];                   // 新角色：addSummary 会分配前3条为核心
+        newMem.recentMemories = aiAll;
+      }
+    }
+    // 旧角色未出现在新日志中：保留占位
+    for (const [name, oldMem] of oldMemMap) {
+      newParsed.characterMemories.push({
+        characterName: name,
+        aliases: oldMem.aliases,
+        attitude: oldMem.attitude,
+        keywords: oldMem.keywords,
+        coreMemories: oldMem.coreMemories,
+        recentMemories: [],
+      });
+    }
+    const mergedSection2 = buildMemorySectionText(newParsed.characterMemories);
+
+    // --- Section 3：动态人设（只用新的，旧人设由 store.dynamicProfiles 保留）---
+    const mergedSection3 = buildProfileSectionText(
+      newParsed.dynamicProfiles.map(p => ({ ...p, basedOnSummaryVersion: summaryVersion })),
+    );
+
+    // --- Section 4：NSFW（只用新的）---
+    const mergedSection4 = (newSections[3] || '').trim();
+
+    // --- 重建 rawText ---
+    outputText = [
+      mergedSection1,
+      '---SECTION---',
+      mergedSection2,
+      '---SECTION---',
+      mergedSection3,
+      '---SECTION---',
+      mergedSection4,
+    ].join('\n');
+
+    // 更新解析结果
+    newParsed.timeline = parseNarrativeSummarySection(mergedSection1);
+    newParsed.rawText = outputText;
+  }
+
+  // ===== 3. 构建返回的 GrandSummary =====
   const summary: GrandSummary = {
     version: summaryVersion,
     generatedAt: new Date().toISOString(),
-    characterMemories: parsed.characterMemories,
-    timeline: parsed.timeline,
-    characterTable: parsed.characterTable,
+    characterMemories: newParsed.characterMemories,
+    timeline: newParsed.timeline,
+    characterTable: newParsed.characterTable,
     rawText: outputText,
   };
 
-  return { summary, dynamicProfiles: parsed.dynamicProfiles, nsfwMemories: parsed.nsfwMemories };
+  return { summary, dynamicProfiles: newParsed.dynamicProfiles, nsfwMemories: newParsed.nsfwMemories };
 }
 
 /** 保留最新的AI发言数量（不参与总结和隐藏） */
