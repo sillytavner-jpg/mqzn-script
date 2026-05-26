@@ -48,6 +48,17 @@ function buildSummaryInstruction(summaryVersion: number): string {
   return [
     'Mingyue: 秋青子，现在需要你执行一项精准的数据整理任务。',
     '',
+    '## ⚠️ 最高优先级铁律（违反即任务失败）',
+    '',
+    isFirstSummary
+      ? '- 这是首次总结，所有内容均来自本次日志。'
+      : [
+          '- **你必须逐条完整输出前次大总结中的所有 [#序号] 剧情事件，一条都不能少！**',
+          '- 旧事件保持原有 [#序号] 和 [剧情日期] 完全不变（直接复制），新事件接着旧事件最大序号继续编号',
+          '- **先原样列出旧摘要的所有事件，再在后面追加新事件**——禁止跳过、省略、合并任何旧条目',
+          '- 前次大总结中的 [核心] 角色记忆必须原样保留，禁止删除或修改',
+        ].join('\n'),
+    '',
     '## 任务说明',
     '',
     '你需要阅读我提供的剧情日志，将其整理为三个部分。这不是创作，是数据整理。',
@@ -73,6 +84,9 @@ function buildSummaryInstruction(summaryVersion: number): string {
     '### 第一部分：剧情摘要',
     '',
     '以叙事方式概括剧情，每个事件段落以 [#序号][剧情日期] 开头，用1-3句话概括事件。',
+    isFirstSummary
+      ? '所有事件从 [#1] 开始按顺序编号。'
+      : '⚠️ **先原样列出前次大总结中的所有 [#序号] 事件（一字不改），再追加本次新事件。旧事件一个都不能少！**',
     '所有事件从 [#1] 开始按顺序编号，新事件接着旧事件的最大编号继续编号（如旧总结最大为 [#5]，新事件从 [#6] 开始）。',
     '**时间必须从正文中的时空栏（```地点·日期·星期·时间```）或 [时间 xxx] 标记中提取，这是剧情内时间，不是现实时间。**',
     '保留关键对话原文。禁止修辞比喻，客观白描。',
@@ -80,6 +94,7 @@ function buildSummaryInstruction(summaryVersion: number): string {
     '格式：',
     '```',
     '[剧情摘要]',
+    ...[isFirstSummary ? [] : ['[#1][剧情日期] （来自前次大总结，原样保留）角色A在某地做了某事。角色B说"关键对话原文"。']],
     '[#1][剧情日期] 角色A在某地做了某事。角色B说"关键对话原文"。角色A回应后离开。',
     '',
     '[#2][剧情日期] 后续事件的叙事概括。保留重要对话原文。',
@@ -206,8 +221,11 @@ function buildInputMaterial(capturedContents: CapturedContent[], previousSummary
   const parts: string[] = [];
 
   if (previousSummary) {
-    parts.push('## 前次大总结（第 ' + previousSummary.version + ' 次）');
+    parts.push('## ⚠️ 前次大总结（必须逐条原样列入新总结中，绝对不可遗漏！）');
+    parts.push('');
     parts.push(previousSummary.rawText);
+    parts.push('');
+    parts.push('--- 以上旧摘要内容必须全部保留，新内容在下方 ---');
     parts.push('');
   }
 

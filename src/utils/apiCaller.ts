@@ -51,7 +51,7 @@ export async function callGenerateRaw(params: GenerateRawParams): Promise<string
         model: settings.customApiModel,
         messages,
         temperature: 0.7,
-        max_tokens: 8192,
+        max_tokens: 65536,
       }),
     });
   } catch (err: any) {
