@@ -75,7 +75,7 @@ export interface UserInputRecord {
 // ========== 存储拆分：聊天变量（每个聊天独立） ==========
 
 export interface ChatData {
-  initChatLastId: number;
+  chatId: string;
   capturedContents: CapturedContent[];
   userInputRecords: UserInputRecord[];
   summaries: GrandSummary[];
@@ -117,7 +117,7 @@ export interface ScriptSettings {
 
 const ChatDataSchema = z
   .object({
-    initChatLastId: z.coerce.number().prefault(0),
+    chatId: z.string().prefault(''),
     capturedContents: z.array(z.any()).prefault([]),
     userInputRecords: z.array(z.any()).prefault([]),
     summaries: z.array(z.any()).prefault([]),
@@ -176,15 +176,14 @@ export const useMainStore = defineStore('main', () => {
   const chatData = ref<ChatData>(ChatDataSchema.parse(getVariables({ type: 'chat' })));
 
   // 验证聊天数据是否属于当前聊天（防止新聊天继承旧数据）
-  const currentLastId = getLastMessageId();
-  if (chatData.value.initChatLastId > 0 && currentLastId < chatData.value.initChatLastId - 10) {
-    // 当前消息数远小于记录数，说明是另一个聊天（被fork或复制了变量）
+  const currentChatId = SillyTavern.getCurrentChatId();
+  if (chatData.value.chatId && chatData.value.chatId !== currentChatId) {
     chatData.value = ChatDataSchema.parse({});
-    console.info('[智脑] 检测到新聊天，已重置聊天数据');
+    console.info('[智脑] 检测到聊天切换，已重置聊天数据');
   }
-  // 首次初始化或无数据时记录当前状态
-  if (chatData.value.initChatLastId === 0) {
-    chatData.value.initChatLastId = currentLastId;
+  // 首次初始化时记录当前聊天ID
+  if (!chatData.value.chatId) {
+    chatData.value.chatId = currentChatId;
   }
 
   // 自动保存脚本变量
