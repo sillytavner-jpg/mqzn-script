@@ -340,13 +340,13 @@ export const useMainStore = defineStore('main', () => {
     return ` (#${ids[0]}${ids.length > 1 ? `-#${ids[ids.length - 1]}` : ''}, ${ids.length}层)`;
   }
 
-  function rollbackSummary(force = false): GrandSummary | undefined {
+  function rollbackSummary(force = false, saveToHistory = true): GrandSummary | undefined {
     if (!force && chatData.value.summaries.length <= 1) {
       console.info('[智脑] 无法撤回，至少保留一条总结');
       return undefined;
     }
     const removed = chatData.value.summaries.pop();
-    if (removed) {
+    if (removed && saveToHistory) {
       chatData.value.summaryHistory.push(removed);
       if (chatData.value.summaryHistory.length > 3) {
         chatData.value.summaryHistory.shift();
