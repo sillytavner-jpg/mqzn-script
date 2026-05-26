@@ -44,63 +44,7 @@ const ASSISTANT_PREFILL = [
 // ======== 大总结专项指令 =========
 // v2: AI 只总结新楼层，旧近期记忆喂给 AI 决定升格/抛弃
 
-function buildSummaryInstruction(isFirstSummary: boolean): string {
-  const memorySection = isFirstSummary
-    ? [
-        '**这是第一次大总结，所有记忆标记为 [核心]，每个角色3-5条核心记忆（不需要近期记忆）。**',
-        '',
-        '格式：',
-        '```',
-        '[角色记忆]',
-        '### {角色名}',
-        '别名: {该角色的所有称呼，逗号分隔}',
-        '态度: {like|dislike|neutral}',
-        '关键词: {用于激活该角色记忆的关键词，逗号分隔，5-10个}',
-        '- [核心][剧情日期] {第一人称记忆}',
-        '..',
-        '```',
-      ]
-    : [
-        '**记忆分为两类：[核心]为升格的永久记忆，[近期]为本次新增的滚动记忆。**',
-        '',
-        '前次总结的近期记忆已在输入材料中（见"前次总结的角色近期记忆"部分），请逐角色按以下**必须严格执行的步骤**处理：',
-        '',
-        '**步骤一（必须执行）：从本次日志生成 [近期] 记忆**',
-        '- 根据本次剧情日志，为每个出现的角色生成5-8条[近期]记忆',
-        '- 这是基础步骤，无论是否有旧近期需要升格，这一步都不能跳过',
-        '- 记录角色在本次日志中的关键经历、互动、情感变化',
-        '',
-        '**步骤二（如有旧近期）：升格 [核心] 记忆**',
-        '- 如果输入材料中有该角色的旧近期记忆：从中筛选1-3条情绪影响最大的，标记为[核心]',
-        '- **硬性数量限制：每个角色最多升格3条，最少升格1条。**',
-        '- 其余旧近期直接抛弃，不输出',
-        '- 如果没有旧近期：跳过此步骤',
-        '',
-        '**升格筛选标准（选择符合以下任意条件2条以上的记忆优先升格）**：',
-        '- 改变了角色对{{user}}态度或看法的关键时刻',
-        '- 暴露了角色核心恐惧、深层缺失、或防御机制的事件',
-        '- 角色产生了强烈情绪波动（愤怒/喜悦/嫉妒/羞耻/恐惧）的互动',
-        '- 角色与{{user}}关系发生质变的节点',
-        '- 角色做出了不符合平时行为模式的特殊举动',
-        '',
-        '**关键铁则：每位在本次日志中出现的角色，输出中必须同时包含[近期]（步骤一）和[核心]（步骤二如有）。只输出升格而忘记生成近期，是严重的遗漏。**',
-        '',
-        '- **如果某角色在本次日志中没有出现**：只输出升格的[核心]（如有旧近期可升格），不需要[近期]',
-        '- **如果是全新角色**（首次出现，无旧近期）：只执行步骤一，生成5-8条[近期]',
-        '',
-        '格式：',
-        '```',
-        '[角色记忆]',
-        '### {角色名}',
-        '别名: {该角色的所有称呼，逗号分隔}',
-        '态度: {like|dislike|neutral}',
-        '关键词: {用于激活该角色记忆的关键词，逗号分隔，5-10个}',
-        '- [近期][剧情日期] {从本次日志生成的新近期记忆}',
-        '- [核心][剧情日期] {从旧近期记忆中升格的核心记忆（如有）}',
-        '..',
-        '```',
-      ];
-
+function buildSummaryInstruction(): string {
   return [
     'Mingyue: 秋青子，现在需要你执行一项精准的数据整理任务。',
     '',
@@ -154,13 +98,31 @@ function buildSummaryInstruction(isFirstSummary: boolean): string {
     '### 第二部分：角色记忆',
     '',
     '每个对剧情有影响的角色，用符合该角色人设的第一人称视角，记录她/他与{{user}}之间的记忆。',
-    ...memorySection,
+    '每个角色生成5-8条记忆，从中挑选1-3条最重要的标记为[核心]，其余标记为[近期]。',
     '',
     '记忆规则：',
     '- 喜欢{{user}}的角色：记住更多细节，会"美化"记忆，细节清晰到连当时的天气、对方穿什么都记得',
     '- 厌恶{{user}}的角色：记忆存在恶意抹黑和偏差，选择性记住不舒服的地方，忽略或扭曲{{user}}的善意',
     '- 中立的角色：对非重要的事"记不住"或只有"模糊的概念"',
-    '- **每条记忆必须标注剧情时间和层级**，格式为 [核心][剧情日期] 或 [近期][剧情日期]（从时空栏提取）',
+    '',
+    '标记为[核心]的标准（符合以下任意条件的优先标记）：',
+    '- 改变了角色对{{user}}态度或看法的关键时刻',
+    '- 暴露了角色核心恐惧、深层缺失或防御机制的事件',
+    '- 角色产生了强烈情绪波动（愤怒/喜悦/嫉妒/羞耻/恐惧）的互动',
+    '- 角色与{{user}}关系发生质变的节点',
+    '- 角色做出了不符合平时行为模式的特殊举动',
+    '',
+    '格式：',
+    '```',
+    '[角色记忆]',
+    '### {角色名}',
+    '别名: {该角色的所有称呼，逗号分隔}',
+    '态度: {like|dislike|neutral}',
+    '关键词: {用于激活该角色记忆的关键词，逗号分隔，5-10个}',
+    '- [核心][剧情日期] {1-3条最重要的记忆}',
+    '- [近期][剧情日期] {其余记忆}',
+    '..',
+    '```',
     '',
     '---SECTION---',
     '',
@@ -202,7 +164,6 @@ function buildSummaryInstruction(isFirstSummary: boolean): string {
     '- 禁止使用任何修辞手法（剧情摘要部分）',
     '- 角色记忆必须用第一人称',
     '- 路人NPC不保留，只保留对剧情有影响的角色',
-    '- **对本次日志中出现的每个角色，必须同时输出[核心]（如有旧近期可升格）和[近期]（从本次日志生成）两种记忆，缺一不可**',
   ].join('\n');
 }
 
@@ -237,24 +198,16 @@ function extractStoryTimeFromContent(content: string): string {
 
 // ========== 构建输入材料（新楼层 + 旧近期记忆 + 旧动态人设） ==========
 
-interface OldRecentEntry {
-  characterName: string;
-  recentMemories: string[];
-}
-
 function buildInputMaterial(
   capturedContents: CapturedContent[],
   oldDynamicProfiles?: DynamicProfile[],
-  oldRecentMemories?: OldRecentEntry[],
 ): string {
   const parts: string[] = [];
 
   // 旧动态人设：让 AI 了解角色当前状态，在此基础上升级
-  // 过滤掉误存为动态人设的记忆格式数据（别名:/态度:/关键词: 开头的是角色记忆条目，不是人设描述）
   if (oldDynamicProfiles && oldDynamicProfiles.length > 0) {
     const validProfiles = oldDynamicProfiles.filter(p => {
       if (!p.dynamicContent) return false;
-      // 记忆格式检测：如果内容以别名:/态度:/关键词: 开头，说明 AI 把记忆写进了人设节
       const isMemoryFormat = /^(别名[:：]|态度[:：]|关键词[:：]|- \[)/m.test(p.dynamicContent.trim());
       if (isMemoryFormat) {
         console.warn(`[智脑] 跳过污染的动态人设条目: ${p.characterName}（内容为角色记忆格式）`);
@@ -267,38 +220,6 @@ function buildInputMaterial(
       for (const p of validProfiles) {
         parts.push(`### ${p.characterName}`);
         parts.push(p.dynamicContent);
-        parts.push('');
-      }
-      parts.push('---');
-      parts.push('');
-    }
-  }
-
-  // 旧近期记忆：只发近期，不发核心（核心由代码保留）
-  // AI 需要审视这些近期记忆，决定升格为核心或抛弃
-  if (oldRecentMemories && oldRecentMemories.length > 0) {
-    const withRecent = oldRecentMemories.filter(m => m.recentMemories && m.recentMemories.length > 0);
-    if (withRecent.length > 0) {
-      parts.push('## ⚠️ 前次总结的角色近期记忆（你需要逐角色审视并决定如何处理）');
-      parts.push('');
-      parts.push('处理规则（严格按此顺序）：');
-      parts.push('1. **先生成近期**：根据本次剧情日志，为每个角色生成5-8条[近期]记忆 — 这是必须完成的基础步骤');
-      parts.push('2. **再升格核心**：从下面的旧近期记忆中筛选1-3条情绪影响最大的，标记为[核心] — 如有旧近期则执行，没有则跳过');
-      parts.push('   **硬性限制：最多升格3条，最少升格1条。绝对不能全部升格——至少丢弃一半旧近期。**');
-      parts.push('3. 旧近期中未被升格的直接抛弃，不需要输出');
-      parts.push('');
-      parts.push('**升格筛选标准（选择符合以下条件多条的优先升格）**：');
-      parts.push('- 改变了角色对{{user}}态度的关键时刻 / 关系质变的节点');
-      parts.push('- 暴露了角色核心恐惧、深层缺失或防御机制的事件');
-      parts.push('- 角色产生了强烈情绪波动（愤怒/喜悦/嫉妒/羞耻/恐惧）');
-      parts.push('- 角色做出了不符合平时行为模式的特殊举动');
-      parts.push('⚠️ 每个在本次日志中出现的角色，必须输出[近期]+[核心]（如有旧近期）两部分，缺一不可。');
-      parts.push('');
-      for (const m of withRecent) {
-        parts.push(`### ${m.characterName} 的近期记忆（审视并决定哪些值得升格为核心）`);
-        for (const mem of m.recentMemories) {
-          parts.push(`- ${mem}`);
-        }
         parts.push('');
       }
       parts.push('---');
@@ -463,8 +384,28 @@ export function parseSummaryOutput(rawText: string, summaryVersion: number): Par
 
   const narrativeSection = sections[0] || '';
   const memorySection = sections[1] || '';
-  const profileSection = sections[2] || '';
-  const nsfwSection = sections[3] || '';
+
+  // 如果 AI 输出了额外的 section（>4段），说明格式乱了
+  // 从后往前找最后一个 [动态人设]，用它作为真正的 profileSection
+  let profileSection = '';
+  let nsfwSection = '';
+  if (sections.length <= 4) {
+    profileSection = sections[2] || '';
+    nsfwSection = sections[3] || '';
+  } else {
+    // 多段情况：找最后一个含 [动态人设] 的段作为人设段
+    // 最后一段是 NSFW（或空）
+    nsfwSection = sections[sections.length - 1] || '';
+    for (let i = sections.length - 2; i >= 2; i--) {
+      if (sections[i]?.includes('[动态人设]')) {
+        profileSection = sections[i];
+        break;
+      }
+    }
+    // fallback
+    if (!profileSection) profileSection = sections[sections.length - 2] || '';
+    console.warn(`[智脑] AI 输出了 ${sections.length} 个 section（预期4个），已自动纠正`);
+  }
 
   const timeline = parseNarrativeSummarySection(narrativeSection);
   const characterMemories = parseCharacterMemorySection(memorySection);
@@ -564,16 +505,9 @@ export async function executeGrandSummary(
     throw new Error('没有可用的正文日志');
   }
 
-  // 提取旧近期记忆（只发近期，不发核心——核心由代码保留）
-  const oldRecentMemories: OldRecentEntry[] = previousSummary
-    ? previousSummary.characterMemories
-        .filter(m => m.recentMemories && m.recentMemories.length > 0)
-        .map(m => ({ characterName: m.characterName, recentMemories: m.recentMemories }))
-    : [];
-
-  // ===== 1. AI 仅总结新楼层 + 旧近期记忆（不喂旧核心和旧事件，大幅减少 token）=====
-  const instruction = buildSummaryInstruction(isFirstSummary);
-  const inputMaterial = buildInputMaterial(capturedContents, oldDynamicProfiles, oldRecentMemories);
+  // ===== 1. AI 仅总结新楼层 + 旧动态人设（不喂任何旧记忆）=====
+  const instruction = buildSummaryInstruction();
+  const inputMaterial = buildInputMaterial(capturedContents, oldDynamicProfiles);
 
   const rawResult = await callGenerateRaw({
     user_input: inputMaterial,
@@ -606,22 +540,7 @@ export async function executeGrandSummary(
 
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
-    // 首次总结：所有记忆归为核心
-    for (const mem of newParsed.characterMemories) {
-      mem.coreMemories = [...mem.coreMemories, ...mem.recentMemories];
-      mem.recentMemories = [];
-    }
-    // 重建 rawText：AI 可能自行添加 [近期] 标签，首次总结应统一为 [核心]
-    const newSections = outputText.split(/---SECTION---/i);
-    outputText = [
-      newSections[0] || '',
-      '---SECTION---',
-      buildMemorySectionText(newParsed.characterMemories),
-      '---SECTION---',
-      newSections[2] || '',
-      '---SECTION---',
-      newSections[3] || '',
-    ].join('\n');
+    // 首次总结：AI 已自行标记核心/近期，直接使用
     newParsed.rawText = outputText;
   } else {
     // ===== 2. 代码拼接：AI 新输出 + 旧总结合并 =====
@@ -653,20 +572,15 @@ export async function executeGrandSummary(
     }
 
     // --- Section 2：角色记忆合并 ---
-    // AI 已自行处理升格：[核心] = 从旧近期中升格的，[近期] = 从本次日志新生成的
-    // 代码侧：旧核心 + AI升格核心 = 新的完整核心；AI近期直接替换（不合并旧近期）
+    // AI 自行标记 [核心]/[近期]，展示时拼接旧核心
     for (const newMem of newParsed.characterMemories) {
       const oldMem = oldMemMap.get(newMem.characterName);
       if (oldMem) {
-        // 展示用：旧核心拼接 AI 升格的核心
         newMem.coreMemories = [...(oldMem.coreMemories || []), ...(newMem.coreMemories || [])];
-        // 展示用：近期直接用 AI 本次生成的（旧近期已由 AI 决定抛弃/升格）
-        newMem.recentMemories = newMem.recentMemories || [];
         oldMemMap.delete(newMem.characterName);
       }
-      // 新角色：AI 输出即最终结果（addSummary 再分配前3条为核心）
     }
-    // 旧角色未出现在新日志中：保留核心记忆，近期记忆清空（未被AI升格=过期抛弃）
+    // 旧角色未出现在新日志中：保留核心，丢弃近期
     for (const [name, oldMem] of oldMemMap) {
       newParsed.characterMemories.push({
         characterName: name,
@@ -674,7 +588,7 @@ export async function executeGrandSummary(
         attitude: oldMem.attitude,
         keywords: oldMem.keywords,
         coreMemories: oldMem.coreMemories || [],
-        recentMemories: [], // 旧近期未升格→抛弃
+        recentMemories: [],
       });
     }
     const mergedSection2 = buildMemorySectionText(newParsed.characterMemories);

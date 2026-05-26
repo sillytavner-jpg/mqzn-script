@@ -386,32 +386,22 @@ export const useMainStore = defineStore('main', () => {
   function addSummary(summary: GrandSummary, upToMessageId?: number, coveredMessageIds?: number[]) {
     const previousSummary = getLatestSummary();
 
-    // 记忆分层合并逻辑
-    if (summary.version === 1) {
-      // 第一次大总结：所有记忆归为核心（AI已按提示输出[核心]标记，3-5条）
-      for (const mem of summary.characterMemories) {
+    // 记忆分层合并：AI 每次输出5-8条记忆（1-3条核心+其余近期）
+    // v1：直接使用AI输出；v2+：旧核心+AI核心=新核心，AI近期替换旧近期
+    for (const mem of summary.characterMemories) {
+      const prevMem = previousSummary?.characterMemories.find(
+        m => m.characterName === mem.characterName,
+      );
+      if (prevMem) {
+        mem.coreMemories = [...prevMem.coreMemories, ...(mem.coreMemories || [])].slice(0, 12);
+        mem.recentMemories = (mem.recentMemories || []).slice(0, 8);
+      } else if (previousSummary && summary.version > 1) {
+        // 新角色（非首次总结）：AI可能没标核心，前3条当核心
         const allMemories = [...mem.coreMemories, ...mem.recentMemories];
-        mem.coreMemories = allMemories.slice(0, 5); // v1: 3-5条核心记忆
-        mem.recentMemories = [];
+        mem.coreMemories = allMemories.slice(0, 3);
+        mem.recentMemories = allMemories.slice(3, 11);
       }
-    } else if (previousSummary) {
-      // 后续大总结：AI已自行处理升格（[核心]=从旧近期升格，[近期]=从本次日志新生成）
-      // 代码侧：旧核心 + AI升格核心 = 完整核心；AI近期直接使用
-      for (const mem of summary.characterMemories) {
-        const prevMem = previousSummary.characterMemories.find(
-          m => m.characterName === mem.characterName,
-        );
-        if (prevMem) {
-          // 已有角色：保留旧核心 + AI升格的核心（上限12条），近期用AI本次生成的
-          mem.coreMemories = [...(prevMem.coreMemories || []), ...(mem.coreMemories || [])].slice(0, 12);
-          mem.recentMemories = (mem.recentMemories || []).slice(0, 8);
-        } else {
-          // 新角色：合并解析出的core+recent，前3条作为核心，其余作为近期
-          const allMemories = [...mem.coreMemories, ...mem.recentMemories];
-          mem.coreMemories = allMemories.slice(0, 3);
-          mem.recentMemories = allMemories.slice(3, 11);
-        }
-      }
+      // v1（无previousSummary）：保持AI输出的核心/近期分法不变
     }
 
     const normalizedCoveredIds = coveredMessageIds ?? getCapturedContentMessageIds(chatData.value.capturedContents);
