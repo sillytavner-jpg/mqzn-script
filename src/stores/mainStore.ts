@@ -188,34 +188,43 @@ function migrateOldFormatToChatData(oldData: Record<string, unknown>): ChatData 
 
 const GLOBAL_CHAT_KEY = 'mqzn_chat_data';
 const GLOBAL_SETTINGS_KEY = 'mqzn_settings';
+/** 硬编码稳定ID，用于回退存储——不依赖 getScriptId()，换版本也不变 */
+const STABLE_ID = 'mqzn-script-data';
+
+function tryReadData(): { chatData: any; settings: any; migrated: boolean } {
+  // 1. 优先 global（版本无关，最稳定）
+  const g = getVariables({ type: 'global' }) ?? {};
+  if (g[GLOBAL_CHAT_KEY]) {
+    return { chatData: g[GLOBAL_CHAT_KEY], settings: g[GLOBAL_SETTINGS_KEY] ?? {}, migrated: false };
+  }
+
+  // 2. 回退：硬编码 script_id（跨版本稳定）
+  const stable = getVariables({ type: 'script', script_id: STABLE_ID }) ?? {};
+  if (stable[GLOBAL_CHAT_KEY]) {
+    console.info('[智脑] 从硬编码ID恢复数据，迁移到 global...');
+    return { chatData: stable[GLOBAL_CHAT_KEY], settings: stable[GLOBAL_SETTINGS_KEY] ?? {}, migrated: true };
+  }
+
+  // 3. 回退：旧格式 type:'chat'（仅 script_id 没变时有效）
+  const oldChat = getVariables({ type: 'chat' });
+  if (oldChat && Object.keys(oldChat).length > 0) {
+    console.info('[智脑] 从旧 type:chat 迁移数据...');
+    return { chatData: oldChat, settings: getVariables({ type: 'script', script_id: getScriptId() }) ?? {}, migrated: true };
+  }
+
+  // 4. 回退：旧格式 type:'script'（仅 script_id 没变时有效）
+  const oldScript = getVariables({ type: 'script', script_id: getScriptId() });
+  if (oldScript && Object.keys(oldScript).length > 0) {
+    console.info('[智脑] 从旧 type:script 迁移数据...');
+    return { chatData: {}, settings: oldScript, migrated: true };
+  }
+
+  return { chatData: {}, settings: {}, migrated: false };
+}
 
 export const useMainStore = defineStore('main', () => {
-  // ========== 数据加载（global 优先，兼容旧格式迁移） ==========
-
-  // 加载聊天数据：先试 global，没有再试 type:'chat'（旧格式）
-  const globalVars = getVariables({ type: 'global' }) ?? {};
-  let rawChatData = globalVars[GLOBAL_CHAT_KEY];
-  let migratedFromOld = false;
-
-  if (!rawChatData) {
-    // global 里没有 → 尝试从旧 type:'chat' 读取并迁移
-    const oldChatData = getVariables({ type: 'chat' });
-    if (oldChatData && Object.keys(oldChatData).length > 0) {
-      console.info('[智脑] 从旧存储迁移聊天数据到 global...');
-      rawChatData = oldChatData;
-      migratedFromOld = true;
-    }
-  }
-
-  // 加载设置：先试 global，没有再试 type:'script'
-  let rawSettings = globalVars[GLOBAL_SETTINGS_KEY];
-  if (!rawSettings) {
-    rawSettings = getVariables({ type: 'script', script_id: getScriptId() });
-    if (rawSettings && Object.keys(rawSettings).length > 0) {
-      console.info('[智脑] 从旧存储迁移设置到 global...');
-      migratedFromOld = true;
-    }
-  }
+  // ========== 数据加载（三层回退：global → 硬编码ID → 旧格式） ==========
+  const { chatData: rawChatData, settings: rawSettings, migrated: migratedFromOld } = tryReadData();
 
   const currentChatId = SillyTavern.getCurrentChatId();
 
@@ -231,13 +240,15 @@ export const useMainStore = defineStore('main', () => {
 
   const scriptData = ref<ScriptSettings>(ScriptSettingsSchema.parse(rawSettings ?? {}));
 
-  // 立即将迁移后的数据写入 global，防止丢失
+  // 立即写入 global + 硬编码回退，双保险
   if (migratedFromOld || needsMigration) {
-    replaceVariables({
+    const saveData = {
       [GLOBAL_CHAT_KEY]: klona(allChatsData.value),
       [GLOBAL_SETTINGS_KEY]: klona(scriptData.value),
-    }, { type: 'global' });
-    console.info('[智脑] 数据已写入 global 存储');
+    };
+    replaceVariables(saveData, { type: 'global' });
+    replaceVariables(saveData, { type: 'script', script_id: STABLE_ID });
+    console.info('[智脑] 数据已写入 global + 硬编码回退');
   }
 
   // 从 allChatsData 中提取当前聊天的数据（不存在则初始化）
@@ -260,14 +271,15 @@ export const useMainStore = defineStore('main', () => {
   function setSummaryInProgress(v: boolean) { summaryInProgress.value = v; }
   function setDreamtalkInProgress(v: boolean) { dreamtalkInProgress.value = v; }
 
-  // 自动保存到 global 存储（不绑定 script_id，换版本/刷新不丢数据）
+  // 双写：global + 硬编码 script_id（换版本/刷新双重保险）
   watchEffect(() => {
-    const globals = getVariables({ type: 'global' }) ?? {};
-    // 先把当前聊天数据同步回 allChatsData
     allChatsData.value[currentChatId] = klona(chatData.value);
-    globals[GLOBAL_CHAT_KEY] = klona(allChatsData.value);
-    globals[GLOBAL_SETTINGS_KEY] = klona(scriptData.value);
-    replaceVariables(globals, { type: 'global' });
+    const saveData = {
+      [GLOBAL_CHAT_KEY]: klona(allChatsData.value),
+      [GLOBAL_SETTINGS_KEY]: klona(scriptData.value),
+    };
+    replaceVariables(saveData, { type: 'global' });
+    replaceVariables(saveData, { type: 'script', script_id: STABLE_ID });
   });
 
   // ========== 便捷访问器 ==========
