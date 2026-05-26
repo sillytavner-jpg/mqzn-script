@@ -173,6 +173,15 @@ export const useMainStore = defineStore('main', () => {
   // 从聊天变量加载聊天数据
   const chatData = ref<ChatData>(ChatDataSchema.parse(getVariables({ type: 'chat' })));
 
+  // 验证聊天数据是否属于当前聊天（防止新聊天继承旧数据）
+  if (chatData.value.capturedContents.length > 0) {
+    const firstCapturedId = chatData.value.capturedContents[0].messageId;
+    if (getChatMessages(firstCapturedId).length === 0) {
+      chatData.value = ChatDataSchema.parse({});
+      console.info('[智脑] 检测到新聊天，已重置聊天数据');
+    }
+  }
+
   // 自动保存脚本变量
   watchEffect(() => {
     replaceVariables(klona(scriptData.value), { type: 'script', script_id: getScriptId() });
