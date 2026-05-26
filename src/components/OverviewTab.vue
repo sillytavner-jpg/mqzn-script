@@ -62,6 +62,13 @@ const selectedSummaryCount = computed(() => getSelectedCapturedContents().length
 // 大总结编辑
 const latestSummary = computed(() => store.getLatestSummary());
 
+// 撤回/恢复/重做后 latestSummary 会变，编辑器打开时自动同步内容
+watch(latestSummary, (s) => {
+  if (showSummaryEditor.value && s) {
+    editingSummaryText.value = s.rawText;
+  }
+});
+
 function refreshHiddenFloors() {
   hiddenFloorRefreshKey.value++;
 }
