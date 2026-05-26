@@ -656,9 +656,13 @@ export async function executeGrandSummary(
   if (totalNewMemories === 0) {
     throw new Error('[智脑] 总结失败：AI 未生成任何角色记忆，请检查日志或重试');
   }
-  // v2+ 额外检查：新剧情摘要是否有新事件（AI输出[剧情日期]格式，不含[#N]）
-  if (!isFirstSummary && newParsed.timeline.length === 0) {
-    throw new Error('[智脑] 总结失败：AI 未生成新的剧情事件，请检查日志或重试');
+  // v2+ 额外检查：新剧情摘要是否有新事件
+  if (!isFirstSummary) {
+    const parsedSection1Text = getSectionByMarker(outputText, '[剧情摘要]', '---SECTION---', 1);
+    const newEventsCount = (parsedSection1Text.match(/\[#(\d+)\]/g) || []).length;
+    if (newEventsCount === 0) {
+      throw new Error('[智脑] 总结失败：AI 未生成新的剧情事件，请检查日志或重试');
+    }
   }
 
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
