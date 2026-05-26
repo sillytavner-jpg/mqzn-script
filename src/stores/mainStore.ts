@@ -155,7 +155,7 @@ const ScriptSettingsSchema = z
         dreamtalkEnabled: z.boolean().prefault(true),
         plotFateEnabled: z.boolean().prefault(true),
         emotionEnabled: z.boolean().prefault(true),
-        emotionInterval: z.coerce.number().prefault(5),
+        emotionInterval: z.coerce.number().prefault(6),
         summaryInterval: z.coerce.number().prefault(10),
       })
       .prefault({}),
