@@ -186,34 +186,58 @@ function migrateOldFormatToChatData(oldData: Record<string, unknown>): ChatData 
   return ChatDataSchema.parse(oldData);
 }
 
-export const useMainStore = defineStore('main', () => {
-  // 从脚本变量加载全局设置
-  const scriptData = ref<ScriptSettings>(
-    ScriptSettingsSchema.parse(getVariables({ type: 'script', script_id: getScriptId() })),
-  );
+const GLOBAL_CHAT_KEY = 'mqzn_chat_data';
+const GLOBAL_SETTINGS_KEY = 'mqzn_settings';
 
-  /**
-   * 所有聊天的数据存储。
-   * 酒馆的 getVariables({ type: 'chat' }) 实际上按 script_id 全局存储，
-   * 并非按聊天隔离，所以这里用一个 Record<chatId, ChatData> 来手动隔离。
-   */
+export const useMainStore = defineStore('main', () => {
+  // ========== 数据加载（global 优先，兼容旧格式迁移） ==========
+
+  // 加载聊天数据：先试 global，没有再试 type:'chat'（旧格式）
+  const globalVars = getVariables({ type: 'global' }) ?? {};
+  let rawChatData = globalVars[GLOBAL_CHAT_KEY];
+  let migratedFromOld = false;
+
+  if (!rawChatData) {
+    // global 里没有 → 尝试从旧 type:'chat' 读取并迁移
+    const oldChatData = getVariables({ type: 'chat' });
+    if (oldChatData && Object.keys(oldChatData).length > 0) {
+      console.info('[智脑] 从旧存储迁移聊天数据到 global...');
+      rawChatData = oldChatData;
+      migratedFromOld = true;
+    }
+  }
+
+  // 加载设置：先试 global，没有再试 type:'script'
+  let rawSettings = globalVars[GLOBAL_SETTINGS_KEY];
+  if (!rawSettings) {
+    rawSettings = getVariables({ type: 'script', script_id: getScriptId() });
+    if (rawSettings && Object.keys(rawSettings).length > 0) {
+      console.info('[智脑] 从旧存储迁移设置到 global...');
+      migratedFromOld = true;
+    }
+  }
+
   const currentChatId = SillyTavern.getCurrentChatId();
-  const rawData = getVariables({ type: 'chat' });
 
   // 旧格式迁移：旧版直接存扁平 ChatData，新版存 Record<chatId, ChatData>
-  // 判断：旧格式顶层有 summaries/capturedContents 等 ChatData 属性，新格式顶层是 chatId 字符串
-  const needsMigration = rawData && (rawData.summaries !== undefined || rawData.capturedContents !== undefined);
+  const needsMigration = rawChatData &&
+    (rawChatData.summaries !== undefined || rawChatData.capturedContents !== undefined);
 
   const allChatsData = ref<Record<string, ChatData>>(
     needsMigration
-      ? { [currentChatId]: migrateOldFormatToChatData(rawData) }
-      : (rawData ?? {}),
+      ? { [currentChatId]: migrateOldFormatToChatData(rawChatData) }
+      : (rawChatData ?? {}),
   );
 
-  // 迁移后立即写回存储，防止 watchEffect 读到旧格式后丢弃数据
-  if (needsMigration) {
-    replaceVariables(klona(allChatsData.value), { type: 'chat' });
-    console.info('[智脑] 旧格式数据已迁移并保存');
+  const scriptData = ref<ScriptSettings>(ScriptSettingsSchema.parse(rawSettings ?? {}));
+
+  // 立即将迁移后的数据写入 global，防止丢失
+  if (migratedFromOld || needsMigration) {
+    replaceVariables({
+      [GLOBAL_CHAT_KEY]: klona(allChatsData.value),
+      [GLOBAL_SETTINGS_KEY]: klona(scriptData.value),
+    }, { type: 'global' });
+    console.info('[智脑] 数据已写入 global 存储');
   }
 
   // 从 allChatsData 中提取当前聊天的数据（不存在则初始化）
@@ -236,18 +260,14 @@ export const useMainStore = defineStore('main', () => {
   function setSummaryInProgress(v: boolean) { summaryInProgress.value = v; }
   function setDreamtalkInProgress(v: boolean) { dreamtalkInProgress.value = v; }
 
-  // 自动保存脚本变量
+  // 自动保存到 global 存储（不绑定 script_id，换版本/刷新不丢数据）
   watchEffect(() => {
-    replaceVariables(klona(scriptData.value), { type: 'script', script_id: getScriptId() });
-  });
-
-  // 自动保存聊天变量（写入 allChatsData，以 chatId 为 key）
-  watchEffect(() => {
-    const raw = getVariables({ type: 'chat' }) ?? {};
-    // 存储中可能还有旧格式（扁平 ChatData），检测到则丢弃从头写新格式
-    const allData = (raw.summaries !== undefined || raw.capturedContents !== undefined) ? {} : raw;
-    allData[currentChatId] = klona(chatData.value);
-    replaceVariables(allData, { type: 'chat' });
+    const globals = getVariables({ type: 'global' }) ?? {};
+    // 先把当前聊天数据同步回 allChatsData
+    allChatsData.value[currentChatId] = klona(chatData.value);
+    globals[GLOBAL_CHAT_KEY] = klona(allChatsData.value);
+    globals[GLOBAL_SETTINGS_KEY] = klona(scriptData.value);
+    replaceVariables(globals, { type: 'global' });
   });
 
   // ========== 便捷访问器 ==========
