@@ -393,7 +393,7 @@ export const useMainStore = defineStore('main', () => {
         m => m.characterName === mem.characterName,
       );
       if (prevMem) {
-        mem.coreMemories = [...prevMem.coreMemories, ...(mem.coreMemories || [])].slice(0, 12);
+        mem.coreMemories = [...prevMem.coreMemories, ...(mem.coreMemories || [])];
         mem.recentMemories = (mem.recentMemories || []).slice(0, 8);
       } else if (previousSummary && summary.version > 1) {
         // 新角色（非首次总结）：AI可能没标核心，前3条当核心
