@@ -23,8 +23,84 @@ const importInput = ref('');
 const showImport = ref(false);
 
 // 当前模型
-const currentModel = computed(() => store.getCurrentModel());
-const isClaudeModel = computed(() => store.isClaudeModel());
+const currentModel = computed(() => {
+  if (store.settings.apiMode === 'custom') {
+    return store.settings.customApiModel || '未设置';
+  }
+  return store.getCurrentModel();
+});
+const isClaudeModel = computed(() => {
+  const model = currentModel.value;
+  return /claude/i.test(model);
+});
+
+// 自定义API测试
+const apiTesting = ref(false);
+const apiTestResult = ref<{ ok: boolean; message: string } | null>(null);
+
+async function testApiConnection() {
+  const url = store.settings.customApiUrl?.trim();
+  const key = store.settings.customApiKey?.trim();
+  const model = store.settings.customApiModel?.trim();
+
+  if (!url || !key || !model) {
+    apiTestResult.value = { ok: false, message: '请先填写 API 地址、Key 和模型名称' };
+    return;
+  }
+
+  apiTesting.value = true;
+  apiTestResult.value = null;
+
+  try {
+    const apiUrl = url.endsWith('/chat/completions') ? url : url.replace(/\/+$/, '') + '/chat/completions';
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 5,
+      }),
+    });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      apiTestResult.value = {
+        ok: false,
+        message: `连接失败: HTTP ${response.status}${errText ? ' — ' + errText.slice(0, 200) : ''}`,
+      };
+      return;
+    }
+
+    const data = await response.json();
+    const returnedModel = data?.model || data?.choices?.[0]?.model || '';
+    const content = data?.choices?.[0]?.message?.content;
+
+    if (!content && content !== '') {
+      apiTestResult.value = {
+        ok: false,
+        message: '响应格式异常，未找到 choices[0].message.content',
+      };
+      return;
+    }
+
+    apiTestResult.value = {
+      ok: true,
+      message: `连接成功！模型: ${returnedModel || model}`,
+    };
+  } catch (err: any) {
+    apiTestResult.value = {
+      ok: false,
+      message: `网络错误: ${err.message || err}`,
+    };
+  } finally {
+    apiTesting.value = false;
+  }
+}
 
 // 新建人设
 function addPersona() {
@@ -244,8 +320,13 @@ function clearAllData() {
             placeholder="gpt-4o"
           />
         </div>
-        <div class="zhino-api-hint">
-          填写API基础地址即可（/chat/completions 会自动补全，与酒馆原生行为一致）。<br/>自建提示词序列（大总结/梦呓/倒果为因/人格分析）通过此API发送。
+        <div class="zhino-btn-row" style="margin-top:8px">
+          <button class="zhino-btn-sm zhino-btn-save" :disabled="apiTesting" @click="testApiConnection">
+            {{ apiTesting ? '测试中...' : '测试连接' }}
+          </button>
+        </div>
+        <div v-if="apiTestResult" class="zhino-api-result" :class="{ ok: apiTestResult.ok, fail: !apiTestResult.ok }">
+          {{ apiTestResult.message }}
         </div>
       </template>
     </div>
@@ -338,8 +419,9 @@ function clearAllData() {
     <div class="zhino-section">
       <div class="zhino-section-title">模型检测</div>
       <div class="zhino-info-row">
-        <span class="zhino-info-label">当前模型：</span>
+        <span class="zhino-info-label">{{ store.settings.apiMode === 'custom' ? '自定义模型：' : '当前模型：' }}</span>
         <span class="zhino-info-value">{{ currentModel || '未检测到' }}</span>
+        <span v-if="store.settings.apiMode === 'custom'" class="zhino-api-badge">自定义API</span>
       </div>
       <div v-if="isClaudeModel" class="zhino-warning">
         检测到 Claude 模型，已自动调整 prefill 策略（最后一条 assistant prefill → system）
@@ -656,14 +738,30 @@ function clearAllData() {
 .zhino-api-field {
   margin-top: 6px;
 }
-.zhino-api-hint {
+.zhino-api-result {
   margin-top: 6px;
   padding: 6px 8px;
-  background: rgba(167, 139, 250, 0.06);
-  border: 1px solid rgba(167, 139, 250, 0.12);
   border-radius: 4px;
   font-size: 11px;
-  color: rgba(255, 255, 255, 0.45);
   line-height: 1.5;
+}
+.zhino-api-result.ok {
+  background: rgba(52, 211, 153, 0.08);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  color: rgba(52, 211, 153, 0.9);
+}
+.zhino-api-result.fail {
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  color: rgba(248, 113, 113, 0.9);
+}
+
+.zhino-api-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(167, 139, 250, 0.15);
+  color: rgba(167, 139, 250, 0.85);
+  flex-shrink: 0;
 }
 </style>
