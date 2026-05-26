@@ -71,23 +71,23 @@ function buildSummaryInstruction(): string {
     '',
     '### 第一部分：剧情摘要',
     '',
-    '以叙事方式概括剧情，每个事件段落以 [#序号][剧情日期] 开头，用1-3句话概括事件。',
-    '事件从 [#1] 开始按顺序编号。',
+    '以叙事方式概括剧情，每个事件段落以 [剧情日期] 开头，用1-3句话概括事件。',
+    '不要添加事件序号（如 [#1]），只需 [剧情日期]。序号由代码自动生成。',
     '**时间必须从正文中的时空栏（```地点·日期·星期·时间```）或 [时间 xxx] 标记中提取，这是剧情内时间，不是现实时间。**',
     '保留关键对话原文。禁止修辞比喻，客观白描。',
     '',
     '格式：',
     '```',
     '[剧情摘要]',
-    '[#1][剧情日期] 角色A在某地做了某事。角色B说"关键对话原文"。角色A回应后离开。',
+    '[剧情日期] 角色A在某地做了某事。角色B说"关键对话原文"。角色A回应后离开。',
     '',
-    '[#2][剧情日期] 后续事件的叙事概括。保留重要对话原文。',
+    '[剧情日期] 后续事件的叙事概括。保留重要对话原文。',
     '',
-    '[#3][剧情日期] 次日发生的事件概括。',
+    '[剧情日期] 次日发生的事件概括。',
     '```',
     '',
     '规则：',
-    '- 每个段落以 [#序号][剧情日期] 开头，序号从1开始递增，每个事件独占一个序号',
+    '- 每个段落以 [剧情日期] 开头，不要加序号',
     '- 用1-3句话概括该时间段的核心事件',
     '- 保留关键对话原文（用引号标注）',
     '- 禁止修辞比喻，客观白描',
@@ -527,10 +527,14 @@ function extractMaxTimelineNumber(timeline: TimelineEvent[]): number {
   return maxNum;
 }
 
-/** 将文本中的 [#N] 序号统一加上偏移量 */
-function renumberEventsInText(text: string, offset: number): string {
-  if (offset <= 0) return text;
-  return text.replace(/\[#(\d+)\]/g, (_, num) => `[#${parseInt(num, 10) + offset}]`);
+/** 给纯 [日期] 段落的每行加 [#N] 序号（跳过 [剧情摘要] 标题行） */
+function addEventNumbers(text: string, startNum: number): string {
+  if (startNum <= 0) return text;
+  let counter = startNum;
+  // 匹配每行开头的 [非"剧情摘要"] 并加 [#N] 前缀
+  return text.replace(/^\[(?!剧情摘要)([^\]]+)\]/gm, (match) => {
+    return `[#${counter++}]${match}`;
+  });
 }
 
 /** 从合并后的角色记忆中重建 SECTION 2 文本 */
@@ -663,12 +667,15 @@ export async function executeGrandSummary(
 
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
-    // 首次总结：用 buildMemorySectionText 重建 SECTION 2，去掉 AI 编号和"核心判定"，统一为 [- [核心]/[近期]]
+    // 首次总结：SECTION 2 用 buildMemorySectionText 重建；SECTION 1 代码加序号
     const sections = outputText.split(/---SECTION---/i);
     if (sections.length >= 2) {
       sections[1] = buildMemorySectionText(newParsed.characterMemories);
-      outputText = sections.join('---SECTION---');
     }
+    if (sections[0]) {
+      sections[0] = addEventNumbers(sections[0].trim(), 1);
+    }
+    outputText = sections.join('---SECTION---');
     newParsed.rawText = outputText;
   } else {
     // ===== 2. 代码拼接：AI 新输出 + 旧总结合并 =====
@@ -681,11 +688,11 @@ export async function executeGrandSummary(
       previousSummary!.characterMemories.map(m => [m.characterName, m]),
     );
 
-    // --- Section 1：旧事件 + 重编号新事件 ---
+    // --- Section 1：旧事件 + 代码编号新事件 ---
     const offset = extractMaxTimelineNumber(previousSummary!.timeline);
-    const newS1Renumbered = renumberEventsInText(parsedSection1Text, offset);
+    const newS1Numbered = addEventNumbers(parsedSection1Text, offset + 1);
     // 清理 AI 输出的 section 标题行（### 第X部分、[剧情摘要] 等），防止插入旧事件和新事件之间
-    const cleanS1 = newS1Renumbered
+    const cleanS1 = newS1Numbered
       .replace(/^###\s+[^\n]*\n*/gm, '')         // 去掉 ### 第一部分：剧情摘要 等标题
       .replace(/^\[剧情摘要\]\s*/im, '')           // 去掉 [剧情摘要] 标记
       .replace(/^\s*\n/gm, '')                     // 去掉留下的空行
