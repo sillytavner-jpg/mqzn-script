@@ -293,6 +293,7 @@ $(() => {
   // ========== 梦呓分析触发 ==========
 
   async function triggerDreamtalkAnalysis(store: ReturnType<typeof useMainStore>) {
+    store.setDreamtalkInProgress(true);
     try {
       console.info('[智脑] 正在分析用户行为模式（梦呓）...');
       const { dreamtalk, nsfwDreamtalk } = await executeDreamtalkAnalysis(store.userInputRecords, store.persona.rawInput);
@@ -304,23 +305,23 @@ $(() => {
       console.info(`[智脑] 梦呓分析完成 (${dreamtalk.characterInteractions.length} 角色交互模式)`);
     } catch (error) {
       console.error('[智脑] 梦呓分析失败:', error);
+    } finally {
+      store.setDreamtalkInProgress(false);
     }
   }
-
-  let summaryInProgress = false;
 
   async function ensureRecentFloorsVisible() {
     return ensureRecentFloorsVisibleCore('affected');
   }
 
   async function checkAndTriggerSummary(store: ReturnType<typeof useMainStore>) {
-    if (summaryInProgress) return;
+    if (store.summaryInProgress) return;
 
     if (!shouldTriggerSummary(store.capturedContents, store.lastSummaryAtMessageId, store.settings.summaryInterval)) {
       return;
     }
 
-    summaryInProgress = true;
+    store.setSummaryInProgress(true);
     console.info('[智脑] 触发大总结');
 
     try {
@@ -365,7 +366,7 @@ $(() => {
     } catch (error) {
       console.error('[智脑] 大总结失败:', error);
     } finally {
-      summaryInProgress = false;
+      store.setSummaryInProgress(false);
     }
   }
 

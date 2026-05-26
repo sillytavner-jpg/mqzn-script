@@ -205,6 +205,14 @@ export const useMainStore = defineStore('main', () => {
     chatData.value.chatId = currentChatId;
   }
 
+  // ========== 运行状态（不持久化，脚本重载后重置） ==========
+
+  const summaryInProgress = ref(false);
+  const dreamtalkInProgress = ref(false);
+
+  function setSummaryInProgress(v: boolean) { summaryInProgress.value = v; }
+  function setDreamtalkInProgress(v: boolean) { dreamtalkInProgress.value = v; }
+
   // 自动保存脚本变量
   watchEffect(() => {
     replaceVariables(klona(scriptData.value), { type: 'script', script_id: getScriptId() });
@@ -755,5 +763,10 @@ export const useMainStore = defineStore('main', () => {
     // 模型检测
     getCurrentModel,
     isClaudeModel,
+    // 运行状态
+    summaryInProgress,
+    dreamtalkInProgress,
+    setSummaryInProgress,
+    setDreamtalkInProgress,
   };
 });

@@ -12,10 +12,6 @@ import {
 
 const store = useMainStore();
 
-const isSummarizing = ref(false);
-const isRedoingSummary = ref(false);
-const isSelectedSummarizing = ref(false);
-const isDreamtalkAnalyzing = ref(false);
 const isLoadingHistory = ref(false);
 const historyLoadResult = ref('');
 const showSummaryEditor = ref(false);
@@ -53,7 +49,7 @@ const dreamtalkStatus = computed(() => {
 });
 
 const summaryCount = computed(() => store.summaries.length);
-const summaryBusy = computed(() => isSummarizing.value || isRedoingSummary.value || isSelectedSummarizing.value);
+const summaryBusy = computed(() => store.summaryInProgress);
 
 const hiddenFloors = computed(() => {
   void hiddenFloorRefreshKey.value;
@@ -143,7 +139,7 @@ async function triggerManualSummary() {
     return;
   }
 
-  isSummarizing.value = true;
+  store.setSummaryInProgress(true);
   console.info('[智脑] 手动触发大总结...');
 
   try {
@@ -152,14 +148,14 @@ async function triggerManualSummary() {
   } catch (error) {
     console.error('[智脑] 大总结失败:', error);
   } finally {
-    isSummarizing.value = false;
+    store.setSummaryInProgress(false);
   }
 }
 
 async function triggerRedoSummary() {
   if (!latestSummary.value || summaryBusy.value) return;
 
-  isRedoingSummary.value = true;
+  store.setSummaryInProgress(true);
   console.info('[智脑] 正在回退并重新生成最新大总结...');
 
   try {
@@ -181,7 +177,7 @@ async function triggerRedoSummary() {
   } catch (error) {
     console.error('[智脑] 重新总结失败:', error);
   } finally {
-    isRedoingSummary.value = false;
+    store.setSummaryInProgress(false);
   }
 }
 
@@ -193,7 +189,7 @@ async function triggerSelectedSummary() {
     return;
   }
 
-  isSelectedSummarizing.value = true;
+  store.setSummaryInProgress(true);
   selectedSummaryResult.value = '';
   console.info(`[智脑] 选定楼层总结：${selectedContents.map(content => `#${content.messageId}`).join(', ')}`);
 
@@ -204,7 +200,7 @@ async function triggerSelectedSummary() {
     selectedSummaryResult.value = '选定楼层总结失败';
     console.error('[智脑] 选定楼层总结失败:', error);
   } finally {
-    isSelectedSummarizing.value = false;
+    store.setSummaryInProgress(false);
   }
 }
 
@@ -259,7 +255,7 @@ async function triggerManualDreamtalk() {
     return;
   }
 
-  isDreamtalkAnalyzing.value = true;
+  store.setDreamtalkInProgress(true);
   console.info('[智脑] 手动触发梦呓分析...');
 
   try {
@@ -272,7 +268,7 @@ async function triggerManualDreamtalk() {
   } catch (error) {
     console.error('[智脑] 梦呓分析失败:', error);
   } finally {
-    isDreamtalkAnalyzing.value = false;
+    store.setDreamtalkInProgress(false);
   }
 }
 </script>
@@ -344,7 +340,7 @@ async function triggerManualDreamtalk() {
             :disabled="summaryBusy"
             @click="triggerRedoSummary"
           >
-            {{ isRedoingSummary ? '重做中...' : '重新总结' }}
+            {{ summaryBusy ? '重做中...' : '重新总结' }}
           </button>
         </div>
       </div>
@@ -379,14 +375,14 @@ async function triggerManualDreamtalk() {
           :disabled="summaryBusy || summarizableCount === 0"
           @click="triggerManualSummary"
         >
-          {{ isSummarizing ? '总结中...' : `大总结 (${summarizableCount} 条可总结)` }}
+          {{ summaryBusy ? '总结中...' : `大总结 (${summarizableCount} 条可总结)` }}
         </button>
         <button
           class="zhino-btn"
-          :disabled="isDreamtalkAnalyzing || store.userInputRecords.length === 0"
+          :disabled="store.dreamtalkInProgress || store.userInputRecords.length === 0"
           @click="triggerManualDreamtalk"
         >
-          {{ isDreamtalkAnalyzing ? '分析中...' : '梦呓分析' }}
+          {{ store.dreamtalkInProgress ? '分析中...' : '梦呓分析' }}
         </button>
         <button
           class="zhino-btn"
@@ -411,7 +407,7 @@ async function triggerManualDreamtalk() {
             :disabled="summaryBusy || selectedSummaryCount === 0"
             @click="triggerSelectedSummary"
           >
-            {{ isSelectedSummarizing ? '总结中...' : `总结 (${selectedSummaryCount})` }}
+            {{ summaryBusy ? '总结中...' : `总结 (${selectedSummaryCount})` }}
           </button>
         </div>
         <div v-if="selectedSummaryResult" class="zhino-load-result">{{ selectedSummaryResult }}</div>

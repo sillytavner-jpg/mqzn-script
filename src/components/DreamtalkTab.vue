@@ -4,7 +4,6 @@ import { executeDreamtalkAnalysis } from '../core/dreamtalk';
 
 const store = useMainStore();
 
-const isAnalyzing = ref(false);
 const editingGeneralBehaviors = ref('');
 const editingCharInteraction = ref('');
 const selectedInteractionChar = ref('');
@@ -116,7 +115,7 @@ async function triggerAnalysis() {
     return;
   }
 
-  isAnalyzing.value = true;
+  store.setDreamtalkInProgress(true);
   console.info('[智脑] 手动触发梦呓分析...');
 
   try {
@@ -129,7 +128,7 @@ async function triggerAnalysis() {
   } catch (error) {
     console.error('[智脑] 梦呓分析失败:', error);
   } finally {
-    isAnalyzing.value = false;
+    store.setDreamtalkInProgress(false);
   }
 }
 </script>
@@ -143,10 +142,10 @@ async function triggerAnalysis() {
       </div>
       <button
         class="zhino-btn"
-        :disabled="isAnalyzing || store.userInputRecords.length === 0"
+        :disabled="store.dreamtalkInProgress || store.userInputRecords.length === 0"
         @click="triggerAnalysis"
       >
-        {{ isAnalyzing ? '分析中...' : '手动分析' }}
+        {{ store.dreamtalkInProgress ? '分析中...' : '手动分析' }}
       </button>
     </div>
 
@@ -300,10 +299,10 @@ async function triggerAnalysis() {
         >恢复梦呓</button>
         <button
           class="zhino-btn"
-          :disabled="isAnalyzing || store.userInputRecords.length === 0"
+          :disabled="store.dreamtalkInProgress || store.userInputRecords.length === 0"
           @click="triggerAnalysis"
         >
-          {{ isAnalyzing ? '分析中...' : '重新分析' }}
+          {{ store.dreamtalkInProgress ? '分析中...' : '重新分析' }}
         </button>
         <div class="zhino-meta">
           v{{ dreamtalk.version }} · {{ dreamtalk.generatedAt }}
