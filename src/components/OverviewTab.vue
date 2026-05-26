@@ -94,10 +94,12 @@ function getRoleLabel(role: string): string {
 }
 
 function openSummaryEditor() {
-  const summary = latestSummary.value;
-  if (summary) {
-    editingSummaryText.value = summary.rawText;
-    showSummaryEditor.value = true;
+  showSummaryEditor.value = !showSummaryEditor.value;
+  if (showSummaryEditor.value) {
+    const summary = latestSummary.value;
+    if (summary) {
+      editingSummaryText.value = summary.rawText;
+    }
   }
 }
 
