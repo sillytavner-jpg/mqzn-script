@@ -518,6 +518,20 @@ function renumberEventsInText(text: string, offset: number): string {
   return text.replace(/\[#(\d+)\]/g, (_, num) => `[#${parseInt(num, 10) + offset}]`);
 }
 
+/** 从记忆文本中提取 [日期] 用于排序 */
+function extractDateFromMemory(text: string): string {
+  const match = text.match(/^\[([^\]]+)\]/);
+  return match ? match[1] : '';
+}
+
+/** 按记忆开头的 [日期] 排序（日期早的排前面） */
+function sortMemoriesByDate(memories: string[]): string[] {
+  if (memories.length <= 1) return memories;
+  return [...memories].sort((a, b) =>
+    extractDateFromMemory(a).localeCompare(extractDateFromMemory(b)),
+  );
+}
+
 /** 从合并后的角色记忆中重建 SECTION 2 文本 */
 function buildMemorySectionText(memories: CharacterMemory[]): string {
   const parts = ['[角色记忆]'];
@@ -615,7 +629,11 @@ export async function executeGrandSummary(
 
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
-    // 首次总结：parseCharacterMemorySection 已根据"最终核心"标注了核心/近期，直接使用
+    // 首次总结：按日期排序本轮记忆
+    for (const mem of newParsed.characterMemories) {
+      mem.coreMemories = sortMemoriesByDate(mem.coreMemories || []);
+      mem.recentMemories = sortMemoriesByDate(mem.recentMemories || []);
+    }
     newParsed.rawText = outputText;
   } else {
     // ===== 2. 代码拼接：AI 新输出 + 旧总结合并 =====
@@ -647,11 +665,15 @@ export async function executeGrandSummary(
     }
 
     // --- Section 2：角色记忆合并 ---
-    // AI 自行标记 [核心]/[近期]，展示时拼接旧核心
+    // 旧核心保持原样在最前，本轮新记忆按日期排序
     for (const newMem of newParsed.characterMemories) {
       const oldMem = oldMemMap.get(newMem.characterName);
       if (oldMem) {
-        newMem.coreMemories = [...(oldMem.coreMemories || []), ...(newMem.coreMemories || [])];
+        newMem.coreMemories = [
+          ...(oldMem.coreMemories || []),                     // 旧核心在前（保持原顺序）
+          ...sortMemoriesByDate(newMem.coreMemories || []),   // 新核心按日期排
+        ];
+        newMem.recentMemories = sortMemoriesByDate(newMem.recentMemories || []);
         oldMemMap.delete(newMem.characterName);
       }
     }
