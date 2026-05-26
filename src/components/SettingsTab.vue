@@ -320,6 +320,9 @@ function clearAllData() {
             placeholder="gpt-4o"
           />
         </div>
+        <div class="zhino-api-warn">
+          ⚠️ 禁止使用gemini-3-fast等低智模型
+        </div>
         <div class="zhino-btn-row" style="margin-top:8px">
           <button class="zhino-btn-sm zhino-btn-save" :disabled="apiTesting" @click="testApiConnection">
             {{ apiTesting ? '测试中...' : '测试连接' }}
@@ -763,5 +766,16 @@ function clearAllData() {
   background: rgba(167, 139, 250, 0.15);
   color: rgba(167, 139, 250, 0.85);
   flex-shrink: 0;
+}
+
+.zhino-api-warn {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  border-radius: 4px;
+  font-size: 11px;
+  color: rgba(251, 191, 36, 0.85);
+  line-height: 1.5;
 }
 </style>
