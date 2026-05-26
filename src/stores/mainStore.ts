@@ -4,6 +4,7 @@ import type { DreamtalkData } from '../core/dreamtalk';
 import type { NsfwCharacterMemory, NsfwDreamtalkData, NsfwDynamicProfile } from '../core/nsfwIsolation';
 import type { PlotFateState } from '../core/plotFate';
 import type { EmotionAccumulationState } from '../core/emotionAccumulation';
+import { parseSummaryOutput, type ParsedSummary } from '../core/summary';
 import { extractContentFromMessage } from '../utils/messageParser';
 
 // ========== 数据类型定义 ==========
@@ -370,8 +371,8 @@ export const useMainStore = defineStore('main', () => {
         if (prevMem) {
           // 保留之前的核心记忆
           mem.coreMemories = prevMem.coreMemories;
-          // 新生成的记忆作为近期记忆（最多保留8条，合并解析出的core+recent）
-          mem.recentMemories = [...mem.coreMemories, ...mem.recentMemories].slice(0, 8);
+          // 新生成的记忆作为近期记忆（最多保留8条，不混入旧核心）
+          mem.recentMemories = (mem.recentMemories || []).slice(0, 8);
         } else {
           // 新角色：合并解析出的core+recent，前3条作为核心，其余作为近期
           const allMemories = [...mem.coreMemories, ...mem.recentMemories];
@@ -452,46 +453,54 @@ export const useMainStore = defineStore('main', () => {
     return getHiddenFloorsFromChat();
   }
 
-  /** 更新大总结原文（用户手动编辑后调用） */
+  /** 更新大总结原文（用户手动编辑后调用），完整重新解析所有 SECTION 并同步 */
   function updateSummaryRawText(version: number, newRawText: string) {
     const summary = chatData.value.summaries.find(s => s.version === version);
-    if (!summary) return;
-    summary.rawText = newRawText;
-    // 重新解析更新结构化数据
-    const sections = newRawText.split(/---SECTION---/i);
-    if (sections[1]) {
-      // 重新解析角色记忆
-      const memoryBlocks = sections[1].split(/###\s+/).filter(Boolean);
-      const memories: CharacterMemory[] = [];
-      for (const block of memoryBlocks) {
-        const lines = block.trim().split('\n');
-        if (lines.length === 0) continue;
-        const characterName = lines[0].trim();
-        if (!characterName || characterName === '[角色记忆]') continue;
-        let attitude: 'like' | 'dislike' | 'neutral' = 'neutral';
-        let keywords: string[] = [];
-        let aliases: string[] = [];
-        const memoryItems: string[] = [];
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (line.startsWith('别名:') || line.startsWith('别名：')) {
-            aliases = line.replace(/^别名[:：]\s*/, '').split(/[,，、]/).map(k => k.trim()).filter(Boolean);
-          } else if (line.startsWith('态度:') || line.startsWith('态度：')) {
-            const val = line.replace(/^态度[:：]\s*/, '').trim().toLowerCase();
-            if (val === 'like' || val === 'dislike' || val === 'neutral') attitude = val;
-          } else if (line.startsWith('关键词:') || line.startsWith('关键词：')) {
-            keywords = line.replace(/^关键词[:：]\s*/, '').split(/[,，、]/).map(k => k.trim()).filter(Boolean);
-          } else if (line.startsWith('- ')) {
-            memoryItems.push(line.slice(2).trim());
-          }
-        }
-        if (characterName && memoryItems.length > 0) {
-          memories.push({ characterName, aliases, attitude, keywords, coreMemories: [], recentMemories: memoryItems });
+    if (!summary || !newRawText.trim()) return;
+
+    try {
+      const parsed: ParsedSummary = parseSummaryOutput(newRawText, version);
+
+      // 校验：如果解析后角色记忆为空但原本有数据，拒绝写入
+      if (parsed.characterMemories.length === 0 && summary.characterMemories.length > 0) {
+        throw new Error('解析结果异常：角色记忆为空');
+      }
+
+      summary.rawText = newRawText;
+      summary.characterMemories = parsed.characterMemories;
+      summary.timeline = parsed.timeline;
+      summary.characterTable = parsed.characterTable;
+
+      // 同步 dynamicProfiles
+      for (const profile of parsed.dynamicProfiles) {
+        const existing = chatData.value.dynamicProfiles.find(
+          p => p.characterName === profile.characterName,
+        );
+        if (existing) {
+          Object.assign(existing, profile);
+        } else {
+          chatData.value.dynamicProfiles.push(profile);
         }
       }
-      summary.characterMemories = memories;
+
+      // 同步 nsfwMemories
+      if (parsed.nsfwMemories && parsed.nsfwMemories.length > 0) {
+        for (const mem of parsed.nsfwMemories) {
+          const existing = chatData.value.nsfwMemories.find(
+            m => m.characterName === mem.characterName,
+          );
+          if (existing) {
+            Object.assign(existing, mem);
+          } else {
+            chatData.value.nsfwMemories.push(mem);
+          }
+        }
+      }
+
+      console.info(`[智脑] 大总结 v${version} 手动编辑后已完整重新解析并同步`);
+    } catch (error) {
+      console.error('[智脑] 重新解析失败，保留原结构', error);
     }
-    console.info(`[智脑] 大总结 v${version} 已手动更新`);
   }
 
   // ========== 动态人设相关 ==========

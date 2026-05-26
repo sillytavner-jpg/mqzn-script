@@ -228,7 +228,7 @@ function buildInputMaterial(capturedContents: CapturedContent[], previousSummary
 
 // ========== 解析AI输出 ==========
 
-interface ParsedSummary {
+export interface ParsedSummary {
   timeline: TimelineEvent[];
   characterMemories: CharacterMemory[];
   dynamicProfiles: DynamicProfile[];
@@ -364,7 +364,7 @@ function parseDynamicProfileSection(section: string, summaryVersion: number): Dy
   return profiles;
 }
 
-function parseSummaryOutput(rawText: string, summaryVersion: number): ParsedSummary {
+export function parseSummaryOutput(rawText: string, summaryVersion: number): ParsedSummary {
   const sections = rawText.split(/---SECTION---/i);
 
   const narrativeSection = sections[0] || '';
@@ -438,6 +438,18 @@ export async function executeGrandSummary(
   } // 解析输出
 
   const parsed = parseSummaryOutput(outputText, summaryVersion);
+
+  // 解析校验：如果本次解析出的角色记忆比上次锐减超过50%，说明AI输出格式异常，拒绝写入
+  if (
+    previousSummary &&
+    parsed.characterMemories.length < previousSummary.characterMemories.length * 0.5
+  ) {
+    console.error(
+      '[智脑] 解析结果异常（角色记忆数量锐减超过50%），放弃本次总结',
+      { old: previousSummary.characterMemories.length, new: parsed.characterMemories.length },
+    );
+    throw new Error('解析失败：角色记忆异常减少，请检查 AI 输出格式');
+  }
 
   const summary: GrandSummary = {
     version: summaryVersion,

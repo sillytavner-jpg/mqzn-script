@@ -367,6 +367,18 @@ $(() => {
       console.error('[智脑] 大总结失败:', error);
     } finally {
       store.setSummaryInProgress(false);
+
+      // 总结期间可能又有新消息到达，500ms后检查是否需要二次总结
+      setTimeout(() => {
+        const newPending = getContentsSinceLast(store.capturedContents, store.lastSummaryAtMessageId);
+        if (
+          newPending.length >= store.settings.summaryInterval &&
+          newPending.length > PRESERVE_RECENT_COUNT
+        ) {
+          console.info(`[智脑] 总结后有 ${newPending.length} 条新消息，准备二次总结`);
+          checkAndTriggerSummary(store);
+        }
+      }, 500);
     }
   }
 
