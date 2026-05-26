@@ -388,22 +388,22 @@ export const useMainStore = defineStore('main', () => {
 
     // 记忆分层合并逻辑
     if (summary.version === 1) {
-      // 第一次大总结：合并 core + recent（AI可能输出[核心]或[近期]或无标记），全部归为核心
+      // 第一次大总结：所有记忆归为核心（AI已按提示输出[核心]标记，3-5条）
       for (const mem of summary.characterMemories) {
         const allMemories = [...mem.coreMemories, ...mem.recentMemories];
-        mem.coreMemories = allMemories.slice(0, 5);
+        mem.coreMemories = allMemories.slice(0, 5); // v1: 3-5条核心记忆
         mem.recentMemories = [];
       }
     } else if (previousSummary) {
-      // 后续大总结：保留之前的核心记忆不变，新生成的记忆标记为近期
+      // 后续大总结：AI已自行处理升格（[核心]=从旧近期升格，[近期]=从本次日志新生成）
+      // 代码侧：旧核心 + AI升格核心 = 完整核心；AI近期直接使用
       for (const mem of summary.characterMemories) {
         const prevMem = previousSummary.characterMemories.find(
           m => m.characterName === mem.characterName,
         );
         if (prevMem) {
-          // 保留之前的核心记忆
-          mem.coreMemories = prevMem.coreMemories;
-          // 新生成的记忆作为近期记忆（最多保留8条，不混入旧核心）
+          // 已有角色：保留旧核心 + AI升格的核心（上限12条），近期用AI本次生成的
+          mem.coreMemories = [...(prevMem.coreMemories || []), ...(mem.coreMemories || [])].slice(0, 12);
           mem.recentMemories = (mem.recentMemories || []).slice(0, 8);
         } else {
           // 新角色：合并解析出的core+recent，前3条作为核心，其余作为近期
@@ -503,13 +503,16 @@ export const useMainStore = defineStore('main', () => {
       summary.timeline = parsed.timeline;
       summary.characterTable = parsed.characterTable;
 
-      // 同步 dynamicProfiles
+      // 同步 dynamicProfiles（保留首次创建版本号，回滚时不误删；拦截记忆格式污染数据）
       for (const profile of parsed.dynamicProfiles) {
+        if (/^(别名[:：]|态度[:：]|关键词[:：]|- \[)/m.test(profile.dynamicContent?.trim() || '')) continue;
         const existing = chatData.value.dynamicProfiles.find(
           p => p.characterName === profile.characterName,
         );
         if (existing) {
+          const oldVersion = existing.basedOnSummaryVersion;
           Object.assign(existing, profile);
+          existing.basedOnSummaryVersion = oldVersion;
         } else {
           chatData.value.dynamicProfiles.push(profile);
         }
@@ -538,11 +541,18 @@ export const useMainStore = defineStore('main', () => {
   // ========== 动态人设相关 ==========
 
   function updateDynamicProfile(profile: DynamicProfile) {
+    // 拦截污染数据：内容为角色记忆格式的拒绝写入
+    if (/^(别名[:：]|态度[:：]|关键词[:：]|- \[)/m.test(profile.dynamicContent?.trim() || '')) {
+      console.warn(`[智脑] 拒绝写入污染的动态人设: ${profile.characterName}（内容为角色记忆格式）`);
+      return;
+    }
     const existing = chatData.value.dynamicProfiles.find(
       p => p.characterName === profile.characterName,
     );
     if (existing) {
+      const oldVersion = existing.basedOnSummaryVersion;
       Object.assign(existing, profile);
+      existing.basedOnSummaryVersion = oldVersion; // 保留首次创建的版本号，回滚时不误删
     } else {
       chatData.value.dynamicProfiles.push(profile);
     }

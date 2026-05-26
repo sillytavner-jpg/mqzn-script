@@ -333,7 +333,7 @@ $(() => {
       }
 
       const previousSummary = store.getLatestSummary();
-      const { summary, dynamicProfiles, nsfwMemories } = await executeGrandSummary(pendingContents, previousSummary);
+      const { summary, dynamicProfiles, nsfwMemories } = await executeGrandSummary(pendingContents, previousSummary, store.dynamicProfiles);
       const summarizedMessageIds = getCapturedContentMessageIds(pendingContents);
       const summarizedUpTo = summarizedMessageIds[summarizedMessageIds.length - 1] ?? store.lastSummaryAtMessageId;
 
