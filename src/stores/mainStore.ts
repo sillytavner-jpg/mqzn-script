@@ -4,6 +4,7 @@ import type { DreamtalkData } from '../core/dreamtalk';
 import type { NsfwCharacterMemory, NsfwDreamtalkData, NsfwDynamicProfile } from '../core/nsfwIsolation';
 import type { PlotFateState } from '../core/plotFate';
 import type { EmotionAccumulationState } from '../core/emotionAccumulation';
+import { extractContentFromMessage } from '../utils/messageParser';
 
 // ========== 数据类型定义 ==========
 
@@ -572,11 +573,8 @@ export const useMainStore = defineStore('main', () => {
         continue;
       }
 
-      // 提取 <content>...</content> 中的正文，fallback 为去掉 <think> 后的全文
-        const contentMatch = msg.message.match(/<content>([\s\S]*?)<\/content>/);
-        const extractedContent = contentMatch
-          ? contentMatch[1].trim()
-          : msg.message.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+      // 使用统一的 extractContentFromMessage（含 <time> 标签提取）
+        const extractedContent = extractContentFromMessage(msg.message);
         if (!extractedContent) continue;
 
       // 存入 capturedContents
