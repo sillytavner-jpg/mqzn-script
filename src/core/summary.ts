@@ -221,9 +221,9 @@ function buildInputMaterial(capturedContents: CapturedContent[], previousSummary
   const parts: string[] = [];
 
   if (previousSummary) {
-    // 只保留前两个 SECTION（剧情摘要 + 角色记忆），去掉动态人设和NSFW（每次重新生成，不需要喂回去）
+    // 只保留前三个 SECTION（剧情摘要 + 角色记忆 + 动态人设），NSFW每次重新生成不需要喂回去
     const sections = previousSummary.rawText.split(/---SECTION---/i);
-    const slimmedText = sections.slice(0, 2).join('\n---SECTION---\n');
+    const slimmedText = sections.slice(0, 3).join('\n---SECTION---\n');
     parts.push('## ⚠️ 前次大总结（必须逐条原样列入新总结中，绝对不可遗漏！）');
     parts.push('');
     parts.push(slimmedText);
