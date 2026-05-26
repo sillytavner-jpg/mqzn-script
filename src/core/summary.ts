@@ -221,9 +221,12 @@ function buildInputMaterial(capturedContents: CapturedContent[], previousSummary
   const parts: string[] = [];
 
   if (previousSummary) {
+    // 只保留前两个 SECTION（剧情摘要 + 角色记忆），去掉动态人设和NSFW（每次重新生成，不需要喂回去）
+    const sections = previousSummary.rawText.split(/---SECTION---/i);
+    const slimmedText = sections.slice(0, 2).join('\n---SECTION---\n');
     parts.push('## ⚠️ 前次大总结（必须逐条原样列入新总结中，绝对不可遗漏！）');
     parts.push('');
-    parts.push(previousSummary.rawText);
+    parts.push(slimmedText);
     parts.push('');
     parts.push('--- 以上旧摘要内容必须全部保留，新内容在下方 ---');
     parts.push('');
