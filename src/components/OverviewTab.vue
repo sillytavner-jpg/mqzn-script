@@ -163,7 +163,7 @@ async function triggerRedoSummary() {
   console.info('[智脑] 正在回退并重新生成最新大总结...');
 
   try {
-    const removedSummary = store.rollbackSummary();
+    const removedSummary = store.rollbackSummary(true);
     if (!removedSummary) return;
 
     const coveredIds = new Set(removedSummary.coveredMessageIds ?? []);
