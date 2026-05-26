@@ -646,7 +646,12 @@ export async function executeGrandSummary(
 
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
-    // 首次总结：保持 AI 原始编号顺序，直接使用
+    // 首次总结：用 buildMemorySectionText 重建 SECTION 2，去掉 AI 编号和"核心判定"，统一为 [- [核心]/[近期]]
+    const sections = outputText.split(/---SECTION---/i);
+    if (sections.length >= 2) {
+      sections[1] = buildMemorySectionText(newParsed.characterMemories);
+      outputText = sections.join('---SECTION---');
+    }
     newParsed.rawText = outputText;
   } else {
     // ===== 2. 代码拼接：AI 新输出 + 旧总结合并 =====
