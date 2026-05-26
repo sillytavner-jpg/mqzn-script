@@ -28,9 +28,11 @@ export interface CharacterMemory {
   characterName: string;
   aliases: string[];
   attitude: 'like' | 'dislike' | 'neutral';
-  coreMemories: string[];    // 核心记忆（永久，3-5条，第一次大总结时生成）
-  recentMemories: string[];  // 近期记忆（滚动，5-8条，最近2-3次大总结产生）
+  coreMemories: string[];    // 核心记忆（永久，累积，无上限）
+  recentMemories: string[];  // 近期记忆（本轮新生成的，每次总结替换）
   keywords: string[];
+  /** AI 原始编号顺序（展示用，非持久），如 [{text:"...", isCore:true}, ...] */
+  orderedNewMemories?: Array<{ text: string; isCore: boolean }>;
 }
 
 export interface TimelineEvent {

@@ -389,9 +389,10 @@ function parseCharacterMemorySection(section: string): CharacterMemory[] {
       }
     }
 
-    // 分类记忆
+    // 分类记忆（保留 AI 原始编号顺序）
     const coreMemoryItems: string[] = [];
     const recentMemoryItems: string[] = [];
+    const orderedNewMemories: Array<{ text: string; isCore: boolean }> = [];
 
     if (numberedMemories.length > 0) {
       for (let idx = 0; idx < numberedMemories.length; idx++) {
@@ -411,6 +412,19 @@ function parseCharacterMemorySection(section: string): CharacterMemory[] {
           const idx = numberedMemories.indexOf(core);
           if (idx !== -1) recentMemoryItems.splice(recentMemoryItems.indexOf(core), 1);
         }
+        // 更新核心标记
+        for (let i = 0; i < Math.min(3, numberedMemories.length); i++) {
+          coreIndices.add(i + 1);
+        }
+      }
+
+      // 按 AI 原始编号顺序构建 orderedNewMemories
+      for (let idx = 0; idx < numberedMemories.length; idx++) {
+        if (!numberedMemories[idx]) continue;
+        orderedNewMemories.push({
+          text: numberedMemories[idx],
+          isCore: coreIndices.has(idx + 1),
+        });
       }
     }
 
@@ -422,6 +436,7 @@ function parseCharacterMemorySection(section: string): CharacterMemory[] {
         keywords,
         coreMemories: coreMemoryItems,
         recentMemories: recentMemoryItems,
+        orderedNewMemories,
       });
     }
   }
@@ -518,20 +533,6 @@ function renumberEventsInText(text: string, offset: number): string {
   return text.replace(/\[#(\d+)\]/g, (_, num) => `[#${parseInt(num, 10) + offset}]`);
 }
 
-/** 从记忆文本中提取 [日期] 用于排序 */
-function extractDateFromMemory(text: string): string {
-  const match = text.match(/^\[([^\]]+)\]/);
-  return match ? match[1] : '';
-}
-
-/** 按记忆开头的 [日期] 排序（日期早的排前面） */
-function sortMemoriesByDate(memories: string[]): string[] {
-  if (memories.length <= 1) return memories;
-  return [...memories].sort((a, b) =>
-    extractDateFromMemory(a).localeCompare(extractDateFromMemory(b)),
-  );
-}
-
 /** 从合并后的角色记忆中重建 SECTION 2 文本 */
 function buildMemorySectionText(memories: CharacterMemory[]): string {
   const parts = ['[角色记忆]'];
@@ -540,12 +541,28 @@ function buildMemorySectionText(memories: CharacterMemory[]): string {
     if (m.aliases?.length) parts.push(`别名: ${m.aliases.join(', ')}`);
     parts.push(`态度: ${m.attitude}`);
     if (m.keywords?.length) parts.push(`关键词: ${m.keywords.join(', ')}`);
-    for (const core of m.coreMemories || []) {
-      parts.push(`- [核心]${core}`);
+
+    if (m.orderedNewMemories && m.orderedNewMemories.length > 0) {
+      // 有 orderedNewMemories：旧核心在前，然后按 AI 原始编号顺序穿插新记忆
+      // coreMemories 中的"纯旧核心" = 总数 - 本轮新核心数
+      const newCoreCount = m.orderedNewMemories.filter(mem => mem.isCore).length;
+      const oldCoreOnly = (m.coreMemories || []).slice(0, m.coreMemories.length - newCoreCount);
+      for (const core of oldCoreOnly) {
+        parts.push(`- [核心]${core}`);
+      }
+      for (const mem of m.orderedNewMemories) {
+        parts.push(`- ${mem.isCore ? '[核心]' : '[近期]'}${mem.text}`);
+      }
+    } else {
+      // 兜底：旧格式（无 orderedNewMemories）
+      for (const core of m.coreMemories || []) {
+        parts.push(`- [核心]${core}`);
+      }
+      for (const recent of m.recentMemories || []) {
+        parts.push(`- [近期]${recent}`);
+      }
     }
-    for (const recent of m.recentMemories || []) {
-      parts.push(`- [近期]${recent}`);
-    }
+
     parts.push('');
   }
   return parts.join('\n');
@@ -629,11 +646,7 @@ export async function executeGrandSummary(
 
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
-    // 首次总结：按日期排序本轮记忆
-    for (const mem of newParsed.characterMemories) {
-      mem.coreMemories = sortMemoriesByDate(mem.coreMemories || []);
-      mem.recentMemories = sortMemoriesByDate(mem.recentMemories || []);
-    }
+    // 首次总结：保持 AI 原始编号顺序，直接使用
     newParsed.rawText = outputText;
   } else {
     // ===== 2. 代码拼接：AI 新输出 + 旧总结合并 =====
@@ -665,15 +678,12 @@ export async function executeGrandSummary(
     }
 
     // --- Section 2：角色记忆合并 ---
-    // 旧核心保持原样在最前，本轮新记忆按日期排序
+    // 核心合并（addSummary 需要），orderedNewMemories 保留 AI 原始编号顺序供展示
     for (const newMem of newParsed.characterMemories) {
       const oldMem = oldMemMap.get(newMem.characterName);
       if (oldMem) {
-        newMem.coreMemories = [
-          ...(oldMem.coreMemories || []),                     // 旧核心在前（保持原顺序）
-          ...sortMemoriesByDate(newMem.coreMemories || []),   // 新核心按日期排
-        ];
-        newMem.recentMemories = sortMemoriesByDate(newMem.recentMemories || []);
+        newMem.coreMemories = [...(oldMem.coreMemories || []), ...(newMem.coreMemories || [])];
+        // orderedNewMemories 保持 AI 输出的原始编号顺序，显示时穿插核心/近期
         oldMemMap.delete(newMem.characterName);
       }
     }
