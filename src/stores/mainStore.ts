@@ -182,15 +182,24 @@ export const useMainStore = defineStore('main', () => {
     ScriptSettingsSchema.parse(getVariables({ type: 'script', script_id: getScriptId() })),
   );
 
-  // 从聊天变量加载聊天数据
-  const chatData = ref<ChatData>(ChatDataSchema.parse(getVariables({ type: 'chat' })));
+  /**
+   * 所有聊天的数据存储。
+   * 酒馆的 getVariables({ type: 'chat' }) 实际上按 script_id 全局存储，
+   * 并非按聊天隔离，所以这里用一个 Record<chatId, ChatData> 来手动隔离。
+   */
+  const allChatsData = ref<Record<string, ChatData>>(
+    getVariables({ type: 'chat' }) ?? {},
+  );
 
-  // 验证聊天数据是否属于当前聊天（防止新聊天继承旧数据）
   const currentChatId = SillyTavern.getCurrentChatId();
-  if (chatData.value.chatId && chatData.value.chatId !== currentChatId) {
-    chatData.value = ChatDataSchema.parse({});
-    console.info('[智脑] 检测到聊天切换，已重置聊天数据');
-  }
+
+  // 从 allChatsData 中提取当前聊天的数据（不存在则初始化）
+  const chatData = ref<ChatData>(
+    allChatsData.value[currentChatId]
+      ? ChatDataSchema.parse(allChatsData.value[currentChatId])
+      : ChatDataSchema.parse({}),
+  );
+
   // 首次初始化时记录当前聊天ID
   if (!chatData.value.chatId) {
     chatData.value.chatId = currentChatId;
@@ -201,9 +210,11 @@ export const useMainStore = defineStore('main', () => {
     replaceVariables(klona(scriptData.value), { type: 'script', script_id: getScriptId() });
   });
 
-  // 自动保存聊天变量
+  // 自动保存聊天变量（写入 allChatsData，以 chatId 为 key）
   watchEffect(() => {
-    replaceVariables(klona(chatData.value), { type: 'chat' });
+    const allData = getVariables({ type: 'chat' }) ?? {};
+    allData[currentChatId] = klona(chatData.value);
+    replaceVariables(allData, { type: 'chat' });
   });
 
   // ========== 便捷访问器 ==========
