@@ -192,16 +192,51 @@ const CHAT_DATA_KEY = 'mqzn_chat_data';
 const SETTINGS_KEY = 'mqzn_settings';
 /** 跨版本恢复用的稳定ID，不依赖 getScriptId() */
 const STABLE_ID = 'mqzn-script-data';
+/** localStorage key for global settings */
+const SETTINGS_LOCAL_KEY = 'mqzn_global_settings';
+
+function loadSettingsFromLocal(): any | null {
+  try {
+    const storage = (window.parent || window).localStorage;
+    const raw = storage.getItem(SETTINGS_LOCAL_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+function saveSettingsToLocal(data: any): void {
+  try {
+    const storage = (window.parent || window).localStorage;
+    storage.setItem(SETTINGS_LOCAL_KEY, JSON.stringify(data));
+  } catch (e) { /* ignore */ }
+}
 
 function tryReadData(currentScriptId: string): { chatData: any; settings: any; migrated: boolean } {
-  // 1. 主存储：当前脚本的 type:'chat' + type:'script'（正常情况，script_id 不变）
   const primaryChat = getVariables({ type: 'chat' });
   const primaryScript = getVariables({ type: 'script', script_id: currentScriptId }) ?? {};
-  if (primaryChat && Object.keys(primaryChat).length > 0) {
-    return { chatData: primaryChat, settings: primaryScript, migrated: false };
+
+  // settings 加载优先级：localStorage > script变量 > 空
+  let settings: any = null;
+  const localSettings = loadSettingsFromLocal();
+  if (localSettings) {
+    settings = localSettings;
+    console.info('[智脑] 从 localStorage 加载全局设置');
+  } else if (primaryScript && Object.keys(primaryScript).length > 0) {
+    settings = primaryScript;
   }
-  if (primaryScript && Object.keys(primaryScript).length > 0) {
-    return { chatData: {}, settings: primaryScript, migrated: false };
+
+  if (!settings) {
+    settings = {};
+  }
+
+  const hasChat = primaryChat && Object.keys(primaryChat).length > 0;
+  const hasScriptSettings = settings && Object.keys(settings).length > 0;
+
+  if (hasChat) {
+    return { chatData: primaryChat, settings, migrated: !hasScriptSettings };
+  }
+  if (hasScriptSettings) {
+    return { chatData: {}, settings, migrated: false };
   }
 
   // 2. 跨版本恢复：硬编码 script_id（换版本后 script_id 变了，从这里恢复）
@@ -210,7 +245,7 @@ function tryReadData(currentScriptId: string): { chatData: any; settings: any; m
     console.info('[智脑] 从跨版本备份恢复数据...');
     return {
       chatData: stable[CHAT_DATA_KEY] ?? {},
-      settings: stable[SETTINGS_KEY] ?? stable, // 兼容直接存的旧格式
+      settings: stable[SETTINGS_KEY] ?? stable,
       migrated: true,
     };
   }
@@ -240,6 +275,7 @@ export const useMainStore = defineStore('main', () => {
   // 迁移后立即写回，并同步到跨版本备份
   if (migratedFromOld || needsMigration) {
     replaceVariables(klona(allChatsData.value), { type: 'chat' });
+    saveSettingsToLocal(scriptData.value);
     replaceVariables(klona(scriptData.value), { type: 'script', script_id: currentScriptId });
     // 同步备份
     const backup = {
@@ -270,11 +306,17 @@ export const useMainStore = defineStore('main', () => {
   function setSummaryInProgress(v: boolean) { summaryInProgress.value = v; }
   function setDreamtalkInProgress(v: boolean) { dreamtalkInProgress.value = v; }
 
-  // 自动保存：主存储(chat+script) + 跨版本备份(hardcoded script_id)
+  // 自动保存：
+  // - 聊天数据 → type:'chat'（持久化可靠，per-chat）
+  // - 全局设置 → localStorage（持久化可靠，全局共享）
+  // - script 变量仅作辅助副本（刷新后丢失）
   watchEffect(() => {
     allChatsData.value[currentChatId] = klona(chatData.value);
-    // 主存储
+    // 聊天数据存 type:'chat'
     replaceVariables(klona(allChatsData.value), { type: 'chat' });
+    // 全局设置存 localStorage（持久化可靠）
+    saveSettingsToLocal(scriptData.value);
+    // script 变量（运行中共享，刷新后会丢，此处仅作辅助）
     replaceVariables(klona(scriptData.value), { type: 'script', script_id: currentScriptId });
     // 跨版本备份
     const backup = {
