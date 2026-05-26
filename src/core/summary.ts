@@ -703,12 +703,18 @@ export async function executeGrandSummary(
     }
 
     // --- Section 2：角色记忆合并 ---
-    // 核心合并（addSummary 需要），orderedNewMemories 保留 AI 原始编号顺序供展示
+    // 旧角色：核心记忆保持不变（模型看不到旧总结，[核心]标记不可信）
+    // 模型输出的[核心]记忆归入近期，避免与旧核心重复
     for (const newMem of newParsed.characterMemories) {
       const oldMem = oldMemMap.get(newMem.characterName);
       if (oldMem) {
-        newMem.coreMemories = [...(oldMem.coreMemories || []), ...(newMem.coreMemories || [])];
-        // orderedNewMemories 保持 AI 输出的原始编号顺序，显示时穿插核心/近期
+        const aiCoreMemories = newMem.coreMemories || [];  // 先保存AI原始核心
+        newMem.coreMemories = oldMem.coreMemories || [];   // 旧核心永久不变
+        // AI 的 [核心] 记忆移到近期（AI 看不到旧总结，可能输出与旧核心相同的内容）
+        newMem.recentMemories = [
+          ...(newMem.recentMemories || []),
+          ...aiCoreMemories,
+        ].slice(0, 8);
         oldMemMap.delete(newMem.characterName);
       }
     }

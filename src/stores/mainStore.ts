@@ -430,14 +430,14 @@ export const useMainStore = defineStore('main', () => {
   function addSummary(summary: GrandSummary, upToMessageId?: number, coveredMessageIds?: number[]) {
     const previousSummary = getLatestSummary();
 
-    // 记忆分层合并：AI 每次输出5-8条记忆（1-3条核心+其余近期）
-    // v1：直接使用AI输出；v2+：旧核心+AI核心=新核心，AI近期替换旧近期
+    // 记忆分层合并：旧角色核心永久不变，AI输出全部归入近期
+    // v1：直接使用AI输出；v2+：旧核心保留，AI核心→近期（AI看不到旧总结，[核心]标记不可信）
     for (const mem of summary.characterMemories) {
       const prevMem = previousSummary?.characterMemories.find(
         m => m.characterName === mem.characterName,
       );
       if (prevMem) {
-        mem.coreMemories = [...prevMem.coreMemories, ...(mem.coreMemories || [])];
+        mem.coreMemories = prevMem.coreMemories;
         mem.recentMemories = (mem.recentMemories || []).slice(0, 8);
       } else if (previousSummary && summary.version > 1) {
         // 新角色（非首次总结）：AI可能没标核心，前3条当核心
