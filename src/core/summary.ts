@@ -270,20 +270,17 @@ export interface ParsedSummary {
 }
 
 /**
- * 解析叙事摘要部分
- * 新格式：[YYYY-MM-DD] 叙事段落
- * 保留为 rawText，同时提取 TimelineEvent 用于兼容
+ * 解析叙事摘要部分——逐行匹配 [日期] 开头的行（更稳健）
  */
 function parseNarrativeSummarySection(section: string): TimelineEvent[] {
   const events: TimelineEvent[] = [];
-  const paragraphs = section.split(/\n\n+/);
+  const lines = section.split('\n');
 
-  for (const para of paragraphs) {
-    const trimmed = para.trim();
+  for (const line of lines) {
+    const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // 匹配 [任意剧情时间] 开头的段落（支持各种时间格式）
-    const dateMatch = trimmed.match(/^\[([^\]]+)\]\s*([\s\S]+)/);
+    const dateMatch = trimmed.match(/^\[([^\]]+)\]\s*(.+)/);
     if (dateMatch && !dateMatch[1].startsWith('剧情摘要')) {
       events.push({
         time: dateMatch[1],
@@ -404,17 +401,25 @@ function parseCharacterMemorySection(section: string): CharacterMemory[] {
         }
       }
 
-      // 兜底：如果 AI 没有输出核心判定或核心为空，前3条当核心
-      if (coreMemoryItems.length === 0 && coreIndices.size === 0) {
-        const fallbackCore = numberedMemories.slice(0, Math.min(3, numberedMemories.length));
+      // 兜底：如果解析后核心为空，前3条有效记忆当核心
+      // 只检查 coreMemoryItems（之前 && coreIndices.size===0 太严格，
+      // AI 输出异常编号时 coreIndices 非空但都对不上 → 全部变近期）
+      if (coreMemoryItems.length === 0) {
+        if (numberedMemories.length > 0) {
+          console.warn(`[智脑] ⚠️ ${characterName} 核心解析失败（numbered=${numberedMemories.filter(Boolean).length}条 coreIndices=[${[...coreIndices]}]），已兜底取前3条`);
+        }
+        coreIndices = new Set(); // 清除无效标记，避免 orderedNewMemories 用错误值
+        const validMemories = numberedMemories.filter(m => m); // 排除空槽位
+        const fallbackCore = validMemories.slice(0, Math.min(3, validMemories.length));
         coreMemoryItems.push(...fallbackCore);
         for (const core of fallbackCore) {
-          const idx = numberedMemories.indexOf(core);
-          if (idx !== -1) recentMemoryItems.splice(recentMemoryItems.indexOf(core), 1);
+          const idx = recentMemories.indexOf(core);
+          if (idx !== -1) recentMemories.splice(idx, 1);
         }
-        // 更新核心标记
-        for (let i = 0; i < Math.min(3, numberedMemories.length); i++) {
-          coreIndices.add(i + 1);
+        // 更新核心标记（用原始 numberedMemories 索引，而非 validMemories）
+        for (let i = 0; i < Math.min(3, validMemories.length); i++) {
+          const origIdx = numberedMemories.indexOf(validMemories[i]);
+          if (origIdx !== -1) coreIndices.add(origIdx + 1);
         }
       }
 
@@ -516,13 +521,14 @@ export function parseSummaryOutput(rawText: string, summaryVersion: number): Par
 // ========== 代码拼接：新旧大总结合并 ==========
 
 /** 从旧 timeline 中提取最大事件序号 */
-function extractMaxTimelineNumber(timeline: TimelineEvent[]): number {
+/** 从旧总结的 rawText 中提取最大事件序号（AI不输出[#N]，timeline不含序号） */
+function extractMaxSummaryNumber(rawText: string): number {
   let maxNum = 0;
-  for (const e of timeline) {
-    if (e.time?.startsWith('#')) {
-      const num = parseInt(e.time.slice(1), 10);
-      if (!isNaN(num)) maxNum = Math.max(maxNum, num);
-    }
+  // 只查 Section 1（剧情摘要部分），避免匹配到其他 section
+  const section1 = rawText.split(/---SECTION---/i)[0] || rawText;
+  for (const m of section1.matchAll(/\[#(\d+)\]/g)) {
+    const num = parseInt(m[1], 10);
+    if (!isNaN(num)) maxNum = Math.max(maxNum, num);
   }
   return maxNum;
 }
@@ -547,10 +553,9 @@ function buildMemorySectionText(memories: CharacterMemory[]): string {
     if (m.keywords?.length) parts.push(`关键词: ${m.keywords.join(', ')}`);
 
     if (m.orderedNewMemories && m.orderedNewMemories.length > 0) {
-      // 有 orderedNewMemories：旧核心在前，然后按 AI 原始编号顺序穿插新记忆
-      // coreMemories 中的"纯旧核心" = 总数 - 本轮新核心数
-      const newCoreCount = m.orderedNewMemories.filter(mem => mem.isCore).length;
-      const oldCoreOnly = (m.coreMemories || []).slice(0, m.coreMemories.length - newCoreCount);
+      // 有 orderedNewMemories：纯旧核心在前，然后按 AI 原始顺序输出新条目
+      const orderedTexts = new Set(m.orderedNewMemories.map((mem: any) => mem.text));
+      const oldCoreOnly = (m.coreMemories || []).filter(c => !orderedTexts.has(c));
       for (const core of oldCoreOnly) {
         parts.push(`- [核心]${core}`);
       }
@@ -648,19 +653,6 @@ export async function executeGrandSummary(
 
   const newParsed = parseSummaryOutput(outputText, summaryVersion);
 
-  // ===== 1.5 防守：检测总结是否失败（内容为空/过少）=====
-  const totalNewMemories = newParsed.characterMemories.reduce(
-    (sum, m) => sum + (m.coreMemories?.length || 0) + (m.recentMemories?.length || 0),
-    0,
-  );
-  if (totalNewMemories === 0) {
-    throw new Error('[智脑] 总结失败：AI 未生成任何角色记忆，请检查日志或重试');
-  }
-  // v2+ 额外检查：新剧情摘要是否有新事件（AI输出[剧情日期]格式，不含[#N]）
-  if (!isFirstSummary && newParsed.timeline.length === 0) {
-    throw new Error('[智脑] 总结失败：AI 未生成新的剧情事件，请检查日志或重试');
-  }
-
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
     // 首次总结：SECTION 2 用 buildMemorySectionText 重建；SECTION 1 代码加序号
@@ -685,7 +677,7 @@ export async function executeGrandSummary(
     );
 
     // --- Section 1：旧事件 + 代码编号新事件 ---
-    const offset = extractMaxTimelineNumber(previousSummary!.timeline);
+    const offset = extractMaxSummaryNumber(previousSummary!.rawText);
     const newS1Numbered = addEventNumbers(parsedSection1Text, offset + 1);
     // 清理 AI 输出的 section 标题行（### 第X部分、[剧情摘要] 等），防止插入旧事件和新事件之间
     const cleanS1 = newS1Numbered
@@ -703,18 +695,23 @@ export async function executeGrandSummary(
     }
 
     // --- Section 2：角色记忆合并 ---
-    // 旧角色：核心记忆保持不变（模型看不到旧总结，[核心]标记不可信）
-    // 模型输出的[核心]记忆归入近期，避免与旧核心重复
+    // 旧角色：保留旧核心，AI的[核心]记忆去重后追加（一字不差重复的过滤掉）
     for (const newMem of newParsed.characterMemories) {
       const oldMem = oldMemMap.get(newMem.characterName);
       if (oldMem) {
-        const aiCoreMemories = newMem.coreMemories || [];  // 先保存AI原始核心
-        newMem.coreMemories = oldMem.coreMemories || [];   // 旧核心永久不变
-        // AI 的 [核心] 记忆移到近期（AI 看不到旧总结，可能输出与旧核心相同的内容）
-        newMem.recentMemories = [
-          ...(newMem.recentMemories || []),
-          ...aiCoreMemories,
-        ].slice(0, 8);
+        const oldCores = oldMem.coreMemories || [];
+        const newCores = (newMem.coreMemories || []).filter(
+          nc => !oldCores.includes(nc),  // 只过滤完全相同的重复条目
+        );
+        newMem.coreMemories = [...oldCores, ...newCores];
+        newMem.recentMemories = (newMem.recentMemories || []).slice(0, 8);
+        // 同步更新 orderedNewMemories：被去重掉的条目标记 isCore=false
+        const keptCoreTexts = new Set(newCores);
+        if ((newMem as any).orderedNewMemories) {
+          (newMem as any).orderedNewMemories = (newMem as any).orderedNewMemories.map(
+            (m: any) => ({ text: m.text, isCore: m.isCore && keptCoreTexts.has(m.text) }),
+          );
+        }
         oldMemMap.delete(newMem.characterName);
       }
     }

@@ -298,12 +298,6 @@ export const useMainStore = defineStore('main', () => {
     chatData.value.chatId = currentChatId;
   }
 
-  // 梦呓 v1 → v2 迁移：检测旧格式（有 generalBehaviors 字段），自动丢弃让下次大总结重新生成
-  if (chatData.value.dreamtalk && (chatData.value.dreamtalk as any).generalBehaviors !== undefined) {
-    console.info('[智脑] 检测到梦呓 v1 旧格式，已自动迁移为 v2（下次大总结时重新分析）');
-    chatData.value.dreamtalk = null;
-  }
-
   // ========== 运行状态（不持久化，脚本重载后重置） ==========
 
   const summaryInProgress = ref(false);
