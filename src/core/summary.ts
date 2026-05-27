@@ -660,6 +660,22 @@ export async function executeGrandSummary(
 
   const newParsed = parseSummaryOutput(outputText, summaryVersion);
 
+  // ===== 1.5 防御检测：AI 输出为空/无新事件时抛错 =====
+  const totalNewMemories = newParsed.characterMemories.reduce(
+    (sum, m) => sum + (m.coreMemories?.length || 0) + (m.recentMemories?.length || 0),
+    0,
+  );
+  if (totalNewMemories === 0) {
+    throw new Error('[智脑] 总结失败：AI 未生成任何角色记忆，请检查日志或重试');
+  }
+  if (!isFirstSummary) {
+    const parsedSection1Text = getSectionByMarker(outputText, '[剧情摘要]', '---SECTION---', 1);
+    const hasEvents = /\[[^\]]+\][\s\S]{10,}/.test(parsedSection1Text);
+    if (!hasEvents) {
+      throw new Error('[智脑] 总结失败：AI 未生成新的剧情事件，请检查日志或重试');
+    }
+  }
+
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
     // 首次总结：SECTION 2 用 buildMemorySectionText 重建；SECTION 1 代码加序号

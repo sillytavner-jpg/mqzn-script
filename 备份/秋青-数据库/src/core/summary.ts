@@ -216,12 +216,6 @@ function extractStoryTimeFromContent(content: string): string {
   return '';
 }
 
-/** 从叙事摘要文本中提取 AI 使用的日期格式（如 [天元243年3月1日·已时]），供后续总结参考 */
-function extractDateFormat(narrativeText: string): string {
-  const match = narrativeText.match(/\[([^\]]*(?:年|月|日|·|\d+:\d+|星期)[^\]]*)\]/);
-  return match ? match[0] : '';
-}
-
 // ========== 构建输入材料（新楼层 + 旧近期记忆 + 旧动态人设） ==========
 
 function buildInputMaterial(
@@ -520,21 +514,6 @@ export function parseSummaryOutput(rawText: string, summaryVersion: number): Par
   const dynamicProfiles = parseDynamicProfileSection(profileSection, summaryVersion);
   const nsfwMemories = parseNsfwSection(nsfwSection);
 
-  // 格式警告：AI 未输出有效角色记忆
-  const totalMemories = characterMemories.reduce(
-    (sum, m) => sum + (m.coreMemories?.length || 0) + (m.recentMemories?.length || 0), 0
-  );
-  if (characterMemories.length === 0 || totalMemories === 0) {
-    console.warn('[智脑] ⚠️ AI 输出的角色记忆为空！可能是格式异常，建议重新总结');
-    try {
-      (window as any).toastr?.warning(
-        'AI 输出的角色记忆为空！可能是格式异常，建议重新总结',
-        '⚠️ 明月秋青',
-        { timeOut: 8000, extendedTimeOut: 3000 },
-      );
-    } catch (_) { /* toastr 不可用时静默 */ }
-  }
-
   const characterTable: CharacterEntry[] = characterMemories.map(m => ({
     name: m.characterName,
     aliases: m.keywords.slice(0, 3),
@@ -572,7 +551,7 @@ function addEventNumbers(text: string, startNum: number): string {
 }
 
 /** 从合并后的角色记忆中重建 SECTION 2 文本 */
-function buildMemorySectionText(memories: CharacterMemory[]): string {
+export function buildMemorySectionText(memories: CharacterMemory[]): string {
   const parts = ['[角色记忆]'];
   for (const m of memories) {
     parts.push(`### ${m.characterName}`);
@@ -580,18 +559,16 @@ function buildMemorySectionText(memories: CharacterMemory[]): string {
     parts.push(`态度: ${m.attitude}`);
     if (m.keywords?.length) parts.push(`关键词: ${m.keywords.join(', ')}`);
 
-    if (m.orderedNewMemories && m.orderedNewMemories.length > 0) {
-      // 有 orderedNewMemories：纯旧核心在前，然后按 AI 原始顺序输出新条目
-      const orderedTexts = new Set(m.orderedNewMemories.map((mem: any) => mem.text));
-      const oldCoreOnly = (m.coreMemories || []).filter(c => !orderedTexts.has(c));
-      for (const core of oldCoreOnly) {
-        parts.push(`- [核心]${core}`);
+    const orderedAll: { text: string; isCore: boolean }[] = (m as any)._orderedAll;
+    if (orderedAll && orderedAll.length > 0) {
+      for (const item of orderedAll) {
+        parts.push(`- ${item.isCore ? '[核心]' : '[近期]'}${item.text}`);
       }
+    } else if (m.orderedNewMemories && m.orderedNewMemories.length > 0) {
       for (const mem of m.orderedNewMemories) {
         parts.push(`- ${mem.isCore ? '[核心]' : '[近期]'}${mem.text}`);
       }
     } else {
-      // 兜底：旧格式（无 orderedNewMemories）
       for (const core of m.coreMemories || []) {
         parts.push(`- [核心]${core}`);
       }
@@ -682,6 +659,22 @@ export async function executeGrandSummary(
   }
 
   const newParsed = parseSummaryOutput(outputText, summaryVersion);
+
+  // ===== 1.5 防御检测：AI 输出为空/无新事件时抛错 =====
+  const totalNewMemories = newParsed.characterMemories.reduce(
+    (sum, m) => sum + (m.coreMemories?.length || 0) + (m.recentMemories?.length || 0),
+    0,
+  );
+  if (totalNewMemories === 0) {
+    throw new Error('[智脑] 总结失败：AI 未生成任何角色记忆，请检查日志或重试');
+  }
+  if (!isFirstSummary) {
+    const parsedSection1Text = getSectionByMarker(outputText, '[剧情摘要]', '---SECTION---', 1);
+    const hasEvents = /\[[^\]]+\][\s\S]{10,}/.test(parsedSection1Text);
+    if (!hasEvents) {
+      throw new Error('[智脑] 总结失败：AI 未生成新的剧情事件，请检查日志或重试');
+    }
+  }
 
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
@@ -795,9 +788,7 @@ export async function executeGrandSummary(
     rawText: outputText,
   };
 
-  const dateFormat = extractDateFormat(outputText.split(/---SECTION---/i)[0] || '');
-
-  return { summary, dynamicProfiles: newParsed.dynamicProfiles, nsfwMemories: newParsed.nsfwMemories, dateFormat };
+  return { summary, dynamicProfiles: newParsed.dynamicProfiles, nsfwMemories: newParsed.nsfwMemories };
 }
 
 /** 保留最新的AI发言数量（不参与总结和隐藏） */
