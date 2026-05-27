@@ -26,6 +26,7 @@ import {
 } from './core/emotionAccumulation';
 import {
   executeGrandSummary,
+  buildMemorySectionText,
   getContentsSinceLast,
   PRESERVE_RECENT_COUNT,
   shouldTriggerSummary,
@@ -168,7 +169,7 @@ $(() => {
 
     // --- 大总结注入（每次生成请求时动态获取最新总结内容） ---
     const latestSummary = store.getLatestSummary();
-    if (store.settings.summaryInjectionEnabled && latestSummary && latestSummary.rawText) {
+    if (latestSummary && latestSummary.rawText) {
       const summaryInjection = buildSummaryInjectionText(latestSummary);
       if (summaryInjection) {
         // 使用 once: true 确保每次请求都重新注入最新内容
@@ -184,7 +185,6 @@ $(() => {
           ],
           { once: true },
         );
-        console.log('[智脑] 剧情摘要已注入 (版本 ' + (latestSummary.version || '?') + ')');
       }
     }
 
@@ -198,16 +198,17 @@ $(() => {
 
     // --- 神经链记忆激活 ---
     if (store.settings.memoryActivationEnabled) {
-      if (latestSummary && latestSummary.characterMemories.length > 0) {
+      const mergedMemories = store.getMergedCharacterMemories();
+      if (mergedMemories.length > 0) {
         const latestCaptured = store.capturedContents[store.capturedContents.length - 1];
         const scanText = latestCaptured?.content || '';
         const allNames = store.getAllCharacterNames();
-        const characterEntries = latestSummary.characterMemories.map(m => ({
+        const characterEntries = mergedMemories.map(m => ({
           name: m.characterName,
           aliases: m.aliases || [],
         }));
         const userName = SillyTavern.name1 || '{{user}}';
-        injectNeuralChain(latestSummary.characterMemories, scanText, allNames, characterEntries, userName);
+        injectNeuralChain(mergedMemories, scanText, allNames, characterEntries, userName);
       }
     }
 
@@ -338,7 +339,32 @@ $(() => {
       const summarizedMessageIds = getCapturedContentMessageIds(pendingContents);
       const summarizedUpTo = summarizedMessageIds[summarizedMessageIds.length - 1] ?? store.lastSummaryAtMessageId;
 
+      // Toastr 弹窗警告：AI 输出的角色记忆为空
+      const totalNewMemories = summary.characterMemories.reduce(
+        (s, m) => s + (m.coreMemories?.length || 0) + (m.recentMemories?.length || 0),
+        0,
+      );
+      if (totalNewMemories === 0) {
+        console.warn('[智脑] ⚠️ AI 输出的角色记忆为空！可能是格式异常，建议重新总结');
+        try {
+          window.toastr?.warning(
+            'AI 输出的角色记忆为空！可能是格式异常，建议重新总结',
+            '⚠️ 明月秋青',
+            { timeOut: 8000, extendedTimeOut: 3000 },
+          );
+        } catch(e) {}
+      }
+
       store.addSummary(summary, summarizedUpTo, summarizedMessageIds);
+      // 同步 rawText Section 2 到合并后的角色记忆（显示与注入一致）
+      const mergedForSync = store.getMergedCharacterMemories();
+      if (mergedForSync.length > 0) {
+        const sections = summary.rawText.split(/---SECTION---/i);
+        if (sections.length >= 2) {
+          sections[1] = '\n' + buildMemorySectionText(mergedForSync);
+          summary.rawText = sections.join('---SECTION---');
+        }
+      }
       if (dateFormat) store.storyDateFormat = dateFormat;
       for (const profile of dynamicProfiles) {
         store.updateDynamicProfile(profile);

@@ -339,6 +339,22 @@ $(() => {
       const summarizedMessageIds = getCapturedContentMessageIds(pendingContents);
       const summarizedUpTo = summarizedMessageIds[summarizedMessageIds.length - 1] ?? store.lastSummaryAtMessageId;
 
+      // Toastr 弹窗警告：AI 输出的角色记忆为空
+      const totalNewMemories = summary.characterMemories.reduce(
+        (s, m) => s + (m.coreMemories?.length || 0) + (m.recentMemories?.length || 0),
+        0,
+      );
+      if (totalNewMemories === 0) {
+        console.warn('[智脑] ⚠️ AI 输出的角色记忆为空！可能是格式异常，建议重新总结');
+        try {
+          window.toastr?.warning(
+            'AI 输出的角色记忆为空！可能是格式异常，建议重新总结',
+            '⚠️ 明月秋青',
+            { timeOut: 8000, extendedTimeOut: 3000 },
+          );
+        } catch(e) {}
+      }
+
       store.addSummary(summary, summarizedUpTo, summarizedMessageIds);
       // 同步 rawText Section 2 到合并后的角色记忆（显示与注入一致）
       const mergedForSync = store.getMergedCharacterMemories();
