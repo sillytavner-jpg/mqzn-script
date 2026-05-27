@@ -520,6 +520,65 @@ export const useMainStore = defineStore('main', () => {
     return chatData.value.summaries[chatData.value.summaries.length - 1];
   }
 
+  /** 动态合并所有总结的角色记忆：核心全保留，近期取最近3次 */
+  function getMergedCharacterMemories(): CharacterMemory[] {
+    const summaries = chatData.value.summaries;
+    if (summaries.length === 0) return [];
+    const recentVersions = new Set(summaries.slice(-3).map((s: GrandSummary) => s.version));
+    const merged = new Map<string, any>();
+    for (let si = 0; si < summaries.length; si++) {
+      const s = summaries[si];
+      const isRecent = recentVersions.has(s.version);
+      for (const mem of s.characterMemories) {
+        let existing = merged.get(mem.characterName);
+        if (!existing) {
+          existing = {
+            characterName: mem.characterName, aliases: mem.aliases || [],
+            attitude: mem.attitude || 'neutral', keywords: mem.keywords || [],
+            coreMemories: [] as string[], recentMemories: [] as string[],
+            _orderedAll: [] as { text: string; isCore: boolean }[],
+            _seen: new Set<string>(),
+          };
+          merged.set(mem.characterName, existing);
+        }
+        const ordered = ((mem as any).orderedNewMemories as { text: string; isCore: boolean }[] | undefined);
+        if (ordered && ordered.length > 0) {
+          for (const item of ordered) {
+            if (existing._seen.has(item.text)) continue;
+            existing._seen.add(item.text);
+            existing._orderedAll.push(item);
+            if (item.isCore) { existing.coreMemories.push(item.text); }
+            else if (isRecent) { existing.recentMemories.push(item.text); }
+          }
+        } else {
+          for (const core of mem.coreMemories || []) {
+            if (existing._seen.has(core)) continue;
+            existing._seen.add(core);
+            existing._orderedAll.push({ text: core, isCore: true });
+            existing.coreMemories.push(core);
+          }
+          if (isRecent) {
+            for (const recent of mem.recentMemories || []) {
+              if (existing._seen.has(recent)) continue;
+              existing._seen.add(recent);
+              existing._orderedAll.push({ text: recent, isCore: false });
+              existing.recentMemories.push(recent);
+            }
+          }
+        }
+      }
+    }
+    const result = Array.from(merged.values()).map((m: any) => {
+      const capped = { ...m };
+      if (capped.recentMemories.length > 30) {
+        capped.recentMemories = capped.recentMemories.slice(-30);
+      }
+      delete capped._seen;
+      return capped as CharacterMemory & { _orderedAll: { text: string; isCore: boolean }[] };
+    });
+    return result;
+  }
+
   function getCoveredFloorsDisplay(): string {
     const summary = getLatestSummary();
     if (!summary?.coveredMessageIds?.length) return '';
@@ -892,6 +951,7 @@ export const useMainStore = defineStore('main', () => {
     // 大总结
     addSummary,
     getLatestSummary,
+    getMergedCharacterMemories,
     getCoveredFloorsDisplay,
     rollbackSummary,
     restoreLastSummary,

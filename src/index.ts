@@ -26,6 +26,7 @@ import {
 } from './core/emotionAccumulation';
 import {
   executeGrandSummary,
+  buildMemorySectionText,
   getContentsSinceLast,
   PRESERVE_RECENT_COUNT,
   shouldTriggerSummary,
@@ -197,16 +198,17 @@ $(() => {
 
     // --- 神经链记忆激活 ---
     if (store.settings.memoryActivationEnabled) {
-      if (latestSummary && latestSummary.characterMemories.length > 0) {
+      const mergedMemories = store.getMergedCharacterMemories();
+      if (mergedMemories.length > 0) {
         const latestCaptured = store.capturedContents[store.capturedContents.length - 1];
         const scanText = latestCaptured?.content || '';
         const allNames = store.getAllCharacterNames();
-        const characterEntries = latestSummary.characterMemories.map(m => ({
+        const characterEntries = mergedMemories.map(m => ({
           name: m.characterName,
           aliases: m.aliases || [],
         }));
         const userName = SillyTavern.name1 || '{{user}}';
-        injectNeuralChain(latestSummary.characterMemories, scanText, allNames, characterEntries, userName);
+        injectNeuralChain(mergedMemories, scanText, allNames, characterEntries, userName);
       }
     }
 
@@ -333,11 +335,21 @@ $(() => {
       }
 
       const previousSummary = store.getLatestSummary();
-      const { summary, dynamicProfiles, nsfwMemories } = await executeGrandSummary(pendingContents, previousSummary, store.dynamicProfiles);
+      const { summary, dynamicProfiles, nsfwMemories, dateFormat } = await executeGrandSummary(pendingContents, previousSummary, store.dynamicProfiles, store.storyDateFormat);
       const summarizedMessageIds = getCapturedContentMessageIds(pendingContents);
       const summarizedUpTo = summarizedMessageIds[summarizedMessageIds.length - 1] ?? store.lastSummaryAtMessageId;
 
       store.addSummary(summary, summarizedUpTo, summarizedMessageIds);
+      // 同步 rawText Section 2 到合并后的角色记忆（显示与注入一致）
+      const mergedForSync = store.getMergedCharacterMemories();
+      if (mergedForSync.length > 0) {
+        const sections = summary.rawText.split(/---SECTION---/i);
+        if (sections.length >= 2) {
+          sections[1] = '\n' + buildMemorySectionText(mergedForSync);
+          summary.rawText = sections.join('---SECTION---');
+        }
+      }
+      if (dateFormat) store.storyDateFormat = dateFormat;
       for (const profile of dynamicProfiles) {
         store.updateDynamicProfile(profile);
       }

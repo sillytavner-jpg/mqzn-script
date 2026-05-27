@@ -44,7 +44,7 @@ const ASSISTANT_PREFILL = [
 // ======== 大总结专项指令 =========
 // v2: AI 只总结新楼层，旧近期记忆喂给 AI 决定升格/抛弃
 
-function buildSummaryInstruction(): string {
+function buildSummaryInstruction(storedDateFormat?: string): string {
   return [
     'Mingyue: 秋青子，现在需要你执行一项精准的数据整理任务。',
     '',
@@ -71,10 +71,12 @@ function buildSummaryInstruction(): string {
     '',
     '### 第一部分：剧情摘要',
     '',
-    '以叙事方式概括剧情，每个事件段落以 [剧情日期] 开头，用1-3句话概括事件。',
-    '不要添加事件序号（如 [#1]），只需 [剧情日期]。序号由代码自动生成。',
-    '**时间必须从正文中的时空栏（```地点·日期·星期·时间```）或 [时间 xxx] 标记中提取，这是剧情内时间，不是现实时间。**',
-    '保留关键对话原文。禁止修辞比喻，客观白描。',
+    '以叙事方式概括剧情，每个事件段落以 [剧情日期] 开头，用1-3句话概括该时间段的核心事件。',
+    '日期从正文的时空栏（```地点·日期·星期·时间```）或 [时间 xxx] 标记中提取。',
+    storedDateFormat
+      ? `日期格式必须严格遵循此前的格式：\`${storedDateFormat}\`，禁止改用其他格式。`
+      : '日期格式示例：`[天元243年3月1日]`，具体格式从正文时空栏中提取。',
+    '保留关键对话原文（用引号标注），客观白描，禁止修辞比喻。',
     '',
     '格式：',
     '```',
@@ -87,7 +89,6 @@ function buildSummaryInstruction(): string {
     '```',
     '',
     '规则：',
-    '- 每个段落以 [剧情日期] 开头，不要加序号',
     '- 用1-3句话概括该时间段的核心事件',
     '- 保留关键对话原文（用引号标注）',
     '- 禁止修辞比喻，客观白描',
@@ -97,6 +98,7 @@ function buildSummaryInstruction(): string {
     '',
     '### 第二部分：角色记忆',
     '',
+    '只总结NPC和其他角色，禁止为{{user}}生成角色记忆条目。',
     '每个对剧情有影响的角色，分两步完成。',
     '',
     '【步骤一：生成记忆】',
@@ -145,7 +147,8 @@ function buildSummaryInstruction(): string {
     '',
     '### 第三部分：角色动态人设',
     '',
-    '基于剧情发展，为每个出场角色生成当前状态的动态人设描述。这不是原始人设，而是经过剧情发展后角色的当前状态。',
+    '基于剧情发展，为每个出场角色生成当前状态的动态人设描述。禁止为{{user}}生成。',
+    '这不是原始人设，而是经过剧情发展后角色的当前状态。',
     '',
     '格式：',
     '```',
@@ -548,7 +551,7 @@ function addEventNumbers(text: string, startNum: number): string {
 }
 
 /** 从合并后的角色记忆中重建 SECTION 2 文本 */
-function buildMemorySectionText(memories: CharacterMemory[]): string {
+export function buildMemorySectionText(memories: CharacterMemory[]): string {
   const parts = ['[角色记忆]'];
   for (const m of memories) {
     parts.push(`### ${m.characterName}`);
@@ -556,18 +559,16 @@ function buildMemorySectionText(memories: CharacterMemory[]): string {
     parts.push(`态度: ${m.attitude}`);
     if (m.keywords?.length) parts.push(`关键词: ${m.keywords.join(', ')}`);
 
-    if (m.orderedNewMemories && m.orderedNewMemories.length > 0) {
-      // 有 orderedNewMemories：纯旧核心在前，然后按 AI 原始顺序输出新条目
-      const orderedTexts = new Set(m.orderedNewMemories.map((mem: any) => mem.text));
-      const oldCoreOnly = (m.coreMemories || []).filter(c => !orderedTexts.has(c));
-      for (const core of oldCoreOnly) {
-        parts.push(`- [核心]${core}`);
+    const orderedAll: { text: string; isCore: boolean }[] = (m as any)._orderedAll;
+    if (orderedAll && orderedAll.length > 0) {
+      for (const item of orderedAll) {
+        parts.push(`- ${item.isCore ? '[核心]' : '[近期]'}${item.text}`);
       }
+    } else if (m.orderedNewMemories && m.orderedNewMemories.length > 0) {
       for (const mem of m.orderedNewMemories) {
         parts.push(`- ${mem.isCore ? '[核心]' : '[近期]'}${mem.text}`);
       }
     } else {
-      // 兜底：旧格式（无 orderedNewMemories）
       for (const core of m.coreMemories || []) {
         parts.push(`- [核心]${core}`);
       }
@@ -617,7 +618,8 @@ export async function executeGrandSummary(
   capturedContents: CapturedContent[],
   previousSummary: GrandSummary | undefined,
   oldDynamicProfiles?: DynamicProfile[],
-): Promise<{ summary: GrandSummary; dynamicProfiles: DynamicProfile[]; nsfwMemories: NsfwCharacterMemory[] }> {
+  storedDateFormat?: string,
+): Promise<{ summary: GrandSummary; dynamicProfiles: DynamicProfile[]; nsfwMemories: NsfwCharacterMemory[]; dateFormat: string }> {
   const summaryVersion = (previousSummary?.version || 0) + 1;
   const isFirstSummary = !previousSummary;
 
@@ -626,7 +628,7 @@ export async function executeGrandSummary(
   }
 
   // ===== 1. AI 仅总结新楼层 + 旧动态人设（不喂任何旧记忆）=====
-  const instruction = buildSummaryInstruction();
+  const instruction = buildSummaryInstruction(storedDateFormat);
   const inputMaterial = buildInputMaterial(capturedContents, oldDynamicProfiles);
 
   const rawResult = await callGenerateRaw({

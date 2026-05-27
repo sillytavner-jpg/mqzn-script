@@ -124,7 +124,7 @@ async function runGrandSummaryAndHide(
     summarizedMessageIds[summarizedMessageIds.length - 1] ?? store.lastSummaryAtMessageId,
   );
   const previousSummary = store.getLatestSummary();
-  const { summary, dynamicProfiles } = await executeGrandSummary(contents, previousSummary);
+  const { summary, dynamicProfiles, dateFormat } = await executeGrandSummary(contents, previousSummary, store.dynamicProfiles, store.storyDateFormat);
 
   store.addSummary(summary, summarizedUpTo, summarizedMessageIds);
   for (const profile of dynamicProfiles) {

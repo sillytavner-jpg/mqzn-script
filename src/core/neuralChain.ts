@@ -46,16 +46,17 @@ export function buildNeuralChainInjection(
     parts.push(
       `${memory.characterName}对${userName}的记忆（态度：${memory.attitude === 'like' ? '好感' : memory.attitude === 'dislike' ? '厌恶' : '中立'}）：`,
     );
-    if (memory.coreMemories.length > 0) {
-      parts.push('  [核心记忆]');
-      for (const item of memory.coreMemories) {
-        parts.push(`  - ${item}`);
+    const orderedAll: { text: string; isCore: boolean }[] = (memory as any)._orderedAll;
+    if (orderedAll && orderedAll.length > 0) {
+      for (const item of orderedAll) {
+        parts.push(`  - ${item.isCore ? '[核心]' : '[近期]'}${item.text}`);
       }
-    }
-    if (memory.recentMemories.length > 0) {
-      parts.push('  [近期记忆]');
+    } else {
+      for (const item of memory.coreMemories) {
+        parts.push(`  - [核心]${item}`);
+      }
       for (const item of memory.recentMemories) {
-        parts.push(`  - ${item}`);
+        parts.push(`  - [近期]${item}`);
       }
     }
     parts.push(`</memory_chain_${chainId}>`);
