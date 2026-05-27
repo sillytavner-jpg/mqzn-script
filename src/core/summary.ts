@@ -475,7 +475,11 @@ function parseDynamicProfileSection(section: string, summaryVersion: number): Dy
 }
 
 export function parseSummaryOutput(rawText: string, summaryVersion: number): ParsedSummary {
-  const sections = rawText.split(/---SECTION---/i);
+  // AI 有时会在最前面/最后面加多余的 ---SECTION---（虽然指令说不要加）
+  // 导致 split 后索引错位：sections[0] 为空 → narrative 空 → memory 拿到剧情 → 记忆全丢
+  // 先清理首尾多余的分离器
+  const trimmed = rawText.replace(/^---SECTION---\s*/i, '').replace(/\s*---SECTION---\s*$/i, '');
+  const sections = trimmed.split(/---SECTION---/i);
 
   const narrativeSection = sections[0] || '';
   const memorySection = sections[1] || '';
@@ -593,8 +597,9 @@ function buildProfileSectionText(profiles: DynamicProfile[]): string {
  * sectionNum: 1=剧情摘要, 2=角色记忆, 3=动态人设, 4=NSFW记录
  */
 function getSectionByMarker(text: string, marker: string, sep: string, sectionNum: number): string {
-  // 先用 split 定位——这是最直接的，大多数情况是对的
-  const parts = text.split(new RegExp(sep, 'i'));
+  // 清理首尾多余的分离器（AI 有时会加），保证 split 索引对齐
+  const trimmed = text.replace(new RegExp('^' + sep + '\\s*', 'i'), '').replace(new RegExp('\\s*' + sep + '\\s*$', 'i'), '');
+  const parts = trimmed.split(new RegExp(sep, 'i'));
   // 如果 part 数量匹配，直接用对应索引
   if (parts.length >= sectionNum + 1 && parts[sectionNum - 1]?.trim()) {
     return parts[sectionNum - 1].trim();
@@ -656,11 +661,12 @@ export async function executeGrandSummary(
   // ===== 2. 代码拼接：将 AI 的新输出与旧总结合并 =====
   if (isFirstSummary) {
     // 首次总结：SECTION 2 用 buildMemorySectionText 重建；SECTION 1 代码加序号
-    const sections = outputText.split(/---SECTION---/i);
+    const cleanedOutput = outputText.replace(/^---SECTION---\s*/i, '').replace(/\s*---SECTION---\s*$/i, '');
+    const sections = cleanedOutput.split(/---SECTION---/i);
     if (sections.length >= 2) {
       sections[1] = buildMemorySectionText(newParsed.characterMemories);
     }
-    if (sections[0]) {
+    if (sections[0]?.trim()) {
       sections[0] = addEventNumbers(sections[0].trim(), 1);
     }
     outputText = sections.join('---SECTION---');
