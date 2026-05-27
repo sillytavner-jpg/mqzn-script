@@ -43,9 +43,9 @@ function startEdit(section: string) {
     const p = dt.personality || {};
     editingText.value = `底色: ${p.baseColor || ''}\n主色调: ${p.mainColor || ''}\n点缀: ${p.accent || ''}\n衍生:\n${(p.derivations || []).map((d: string) => `- ${d}`).join('\n')}\n边界: ${p.boundary || ''}`;
   } else if (section === 'bodyContact') {
-    editingText.value = ['--- 行为 ---', ...dt.bodyContact.patterns, '--- 禁止误读 ---', ...dt.bodyContact.prevent].join('\n');
+    editingText.value = (dt.bodyContact.entries || []).map((e: any) => `- ${e.text}` + (e.prevent ? ` | ${e.prevent}` : '')).join('\n');
   } else if (section === 'speech') {
-    editingText.value = ['--- 行为 ---', ...dt.speechStyle.patterns, '--- 禁止误读 ---', ...dt.speechStyle.prevent].join('\n');
+    editingText.value = (dt.speechStyle.entries || []).map((e: any) => `- ${e.text}` + (e.prevent ? ` | ${e.prevent}` : '')).join('\n');
   } else if (section === 'emotion') {
     editingText.value = Object.entries(dt.emotionExpression).map(([name, e]: [string, any]) => `${name}: ${e.shows} | ${e.prevent}`).join('\n');
   } else if (section.startsWith('char:')) {
@@ -53,7 +53,7 @@ function startEdit(section: string) {
     selectedInteractionChar.value = charName;
     const interaction = dt.characterInteractions.find((i: any) => i.characterName === charName);
     if (interaction) {
-      editingText.value = ['--- 行为 ---', ...interaction.behaviors, '--- 禁止误读 ---', ...interaction.prevent].join('\n');
+      editingText.value = (interaction.entries || []).map((e: any) => `- ${e.text}` + (e.prevent ? ` | ${e.prevent}` : '')).join('\n');
     }
   }
   editingSection.value = section;
@@ -95,31 +95,35 @@ function saveEdit() {
     }
     dt.personality = { baseColor, mainColor, accent, derivations, boundary };
   } else {
-    // 行为翻译块
-    const lines = editingText.value.split('\n').map((l: string) => l.trim());
-    let inBehavior = false;
-    let inPrevent = false;
-    const patterns: string[] = [];
-    const prevent: string[] = [];
-    for (const line of lines) {
-      if (!line) continue;
-      if (line === '--- 行为 ---') { inBehavior = true; inPrevent = false; continue; }
-      if (line === '--- 禁止误读 ---') { inBehavior = false; inPrevent = true; continue; }
-      if (inBehavior) patterns.push(line);
-      else if (inPrevent) prevent.push(line);
+    // 行为翻译块：每行 "- text | prevent"
+    const entries: any[] = [];
+    const lines = editingText.value.split('\n');
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || !line.startsWith('- ')) continue;
+      const content = line.slice(2).trim();
+      const pipeIdx = content.lastIndexOf('|');
+      if (pipeIdx === -1) {
+        if (content) entries.push({ text: content, prevent: '' });
+      } else {
+        const text = content.slice(0, pipeIdx).trim();
+        const prevent = content.slice(pipeIdx + 1).trim();
+        if (text) entries.push({ text, prevent });
+      }
     }
-    if (section === 'bodyContact') dt.bodyContact = { patterns, prevent };
-    else if (section === 'speech') dt.speechStyle = { patterns, prevent };
+    if (section === 'bodyContact') dt.bodyContact = { entries };
+    else if (section === 'speech') dt.speechStyle = { entries };
     else if (section === 'emotion') {
       const emotions: Record<string, any> = {};
-      for (const line of lines) {
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
         const m = line.match(/^([^:：]+)[:：]\s*(.+?)\s*\|\s*(.+)/);
         if (m) { const name = m[1].trim(); if (name) emotions[name] = { shows: m[2].trim(), prevent: m[3].trim() }; }
       }
       dt.emotionExpression = emotions;
     } else if (section?.startsWith('char:')) {
       const idx = dt.characterInteractions.findIndex((i: any) => i.characterName === selectedInteractionChar.value);
-      if (idx !== -1) { dt.characterInteractions[idx].behaviors = patterns; dt.characterInteractions[idx].prevent = prevent; }
+      if (idx !== -1) dt.characterInteractions[idx].entries = entries;
     }
   }
 
@@ -267,13 +271,11 @@ async function triggerAnalysis() {
           <textarea v-model="editingText" class="zhino-textarea" rows="6" />
         </template>
         <template v-else>
-          <div v-if="dreamtalk.bodyContact.patterns.length > 0" class="zhino-v2-block">
-            <div class="zhino-v2-label">行为：</div>
-            <div v-for="(p, i) in dreamtalk.bodyContact.patterns" :key="i" class="zhino-behavior-item zhino-behavior-pattern">{{ p }}</div>
-            <template v-if="dreamtalk.bodyContact.prevent.length > 0">
-              <div class="zhino-v2-label zhino-v2-prevent-label">禁止误读：</div>
-              <div v-for="(p, i) in dreamtalk.bodyContact.prevent" :key="i" class="zhino-behavior-item zhino-behavior-prevent">{{ p }}</div>
-            </template>
+          <div v-if="dreamtalk.bodyContact.entries.length > 0" class="zhino-v2-block">
+            <div v-for="(e, i) in dreamtalk.bodyContact.entries" :key="i" class="zhino-entry-row">
+              <span class="zhino-entry-text">{{ e.text }}</span>
+              <span v-if="e.prevent" class="zhino-entry-prevent">{{ e.prevent }}</span>
+            </div>
           </div>
           <div v-else class="zhino-empty-hint">暂无数据</div>
         </template>
@@ -293,13 +295,11 @@ async function triggerAnalysis() {
           <textarea v-model="editingText" class="zhino-textarea" rows="8" />
         </template>
         <template v-else>
-          <div v-if="dreamtalk.speechStyle.patterns.length > 0" class="zhino-v2-block">
-            <div class="zhino-v2-label">行为：</div>
-            <div v-for="(p, i) in dreamtalk.speechStyle.patterns" :key="i" class="zhino-behavior-item zhino-behavior-pattern">{{ p }}</div>
-            <template v-if="dreamtalk.speechStyle.prevent.length > 0">
-              <div class="zhino-v2-label zhino-v2-prevent-label">禁止误读：</div>
-              <div v-for="(p, i) in dreamtalk.speechStyle.prevent" :key="i" class="zhino-behavior-item zhino-behavior-prevent">{{ p }}</div>
-            </template>
+          <div v-if="dreamtalk.speechStyle.entries.length > 0" class="zhino-v2-block">
+            <div v-for="(e, i) in dreamtalk.speechStyle.entries" :key="i" class="zhino-entry-row">
+              <span class="zhino-entry-text">{{ e.text }}</span>
+              <span v-if="e.prevent" class="zhino-entry-prevent">{{ e.prevent }}</span>
+            </div>
           </div>
           <div v-else class="zhino-empty-hint">暂无数据</div>
         </template>
@@ -357,14 +357,13 @@ async function triggerAnalysis() {
           </template>
           <template v-else>
             <div class="zhino-v2-block">
-              <div v-if="selectedInteraction.behaviors.length > 0">
-                <div v-for="(b, i) in selectedInteraction.behaviors" :key="i" class="zhino-behavior-item zhino-behavior-pattern">{{ b }}</div>
+              <div v-if="selectedInteraction.entries.length > 0">
+                <div v-for="(e, i) in selectedInteraction.entries" :key="i" class="zhino-entry-row">
+                  <span class="zhino-entry-text">{{ e.text }}</span>
+                  <span v-if="e.prevent" class="zhino-entry-prevent">{{ e.prevent }}</span>
+                </div>
               </div>
-              <template v-if="selectedInteraction.prevent.length > 0">
-                <div class="zhino-v2-label zhino-v2-prevent-label">禁止误读：</div>
-                <div v-for="(p, i) in selectedInteraction.prevent" :key="i" class="zhino-behavior-item zhino-behavior-prevent">{{ p }}</div>
-              </template>
-              <div v-if="selectedInteraction.behaviors.length === 0 && selectedInteraction.prevent.length === 0" class="zhino-empty-hint">暂无数据</div>
+              <div v-else class="zhino-empty-hint">暂无数据</div>
             </div>
           </template>
         </template>
@@ -440,8 +439,11 @@ async function triggerAnalysis() {
 .zhino-v2-block { display: flex; flex-direction: column; gap: 3px; }
 .zhino-v2-label { font-size: 10px; color: rgba(255,255,255,0.3); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
 .zhino-v2-prevent-label { color: rgba(248,113,113,0.4); margin-top: 6px; }
-.zhino-behavior-pattern { border-left: 2px solid rgba(167,139,250,0.3); }
-.zhino-behavior-prevent { border-left: 2px solid rgba(248,113,113,0.25); font-size: 11px; color: rgba(248,113,113,0.55); font-style: italic; }
+
+/* 配对条目 */
+.zhino-entry-row { display: flex; flex-direction: column; gap: 1px; padding: 3px 8px; background: rgba(255,255,255,0.02); border-radius: 4px; border-left: 2px solid rgba(167,139,250,0.3); margin-bottom: 2px; }
+.zhino-entry-text { font-size: 12px; color: rgba(255,255,255,0.7); }
+.zhino-entry-prevent { font-size: 10px; color: rgba(248,113,113,0.5); font-style: italic; }
 
 /* 情绪表达 */
 .zhino-emotion-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 8px; background: rgba(255,255,255,0.02); border-radius: 4px; border-left: 2px solid rgba(252,211,77,0.3); margin-bottom: 2px; font-size: 12px; }

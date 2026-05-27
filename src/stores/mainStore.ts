@@ -310,6 +310,42 @@ export const useMainStore = defineStore('main', () => {
     (chatData.value.dreamtalk as any).personality = null;
   }
 
+  // 梦呓 v2.1 → v2 条目格式迁移：旧格式 patterns/prevent → 新格式 entries
+  if (chatData.value.dreamtalk) {
+    let migrated = false;
+    const dt = chatData.value.dreamtalk as any;
+
+    // bodyContact: { patterns, prevent } → { entries }
+    if (dt.bodyContact && Array.isArray(dt.bodyContact.patterns) && !dt.bodyContact.entries) {
+      const prevent = dt.bodyContact.prevent || '';
+      dt.bodyContact = { entries: dt.bodyContact.patterns.map((t: string) => ({ text: t, prevent })) };
+      migrated = true;
+    }
+    // speechStyle: { patterns, prevent } → { entries }
+    if (dt.speechStyle && Array.isArray(dt.speechStyle.patterns) && !dt.speechStyle.entries) {
+      const prevent = dt.speechStyle.prevent || '';
+      dt.speechStyle = { entries: dt.speechStyle.patterns.map((t: string) => ({ text: t, prevent })) };
+      migrated = true;
+    }
+    // characterInteractions: { behaviors, prevent } → { entries }
+    if (Array.isArray(dt.characterInteractions)) {
+      for (let i = 0; i < dt.characterInteractions.length; i++) {
+        const ci = dt.characterInteractions[i];
+        if (Array.isArray(ci.behaviors) && !ci.entries) {
+          const prevent = ci.prevent || '';
+          ci.entries = ci.behaviors.map((t: string) => ({ text: t, prevent }));
+          delete ci.behaviors;
+          delete ci.prevent;
+          migrated = true;
+        }
+      }
+    }
+
+    if (migrated) {
+      console.info('[智脑] 梦呓 v2 旧条目格式已迁移为 v2.1 entries 格式');
+    }
+  }
+
   // ========== 运行状态（不持久化，脚本重载后重置） ==========
 
   const summaryInProgress = ref(false);

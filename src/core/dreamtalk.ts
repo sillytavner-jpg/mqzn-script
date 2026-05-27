@@ -35,6 +35,12 @@ export interface DreamtalkUserInfo {
   relationship: string;
 }
 
+/** 情绪条目（表现 + 禁止误读） */
+export interface EmotionEntry {
+  shows: string;
+  prevent: string;
+}
+
 /** 性格调色盘（抢话党专属，AI用来扮演用户角色） */
 export interface DreamtalkPersonality {
   /** 底色 */
@@ -49,29 +55,24 @@ export interface DreamtalkPersonality {
   boundary: string;
 }
 
-/** 单条行为翻译维度：行为模式 + 禁止误读 */
-export interface BehaviorTranslation {
+/** 单条行为翻译条目：行为 + 专属禁止误读 */
+export interface BehaviorEntry {
   /** 行为模式描述 */
-  patterns: string[];
-  /** 禁止AI误读的方向 */
-  prevent: string[];
-}
-
-/** 情绪表达（按情绪名索引） */
-export interface EmotionEntry {
-  /** 该情绪下的具体表现 */
-  shows: string;
-  /** AI容易误读成什么 */
+  text: string;
+  /** 该行为的禁止误读方向 */
   prevent: string;
 }
 
-/** 角色互动模式（v2：带禁止误读） */
+/** 行为翻译维度（一组配对条目） */
+export interface BehaviorTranslation {
+  entries: BehaviorEntry[];
+}
+
+/** 角色互动模式 */
 export interface DreamtalkCharacterInteraction {
   characterName: string;
-  /** 与该角色的互动行为模式 */
-  behaviors: string[];
-  /** 禁止AI误读的方向 */
-  prevent: string[];
+  /** 与该角色的互动条目（每条带专属禁止误读） */
+  entries: BehaviorEntry[];
 }
 
 /** 梦呓数据主结构 */
@@ -120,8 +121,8 @@ export function createEmptyDreamtalk(): DreamtalkData {
     playStyle: '',
     userInfo: { basic: '', appearance: '', background: '', relationship: '' },
     personality: null,
-    bodyContact: { patterns: [], prevent: [] },
-    speechStyle: { patterns: [], prevent: [] },
+    bodyContact: { entries: [] },
+    speechStyle: { entries: [] },
     emotionExpression: {},
     characterInteractions: [],
     rollDislikes: [],
@@ -185,10 +186,10 @@ function buildDreamtalkInstruction(): string {
     '',
     '**行为翻译手册（核心输出）：**',
     '',
-    '1. 肢体接触翻译：最多3条行为 + 2条禁止误读',
-    '2. 说话方式翻译：最多4条行为 + 3条禁止误读',
-    '3. 情绪表达翻译（5种各一行）：开心/生气/难过/紧张/吃醋 | 禁止误读',
-    '4. 角色互动模式：每角色最多4条行为 + 2条禁止误读',
+    '1. 肢体接触翻译：最多3条，每条格式：- {行为} = {含义} | {禁止误读}',
+    '2. 说话方式翻译：最多4条，每条格式：- {行为} = {含义} | {禁止误读}',
+    '3. 情绪表达翻译（5种各一行）：情绪名: {表现} | {禁止误读}',
+    '4. 角色互动模式：每角色最多4条，每条格式：- {行为} | {禁止误读}',
     '',
     '### 分支B：抢话党 —— 角色卡（简化版）',
     '',
@@ -210,8 +211,7 @@ function buildDreamtalkInstruction(): string {
     '  关键时刻允许突破日常表现。如"平时沉默，保护重要的人时爆发出果断和暴烈"。',
     '',
     '**行为翻译（次要不抢话部分）：**',
-    '  抢话党虽然AI扮演用户，但行为翻译仍有用。',
-    '  肢体接触/说话方式/情绪表达/角色互动各写最少条数即可（1-2条）。',
+    '  抢话党虽然AI扮演用户，但行为翻译仍有用。每条格式同上（行为 = 含义 | 禁止误读），各维度1-2条即可。',
     '',
     '## 输出格式',
     '',
@@ -240,17 +240,11 @@ function buildDreamtalkInstruction(): string {
     '',
     '---KEY---',
     '肢体接触:',
-    '行为:',
-    '- {行为} = {真实含义}',
-    '禁止误读:',
-    '- {禁止的误读方向}',
+    '- {行为} = {真实含义} | {该行为专属的禁止误读}',
     '',
     '---KEY---',
     '说话方式:',
-    '行为:',
-    '- {行为} = {真实含义}',
-    '禁止误读:',
-    '- {禁止的误读方向}',
+    '- {行为} = {真实含义} | {该行为专属的禁止误读}',
     '',
     '---KEY---',
     '情绪表达:',
@@ -262,10 +256,7 @@ function buildDreamtalkInstruction(): string {
     '',
     '---KEY---',
     '### 角色名',
-    '行为:',
-    '- {互动行为}',
-    '禁止误读:',
-    '- {禁止的误读方向}',
+    '- {互动行为} | {该行为专属的禁止误读}',
     '',
     '---KEY---',
     'Roll偏好:',
@@ -336,38 +327,37 @@ function buildDreamtalkMaterial(userInputs: UserInputRecord[], userPersonaRaw: s
 // ========== 解析器：按 ---KEY--- 分段 ==========
 
 /**
- * 解析单段"行为: / 禁止误读:" 格式
+ * 从 "- {行为} | {禁止误读}" 行解析一条 BehaviorEntry
+ */
+function parseEntryLine(line: string): BehaviorEntry | null {
+  const trimmed = line.replace(/^-\s*/, '').trim(); // 去掉 "- "
+  const pipeIdx = trimmed.lastIndexOf('|');
+  if (pipeIdx === -1) {
+    // 没有 | 分隔：整条当行为，禁止误读为空
+    const text = trimmed;
+    if (!text || text === '证据不足' || text === '证据不足，待观察') return null;
+    return { text, prevent: '' };
+  }
+  const text = trimmed.slice(0, pipeIdx).trim();
+  const prevent = trimmed.slice(pipeIdx + 1).trim();
+  if (!text || text === '证据不足' || text === '证据不足，待观察') return null;
+  return { text, prevent };
+}
+
+/**
+ * 解析行为翻译段（肢体接触/说话方式）→ BehaviorTranslation
+ * 新格式：每行 "- {行为} | {禁止误读}"
+ * 兼容旧格式："- {行为}"（无 |，禁止误读为空）
  */
 function parseBehaviorBlock(lines: string[]): BehaviorTranslation {
-  const patterns: string[] = [];
-  const prevent: string[] = [];
-  let inSection: 'none' | 'behavior' | 'prevent' = 'none';
-
+  const entries: BehaviorEntry[] = [];
   for (const rawLine of lines) {
     const line = rawLine.trim();
-    if (!line) continue;
-
-    if (line === '行为:' || line === '行为：') {
-      inSection = 'behavior';
-      continue;
-    }
-    if (line === '禁止误读:' || line === '禁止误读：') {
-      inSection = 'prevent';
-      continue;
-    }
-
-    if (inSection === 'behavior' && line.startsWith('- ')) {
-      const text = line.slice(2).trim();
-      if (text && text !== '证据不足' && text !== '证据不足，待观察') {
-        patterns.push(text);
-      }
-    } else if (inSection === 'prevent' && line.startsWith('- ')) {
-      const text = line.slice(2).trim();
-      if (text) prevent.push(text);
-    }
+    if (!line || !line.startsWith('- ')) continue;
+    const entry = parseEntryLine(line);
+    if (entry) entries.push(entry);
   }
-
-  return { patterns, prevent };
+  return { entries };
 }
 
 /**
@@ -382,7 +372,6 @@ function parseEmotionBlock(lines: string[]): Record<string, EmotionEntry> {
     if (!line || line === '情绪表达:' || line === '情绪表达：') continue;
     if (line.startsWith('---KEY---')) break;
 
-    // 匹配: 情绪名: 表现 | 禁止误读
     const match = line.match(/^([^:：]+)[:：]\s*(.+?)\s*\|\s*(.+)/);
     if (match) {
       const emotionName = match[1].trim();
@@ -399,6 +388,7 @@ function parseEmotionBlock(lines: string[]): Record<string, EmotionEntry> {
 
 /**
  * 解析一个角色块（### 角色名）
+ * 新格式：每行 "- {行为} | {禁止误读}"
  */
 function parseCharacterBlock(lines: string[]): DreamtalkCharacterInteraction | null {
   if (lines.length === 0) return null;
@@ -406,39 +396,19 @@ function parseCharacterBlock(lines: string[]): DreamtalkCharacterInteraction | n
   const characterName = lines[0].replace(/^###\s*/, '').trim();
   if (!characterName) return null;
 
-  const behaviors: string[] = [];
-  const prevent: string[] = [];
-  let inSection: 'none' | 'behavior' | 'prevent' = 'none';
-
+  const entries: BehaviorEntry[] = [];
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-    // 遇到下一个角色块或 ---KEY--- 就停
     if (line.startsWith('### ') || line.startsWith('---KEY---')) break;
-
-    if (line === '行为:' || line === '行为：') {
-      inSection = 'behavior';
-      continue;
-    }
-    if (line === '禁止误读:' || line === '禁止误读：') {
-      inSection = 'prevent';
-      continue;
-    }
-
-    if (inSection === 'behavior' && line.startsWith('- ')) {
-      const text = line.slice(2).trim();
-      if (text && text !== '证据不足' && text !== '证据不足，待观察') {
-        behaviors.push(text);
-      }
-    } else if (inSection === 'prevent' && line.startsWith('- ')) {
-      const text = line.slice(2).trim();
-      if (text) prevent.push(text);
+    if (line.startsWith('- ')) {
+      const entry = parseEntryLine(line);
+      if (entry) entries.push(entry);
     }
   }
 
-  if (behaviors.length === 0 && prevent.length === 0) return null;
-
-  return { characterName, behaviors, prevent };
+  if (entries.length === 0) return null;
+  return { characterName, entries };
 }
 
 /** 从 key: value 行中提取值 */
@@ -459,8 +429,8 @@ function parseDreamtalkOutput(rawText: string): DreamtalkData {
   let playStyle = '';
   let userInfo: DreamtalkUserInfo = { basic: '', appearance: '', background: '', relationship: '' };
   let personality: DreamtalkPersonality | null = null;
-  let bodyContact: BehaviorTranslation = { patterns: [], prevent: [] };
-  let speechStyle: BehaviorTranslation = { patterns: [], prevent: [] };
+  let bodyContact: BehaviorTranslation = { entries: [] };
+  let speechStyle: BehaviorTranslation = { entries: [] };
   let emotionExpression: Record<string, EmotionEntry> = {};
   const characterInteractions: DreamtalkCharacterInteraction[] = [];
   const rollDislikes: string[] = [];
@@ -775,40 +745,33 @@ function buildPersonalityInjection(
   return result;
 }
 
+/** 将 entries 转为注入文本（每条"行为。(禁止误读)"） */
+function buildBehaviorInjection(prefix: string, trans: BehaviorTranslation, maxLen: number, entrySep: string = '。'): string {
+  if (!trans.entries.length) return '';
+  let result = prefix;
+  for (const e of trans.entries) {
+    let line = `${e.text}${entrySep}`;
+    if (e.prevent) line += `（${e.prevent}）`;
+    if (result.length + line.length > maxLen) break;
+    result += line;
+  }
+  return result;
+}
+
 /** 构建说话方式注入文本 */
 function buildSpeechInjection(speech: BehaviorTranslation, maxLen: number): string {
-  if (!speech.patterns.length) return '';
-
-  const lines: string[] = ['{{user}}的说话方式：'];
-  let currentLen = lines[0].length;
-
-  for (const p of speech.patterns) {
-    const line = `${p}。`;
-    if (currentLen + line.length > maxLen) break;
-    lines.push(line);
-    currentLen += line.length;
-  }
-
-  // 禁止误读（合为一句）
-  if (speech.prevent.length > 0 && currentLen < maxLen) {
-    const preventText = '（注意：' + speech.prevent.slice(0, 2).join('；') + '）';
-    if (currentLen + preventText.length <= maxLen) {
-      lines.push(preventText);
-    }
-  }
-
-  return lines.join('');
+  return buildBehaviorInjection('{{user}}的说话方式：', speech, maxLen);
 }
 
 /** 构建情绪表达注入文本 */
 function buildEmotionInjection(emotions: Record<string, EmotionEntry>, maxLen: number): string {
-  const entries = Object.entries(emotions);
-  if (entries.length === 0) return '';
+  const kv = Object.entries(emotions);
+  if (kv.length === 0) return '';
 
   const lines: string[] = [];
   let currentLen = 0;
 
-  for (const [name, entry] of entries) {
+  for (const [name, entry] of kv) {
     const line = `${name}时${entry.shows}（${entry.prevent}）。`;
     if (currentLen + line.length > maxLen) break;
     lines.push(line);
@@ -821,18 +784,7 @@ function buildEmotionInjection(emotions: Record<string, EmotionEntry>, maxLen: n
 
 /** 构建肢体接触注入文本 */
 function buildBodyContactInjection(body: BehaviorTranslation, maxLen: number): string {
-  if (!body.patterns.length) return '';
-
-  const mainText = '{{user}}的肢体接触：' + body.patterns.map(p => `${p}。`).join('');
-
-  let result = mainText;
-  if (body.prevent.length > 0) {
-    const preventAddon = '（不要理解为' + body.prevent.slice(0, 1).join('') + '）';
-    result += preventAddon;
-  }
-
-  if (result.length > maxLen) result = result.slice(0, maxLen);
-  return result;
+  return buildBehaviorInjection('{{user}}的肢体接触：', body, maxLen);
 }
 
 /** 构建角色互动注入文本（过滤在场角色，按互动条数排序，硬上限截断） */
@@ -842,11 +794,9 @@ function buildCharacterInjection(
   perCharMax: number,
   maxChars: number,
 ): string {
-  // 筛选在场且有互动记录的角色
   const matched = interactions
-    .filter(ci => currentNames.includes(ci.characterName) && ci.behaviors.length > 0)
-    // 按行为条数降序排列（互动模式越丰富越优先）
-    .sort((a, b) => b.behaviors.length - a.behaviors.length);
+    .filter(ci => currentNames.includes(ci.characterName) && ci.entries.length > 0)
+    .sort((a, b) => b.entries.length - a.entries.length);
 
   if (matched.length === 0) return '';
 
@@ -855,34 +805,20 @@ function buildCharacterInjection(
 
   for (const ci of selected) {
     let charLine = `与${ci.characterName}的互动：`;
-    const usableBehaviors = ci.behaviors.slice(0, 4); // AI 最多输出4条，取全部
 
     let body = '';
-    for (const b of usableBehaviors) {
-      const candidate = `${b}。`;
+    for (const e of ci.entries) {
+      let candidate = `${e.text}。`;
+      if (e.prevent) candidate += `（${e.prevent}）`;
       if (charLine.length + body.length + candidate.length > perCharMax) break;
       body += candidate;
     }
 
-    if (body) {
-      // 有空间就加禁止误读
-      if (ci.prevent.length > 0 && charLine.length + body.length < perCharMax) {
-        const preventAddon = '（注意：' + ci.prevent.slice(0, 1).join('') + '）';
-        if (charLine.length + body.length + preventAddon.length <= perCharMax) {
-          body += preventAddon;
-        }
-      }
-      lines.push(charLine + body);
-    }
+    if (body) lines.push(charLine + body);
   }
 
   if (lines.length === 0) return '';
-
-  // 如果还有更多角色在场但被裁掉了，加一句说明
-  if (matched.length > maxChars) {
-    lines.push('与其他角色的互动遵循通用行为模式，无特殊记录。');
-  }
-
+  if (matched.length > maxChars) lines.push('与其他角色的互动遵循通用行为模式，无特殊记录。');
   return lines.join('');
 }
 
