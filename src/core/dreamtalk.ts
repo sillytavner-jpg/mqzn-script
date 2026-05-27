@@ -23,6 +23,32 @@ import { callGenerateRaw } from '../utils/apiCaller';
 
 // ========== 梦呓数据结构 v2 ==========
 
+/** 用户基础信息（AI从行为推断，抢话/不抢话通用） */
+export interface DreamtalkUserInfo {
+  /** 基本信息（姓名/性别/年龄/身份，能从对话推断出的部分） */
+  basic: string;
+  /** 外貌特征（只写特化部分） */
+  appearance: string;
+  /** 背景设定（影响行为的关键经历） */
+  background: string;
+  /** 关系设定（与各角色的关系概括） */
+  relationship: string;
+}
+
+/** 性格调色盘（抢话党专属，AI用来扮演用户角色） */
+export interface DreamtalkPersonality {
+  /** 底色 */
+  baseColor: string;
+  /** 主色调 */
+  mainColor: string;
+  /** 点缀 */
+  accent: string;
+  /** 各衍生 */
+  derivations: string[];
+  /** 边界：关键时刻允许突破日常表现 */
+  boundary: string;
+}
+
 /** 单条行为翻译维度：行为模式 + 禁止误读 */
 export interface BehaviorTranslation {
   /** 行为模式描述 */
@@ -50,11 +76,17 @@ export interface DreamtalkCharacterInteraction {
 
 /** 梦呓数据主结构 */
 export interface DreamtalkData {
-  /** 格式版本：2 = v2 行为翻译手册 */
+  /** 格式版本：2 = v2 */
   formatVersion: number;
 
   /** 用户游玩类型 */
   playStyle: string;
+
+  /** 用户基础信息（AI从行为推断） */
+  userInfo: DreamtalkUserInfo;
+
+  /** 性格调色盘（抢话党专属，不抢话党为 null） */
+  personality: DreamtalkPersonality | null;
 
   /** 肢体接触翻译手册 */
   bodyContact: BehaviorTranslation;
@@ -86,6 +118,8 @@ export function createEmptyDreamtalk(): DreamtalkData {
   return {
     formatVersion: 2,
     playStyle: '',
+    userInfo: { basic: '', appearance: '', background: '', relationship: '' },
+    personality: null,
     bodyContact: { patterns: [], prevent: [] },
     speechStyle: { patterns: [], prevent: [] },
     emotionExpression: {},
@@ -119,135 +153,146 @@ const ASSISTANT_PREFILL = [
 
 function buildDreamtalkInstruction(): string {
   return [
-    'Mingyue: 秋青子，现在需要你对"梦中人"（用户角色）进行行为分析，生成一份"行为翻译手册"。',
+    'Mingyue: 秋青子，现在需要你对"梦中人"（用户角色）进行深度分析，按游玩类型分叉输出。',
     '',
     '## 任务说明',
     '',
-    '这不是创作，不是写人设。你要做的是一份"翻译手册"：',
-    '分析用户在这10轮中的所有输入和对应的AI回复，',
-    '告诉AI：当用户做动作X时，真实含义是Y，不要误读为Z。',
+    '你不是在写人设，你是在分析用户。根据用户的游玩方式，输出不同类型的结果：',
+    '- 不抢话党：输出"基础信息 + 行为翻译手册"（AI需要读懂用户）',
+    '- 抢话党：输出"基础信息 + 性格调色盘 + 边界"（AI需要扮演用户）',
     '',
     '你必须先在<think></think>中进行深度分析，然后在<content>标签内输出正式结果。',
     '',
-    '## 分析维度',
+    '## 第一步：判定游玩类型',
     '',
-    '**0. 游玩类型判定：**',
-    '  - 不抢话：用户只写自己角色的对话和简单动作，不控制其他角色',
-    '  - 抢话：用户像作者一样写大段剧情，控制多个角色行为',
-    '  - 混合：两者兼有',
+    '不抢话：用户只写自己角色的对话和简单动作，不控制其他角色。AI不扮演用户，只是回应用户。',
+    '抢话：用户像作者一样写大段剧情（通常超过100字），控制多个角色行为。AI要接着演，包括扮演用户的角色。',
+    '混合：两者兼有。按抢话处理。',
     '',
-    '**1. 肢体接触翻译：**',
-    '  用户有哪些肢体接触习惯？（揉头/拍肩/拉手/搂肩/揉脸...）',
-    '  每种接触的真实含义是什么？（宠溺/关心/安慰/随意...）',
-    '  AI容易误读成什么？必须明确禁止哪种解读。',
-    '  最多输出3条行为 + 2条禁止误读。',
+    '## 第二步：分叉输出',
     '',
-    '**2. 说话方式翻译：**',
-    '  用户的命令语气、沉默、简短回复、吐槽损人等说话习惯。',
-    '  每种方式的真实含义 + AI可能误读成什么。',
-    '  - "坐下""过来"是关心不是支配',
-    '  - 沉默是思考不是冷暴力',
-    '  - "嗯""哦"是习惯不是敷衍',
-    '  - "笨蛋""你傻啊"是亲昵不是侮辱',
-    '  最多输出4条行为 + 3条禁止误读。',
+    '判定后，按对应格式输出。共通部分：基础信息 + Roll偏好。差异部分见下。',
     '',
-    '**3. 情绪表达翻译（5种基础情绪，按格式各写一行）：**',
-    '  开心时：具体表现 | AI容易误解成什么',
-    '  生气时：具体表现 | AI容易误解成什么',
-    '  难过时：具体表现 | AI容易误解成什么',
-    '  紧张时：具体表现 | AI容易误解成什么',
-    '  吃醋时：具体表现 | AI容易误解成什么',
-    '  每个禁止误读不超过15字。没有证据的情绪写"证据不足"。',
+    '### 分支A：不抢话党 —— 行为翻译手册',
     '',
-    '**4. 与各出场角色的互动模式：**',
-    '  - 靠近该角色时的行为',
-    '  - 被该角色触碰/念叨/生气/难过时的反应',
-    '  - 每项行为必须带禁止误读',
-    '  每角色最多4条行为 + 2条禁止误读。不重要的角色写1条即可。',
+    'AI需要"读懂"用户。输出的核心是一份行为翻译手册，告诉AI：当用户做X，意思是Y，不要误解为Z。',
     '',
-    '**5. Roll行为分析（如有被roll掉的版本）：**',
-    '  - 被roll掉的正文有什么共性（用户不喜欢什么）',
-    '  - 保留的正文有什么共性（用户喜欢什么）',
-    '  各一句话即可。',
+    '**基础信息（从行为推断，不确定的写"待观察"）：**',
+    '  基本信息: 姓名/性别/年龄/身份（能从对话中提取的）',
+    '  外貌特征: 外貌特化部分，附带禁止说明（如"白发，禁止频繁描写"）',
+    '  背景设定: 影响行为的关键经历',
+    '  关系设定: 与各角色的关系概括',
+    '',
+    '**行为翻译手册（核心输出）：**',
+    '',
+    '1. 肢体接触翻译：最多3条行为 + 2条禁止误读',
+    '2. 说话方式翻译：最多4条行为 + 3条禁止误读',
+    '3. 情绪表达翻译（5种各一行）：开心/生气/难过/紧张/吃醋 | 禁止误读',
+    '4. 角色互动模式：每角色最多4条行为 + 2条禁止误读',
+    '',
+    '### 分支B：抢话党 —— 角色卡（简化版）',
+    '',
+    'AI需要"扮演"用户。输出一份简化版角色卡：基础信息 + 性格调色盘 + 边界。',
+    '',
+    '**基础信息（比不抢话更详细，因为AI要演）：**',
+    '  基本信息: 姓名/性别/年龄/身份',
+    '  外貌特征: 特化部分，每项必须附带禁止说明',
+    '  背景设定: 影响行为的关键经历',
+    '',
+    '**性格调色盘（核心输出）：**',
+    '  底色: 最底层的性格质地（如"温柔""冷峻""热烈"）',
+    '  主色调: 外部表现最明显的性格层',
+    '  点缀: 偶尔闪现的反差特质',
+    '  衍生列表:',
+    '    - 从行为中提取的性格衍生（行为→动机→性格）',
+    '',
+    '**边界：**',
+    '  关键时刻允许突破日常表现。如"平时沉默，保护重要的人时爆发出果断和暴烈"。',
+    '',
+    '**行为翻译（次要不抢话部分）：**',
+    '  抢话党虽然AI扮演用户，但行为翻译仍有用。',
+    '  肢体接触/说话方式/情绪表达/角色互动各写最少条数即可（1-2条）。',
     '',
     '## 输出格式',
     '',
-    '严格按以下格式输出，用 `---KEY---` 分隔各维度：',
+    '用 `---KEY---` 分隔，先输出基础信息，再按分支输出：',
     '',
     '```',
     '[梦呓]',
     '游玩类型: {不抢话|抢话|混合}',
     '',
     '---KEY---',
+    '基础信息:',
+    '基本信息: {从行为推断，一行概括}',
+    '外貌特征: {特化部分，附带禁止说明；无证据写"待观察"}',
+    '背景设定: {影响行为的关键经历；无证据写"待观察"}',
+    '关系设定: {与各角色的关系，一行概括}',
+    '',
+    '---KEY---',
+    '{# 抢话党专属：性格调色盘。不抢话党跳过本节，直接输出下一个 ---KEY--- #}',
+    '性格调色盘:',
+    '底色: {描述}',
+    '主色调: {描述}',
+    '点缀: {描述}',
+    '衍生:',
+    '- {行为→动机→性格衍生}',
+    '边界: {关键时刻的描述}',
+    '',
+    '---KEY---',
     '肢体接触:',
     '行为:',
-    '- 揉头、揉脸 = 亲近和宠溺的表达',
-    '- 拉手、搂肩 = 自然亲密，不带攻击性',
+    '- {行为} = {真实含义}',
     '禁止误读:',
-    '- 不要理解为占有或控制',
-    '- 不要理解为性暗示（除非用户输入明确包含）',
+    '- {禁止的误读方向}',
     '',
     '---KEY---',
     '说话方式:',
     '行为:',
-    '- "坐下""过来" = 关心的随意表达，像对很熟的人说话',
-    '- 沉默 = 在思考措辞，不是冷暴力',
-    '- "嗯""哦" = 正常交流习惯，不是敷衍',
-    '- "笨蛋" = 亲昵的吐槽，不是侮辱',
+    '- {行为} = {真实含义}',
     '禁止误读:',
-    '- 不要将命令语气理解为支配或征服',
-    '- 不要将沉默理解为生气或拒绝沟通',
-    '- 不要将简短回复理解为敷衍或不在意',
+    '- {禁止的误读方向}',
     '',
     '---KEY---',
     '情绪表达:',
-    '开心: 嘴角微翘、多说两句话、主动靠近 | 不要理解为得意或嘲讽',
-    '生气: 更沉默、说话更短、但不会离开 | 不要理解为冷暴力或放弃',
-    '难过: 发呆、转笔、看窗外 | 不要理解为走神或无聊',
-    '紧张: 摸后脑勺、说话变快、偶尔结巴 | 不要理解为心虚或撒谎',
-    '吃醋: 突然话少、或故意提起别人 | 不要理解为冷漠或移情',
+    '开心: {表现} | {禁止误读}',
+    '生气: {表现} | {禁止误读}',
+    '难过: {表现} | {禁止误读}',
+    '紧张: {表现} | {禁止误读}',
+    '吃醋: {表现} | {禁止误读}',
     '',
     '---KEY---',
     '### 角色名',
     '行为:',
-    '- 靠近时: 自然凑过去，肢体接触随意',
-    '- 被她念叨时: 不反驳，站着听完',
-    '- 她生气时: 不道歉不解释，默默做她喜欢的事',
+    '- {互动行为}',
     '禁止误读:',
-    '- 不反驳不是认怂，是包容',
-    '- 不道歉不是冷漠，是用行动代替语言',
-    '',
-    '### 另一个角色名',
-    '（同上格式，按需输出）',
+    '- {禁止的误读方向}',
     '',
     '---KEY---',
     'Roll偏好:',
-    '不喜欢: {共性描述，一句话}',
-    '喜欢: {共性描述，一句话}',
+    '不喜欢: {一句话}',
+    '喜欢: {一句话}',
     '```',
     '',
-    '如果用户输入中包含性爱/亲密相关内容，在末尾额外输出：',
-    '',
+    '如果用户输入中包含性爱/亲密内容，在末尾：',
     '```',
     '---NSFW_DREAMTALK---',
-    'XP偏好: {用户的性癖偏好，逗号分隔}',
-    '节奏偏好: {温柔/粗暴/混合}',
-    '喜欢: {NSFW场景中喜欢的方向}',
-    '不喜欢: {NSFW场景中不喜欢的方向}',
+    'XP偏好: ...',
+    '节奏偏好: ...',
+    '喜欢: ...',
+    '不喜欢: ...',
     '```',
-    '',
-    '如果没有性爱相关内容，不输出 ---NSFW_DREAMTALK--- 部分。',
     '',
     '## 铁律',
     '',
+    '- 先判定游玩类型，再按对应分支输出，不要两个分支混在一起',
     '- 每条行为必须同时说明"是什么"和"禁止误解成什么"',
-    '- 只从用户实际输入和AI回复中提取，不要编造',
-    '- 行为描述必须是具体动作，不是标签',
-    '- 直接用正面描述（"沉默是思考"），不要用否定描述（"沉默不是冷暴力"）',
-    '- 禁止误读才用否定（"不要理解为冷暴力"）',
-    '- 证据不足的维度写"证据不足"',
-    '- 所有禁止误读必须简短，每句不超过20字',
-    '- NSFW部分与日常行为模式完全独立，不要混淆',
+    '- 直接正面描述行为（"沉默是思考"），禁止误读才用否定（"不要理解为冷暴力"）',
+    '- 只从实际输入和回复中提取，不要编造',
+    '- 证据不足写"待观察"',
+    '- 禁止误读每句不超过20字',
+    '- NSFW与日常行为完全独立',
+    '- 不抢话党禁止输出性格调色盘部分',
+    '- 抢话党基础信息必须每项附带禁止说明',
   ].join('\n');
 }
 
@@ -396,11 +441,24 @@ function parseCharacterBlock(lines: string[]): DreamtalkCharacterInteraction | n
   return { characterName, behaviors, prevent };
 }
 
+/** 从 key: value 行中提取值 */
+function extractLabel(lines: string[], label: string): string {
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith(label + ':') || line.startsWith(label + '：')) {
+      return line.replace(new RegExp(`^${label}[:：]\\s*`), '').trim();
+    }
+  }
+  return '';
+}
+
 /**
  * 解析完整的梦呓输出（---KEY--- 分段）
  */
 function parseDreamtalkOutput(rawText: string): DreamtalkData {
   let playStyle = '';
+  let userInfo: DreamtalkUserInfo = { basic: '', appearance: '', background: '', relationship: '' };
+  let personality: DreamtalkPersonality | null = null;
   let bodyContact: BehaviorTranslation = { patterns: [], prevent: [] };
   let speechStyle: BehaviorTranslation = { patterns: [], prevent: [] };
   let emotionExpression: Record<string, EmotionEntry> = {};
@@ -433,7 +491,29 @@ function parseDreamtalkOutput(rawText: string): DreamtalkData {
     // 检测段类型
     const firstLine = lines[0]?.trim() || '';
 
-    if (firstLine === '肢体接触:' || firstLine === '肢体接触：') {
+    if (firstLine === '基础信息:' || firstLine === '基础信息：') {
+      userInfo = {
+        basic: extractLabel(lines, '基本信息'),
+        appearance: extractLabel(lines, '外貌特征'),
+        background: extractLabel(lines, '背景设定'),
+        relationship: extractLabel(lines, '关系设定'),
+      };
+    } else if (firstLine === '性格调色盘:' || firstLine === '性格调色盘：') {
+      const derivations: string[] = [];
+      let baseColor = '', mainColor = '', accent = '', boundary = '';
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('底色:')) baseColor = line.replace(/^底色[:：]\s*/, '').trim();
+        else if (line.startsWith('主色调:')) mainColor = line.replace(/^主色调[:：]\s*/, '').trim();
+        else if (line.startsWith('点缀:')) accent = line.replace(/^点缀[:：]\s*/, '').trim();
+        else if (line.startsWith('边界:')) boundary = line.replace(/^边界[:：]\s*/, '').trim();
+        else if (line.startsWith('衍生:')) continue; // 跳过标题行
+        else if (line.startsWith('- ')) derivations.push(line.slice(2).trim());
+      }
+      if (baseColor || mainColor) {
+        personality = { baseColor, mainColor, accent, derivations, boundary };
+      }
+    } else if (firstLine === '肢体接触:' || firstLine === '肢体接触：') {
       bodyContact = parseBehaviorBlock(lines.slice(1));
     } else if (firstLine === '说话方式:' || firstLine === '说话方式：') {
       speechStyle = parseBehaviorBlock(lines.slice(1));
@@ -441,7 +521,6 @@ function parseDreamtalkOutput(rawText: string): DreamtalkData {
       firstLine === '情绪表达:' || firstLine === '情绪表达：' ||
       section.includes('开心:') || section.includes('开心：')
     ) {
-      // 情绪表达段可能以"情绪表达:"开头，也可能直接是"开心:"
       emotionExpression = parseEmotionBlock(lines);
     } else if (firstLine.startsWith('### ')) {
       const entry = parseCharacterBlock(lines);
@@ -475,6 +554,8 @@ function parseDreamtalkOutput(rawText: string): DreamtalkData {
   return {
     formatVersion: 2,
     playStyle,
+    userInfo,
+    personality,
     bodyContact,
     speechStyle,
     emotionExpression,
@@ -544,7 +625,11 @@ export async function executeDreamtalkAnalysis(
 /** 注入长度限制（字符数） */
 const INJECTION_LIMITS = {
   /** 总硬上限 */
-  total: 800,
+  total: 900,
+  /** 基础信息 */
+  userInfo: 120,
+  /** 性格调色盘（抢话党） */
+  personality: 150,
   /** 说话方式——最重要，最常被误读 */
   speechStyle: 150,
   /** 情绪表达——误解率第二高 */
@@ -564,14 +649,34 @@ export function buildDreamtalkInjection(
   currentCharacterNames: string[],
 ): string {
   const parts: string[] = [];
+  const isSpeakForUser = dreamtalk.playStyle === '抢话' || dreamtalk.playStyle === '混合';
 
   parts.push('<dreamtalk>');
-  parts.push('以下信息用于校准AI对{{user}}行为方式的正确理解，不是角色设定。');
 
-  if (dreamtalk.playStyle) {
-    parts.push(`游玩类型：${dreamtalk.playStyle}。`);
+  if (isSpeakForUser) {
+    parts.push('以下信息供AI扮演{{user}}角色的参考，不是给{{user}}对面的角色看的。');
+  } else {
+    parts.push('以下信息用于校准AI对{{user}}行为方式的正确理解，不是角色设定。');
   }
+
+  parts.push(`游玩类型：${dreamtalk.playStyle || '待判定'}。`);
   parts.push('');
+
+  // === 优先级 0：基础信息 ===
+  const userInfoText = buildUserInfoInjection(dreamtalk.userInfo, isSpeakForUser, INJECTION_LIMITS.userInfo);
+  if (userInfoText) {
+    parts.push(userInfoText);
+    parts.push('');
+  }
+
+  // === 优先级 0.5：调色盘（抢话党专属） ===
+  if (isSpeakForUser && dreamtalk.personality) {
+    const pText = buildPersonalityInjection(dreamtalk.personality, INJECTION_LIMITS.personality);
+    if (pText) {
+      parts.push(pText);
+      parts.push('');
+    }
+  }
 
   // === 优先级 1：说话方式（最重要） ===
   const speechLines = buildSpeechInjection(dreamtalk.speechStyle, INJECTION_LIMITS.speechStyle);
@@ -619,9 +724,7 @@ export function buildDreamtalkInjection(
 
   // 总长度硬截断
   if (result.length > INJECTION_LIMITS.total) {
-    // 从后往前裁：去Roll → 裁角色 → 裁肢体接触
     result = result.slice(0, INJECTION_LIMITS.total);
-    // 在最近一个完整行处截断
     const lastNewline = result.lastIndexOf('\n');
     if (lastNewline > 0) {
       result = result.slice(0, lastNewline);
@@ -629,6 +732,46 @@ export function buildDreamtalkInjection(
     result += '\n</dreamtalk>';
   }
 
+  return result;
+}
+
+/** 构建基础信息注入文本 */
+function buildUserInfoInjection(
+  info: DreamtalkUserInfo,
+  isSpeakForUser: boolean,
+  maxLen: number,
+): string {
+  const parts: string[] = [];
+  if (info.basic && info.basic !== '待观察') parts.push(info.basic);
+  if (info.appearance && info.appearance !== '待观察') parts.push(info.appearance);
+  if (info.relationship && info.relationship !== '待观察') parts.push(`与角色关系：${info.relationship}`);
+
+  if (parts.length === 0) return '';
+
+  const prefix = isSpeakForUser ? '{{user}}基础信息：' : '{{user}}信息：';
+  let result = prefix + parts.join('；');
+  if (result.length > maxLen) result = result.slice(0, maxLen);
+  return result;
+}
+
+/** 构建性格调色盘注入文本（抢话党专属） */
+function buildPersonalityInjection(
+  p: DreamtalkPersonality,
+  maxLen: number,
+): string {
+  const parts: string[] = [];
+  if (p.baseColor) parts.push(`底色${p.baseColor}`);
+  if (p.mainColor) parts.push(`主色调${p.mainColor}`);
+  if (p.accent) parts.push(`点缀${p.accent}`);
+  if (p.derivations.length > 0) {
+    parts.push(`衍生：${p.derivations.slice(0, 3).join('；')}`);
+  }
+  if (p.boundary) parts.push(`边界：${p.boundary}`);
+
+  if (parts.length === 0) return '';
+
+  let result = '{{user}}性格调色盘：' + parts.join('。');
+  if (result.length > maxLen) result = result.slice(0, maxLen);
   return result;
 }
 

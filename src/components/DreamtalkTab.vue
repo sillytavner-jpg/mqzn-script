@@ -5,7 +5,7 @@ import { executeDreamtalkAnalysis } from '../core/dreamtalk';
 const store = useMainStore();
 
 // 编辑状态
-const editingSection = ref<string | null>(null); // 'bodyContact' | 'speech' | 'emotion' | 'char:name'
+const editingSection = ref<string | null>(null);
 const selectedInteractionChar = ref('');
 const editingText = ref('');
 
@@ -15,6 +15,7 @@ const editingRollLikes = ref('');
 const editingRollDislikes = ref('');
 
 const dreamtalk = computed(() => store.dreamtalk);
+const isSpeakForUser = computed(() => dreamtalk.value?.playStyle === '抢话' || dreamtalk.value?.playStyle === '混合');
 
 // 角色交互列表
 const interactionCharacters = computed(() => {
@@ -34,37 +35,25 @@ const selectedInteraction = computed(() => {
 
 function startEdit(section: string) {
   if (!dreamtalk.value) return;
-  const dt = dreamtalk.value;
+  const dt = dreamtalk.value as any;
 
-  if (section === 'bodyContact') {
-    editingText.value = [
-      '--- 行为 ---',
-      ...dt.bodyContact.patterns,
-      '--- 禁止误读 ---',
-      ...dt.bodyContact.prevent,
-    ].join('\n');
+  if (section === 'userInfo') {
+    editingText.value = `基本信息: ${dt.userInfo?.basic || ''}\n外貌特征: ${dt.userInfo?.appearance || ''}\n背景设定: ${dt.userInfo?.background || ''}\n关系设定: ${dt.userInfo?.relationship || ''}`;
+  } else if (section === 'personality') {
+    const p = dt.personality || {};
+    editingText.value = `底色: ${p.baseColor || ''}\n主色调: ${p.mainColor || ''}\n点缀: ${p.accent || ''}\n衍生:\n${(p.derivations || []).map((d: string) => `- ${d}`).join('\n')}\n边界: ${p.boundary || ''}`;
+  } else if (section === 'bodyContact') {
+    editingText.value = ['--- 行为 ---', ...dt.bodyContact.patterns, '--- 禁止误读 ---', ...dt.bodyContact.prevent].join('\n');
   } else if (section === 'speech') {
-    editingText.value = [
-      '--- 行为 ---',
-      ...dt.speechStyle.patterns,
-      '--- 禁止误读 ---',
-      ...dt.speechStyle.prevent,
-    ].join('\n');
+    editingText.value = ['--- 行为 ---', ...dt.speechStyle.patterns, '--- 禁止误读 ---', ...dt.speechStyle.prevent].join('\n');
   } else if (section === 'emotion') {
-    editingText.value = Object.entries(dt.emotionExpression)
-      .map(([name, e]) => `${name}: ${e.shows} | ${e.prevent}`)
-      .join('\n');
+    editingText.value = Object.entries(dt.emotionExpression).map(([name, e]: [string, any]) => `${name}: ${e.shows} | ${e.prevent}`).join('\n');
   } else if (section.startsWith('char:')) {
     const charName = section.slice(5);
     selectedInteractionChar.value = charName;
-    const interaction = dt.characterInteractions.find(i => i.characterName === charName);
+    const interaction = dt.characterInteractions.find((i: any) => i.characterName === charName);
     if (interaction) {
-      editingText.value = [
-        '--- 行为 ---',
-        ...interaction.behaviors,
-        '--- 禁止误读 ---',
-        ...interaction.prevent,
-      ].join('\n');
+      editingText.value = ['--- 行为 ---', ...interaction.behaviors, '--- 禁止误读 ---', ...interaction.prevent].join('\n');
     }
   }
   editingSection.value = section;
@@ -74,42 +63,63 @@ function saveEdit() {
   if (!dreamtalk.value) return;
   const dt = dreamtalk.value as any;
 
-  const lines = editingText.value.split('\n').map(l => l.trim());
-  let inBehavior = false;
-  let inPrevent = false;
-  const patterns: string[] = [];
-  const prevent: string[] = [];
-
-  for (const line of lines) {
-    if (!line) continue;
-    if (line === '--- 行为 ---') { inBehavior = true; inPrevent = false; continue; }
-    if (line === '--- 禁止误读 ---') { inBehavior = false; inPrevent = true; continue; }
-    if (inBehavior) patterns.push(line);
-    else if (inPrevent) prevent.push(line);
-  }
-
   const section = editingSection.value;
-  if (section === 'bodyContact') {
-    dt.bodyContact = { patterns, prevent };
-  } else if (section === 'speech') {
-    dt.speechStyle = { patterns, prevent };
-  } else if (section === 'emotion') {
-    const emotions: Record<string, any> = {};
+  if (section === 'userInfo') {
+    const lines = editingText.value.split('\n');
+    const info: any = { basic: '', appearance: '', background: '', relationship: '' };
     for (const line of lines) {
-      const m = line.match(/^([^:：]+)[:：]\s*(.+?)\s*\|\s*(.+)/);
+      const m = line.match(/^([^:：]+)[:：]\s*(.+)/);
       if (m) {
-        const name = m[1].trim();
-        if (name) emotions[name] = { shows: m[2].trim(), prevent: m[3].trim() };
+        const key = m[1].trim();
+        const val = m[2].trim();
+        if (key === '基本信息') info.basic = val;
+        else if (key === '外貌特征') info.appearance = val;
+        else if (key === '背景设定') info.background = val;
+        else if (key === '关系设定') info.relationship = val;
       }
     }
-    dt.emotionExpression = emotions;
-  } else if (section?.startsWith('char:')) {
-    const idx = dt.characterInteractions.findIndex(
-      (i: any) => i.characterName === selectedInteractionChar.value,
-    );
-    if (idx !== -1) {
-      dt.characterInteractions[idx].behaviors = patterns;
-      dt.characterInteractions[idx].prevent = prevent;
+    dt.userInfo = info;
+  } else if (section === 'personality') {
+    const lines = editingText.value.split('\n');
+    let baseColor = '', mainColor = '', accent = '', boundary = '';
+    const derivations: string[] = [];
+    let inDeriv = false;
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('底色:')) baseColor = trimmed.replace(/^底色[:：]\s*/, '');
+      else if (trimmed.startsWith('主色调:')) mainColor = trimmed.replace(/^主色调[:：]\s*/, '');
+      else if (trimmed.startsWith('点缀:')) accent = trimmed.replace(/^点缀[:：]\s*/, '');
+      else if (trimmed.startsWith('边界:')) boundary = trimmed.replace(/^边界[:：]\s*/, '');
+      else if (trimmed === '衍生:' || trimmed === '衍生：') inDeriv = true;
+      else if (inDeriv && trimmed.startsWith('- ')) derivations.push(trimmed.slice(2));
+    }
+    dt.personality = { baseColor, mainColor, accent, derivations, boundary };
+  } else {
+    // 行为翻译块
+    const lines = editingText.value.split('\n').map((l: string) => l.trim());
+    let inBehavior = false;
+    let inPrevent = false;
+    const patterns: string[] = [];
+    const prevent: string[] = [];
+    for (const line of lines) {
+      if (!line) continue;
+      if (line === '--- 行为 ---') { inBehavior = true; inPrevent = false; continue; }
+      if (line === '--- 禁止误读 ---') { inBehavior = false; inPrevent = true; continue; }
+      if (inBehavior) patterns.push(line);
+      else if (inPrevent) prevent.push(line);
+    }
+    if (section === 'bodyContact') dt.bodyContact = { patterns, prevent };
+    else if (section === 'speech') dt.speechStyle = { patterns, prevent };
+    else if (section === 'emotion') {
+      const emotions: Record<string, any> = {};
+      for (const line of lines) {
+        const m = line.match(/^([^:：]+)[:：]\s*(.+?)\s*\|\s*(.+)/);
+        if (m) { const name = m[1].trim(); if (name) emotions[name] = { shows: m[2].trim(), prevent: m[3].trim() }; }
+      }
+      dt.emotionExpression = emotions;
+    } else if (section?.startsWith('char:')) {
+      const idx = dt.characterInteractions.findIndex((i: any) => i.characterName === selectedInteractionChar.value);
+      if (idx !== -1) { dt.characterInteractions[idx].behaviors = patterns; dt.characterInteractions[idx].prevent = prevent; }
     }
   }
 
@@ -178,6 +188,69 @@ async function triggerAnalysis() {
       <div class="zhino-section">
         <div class="zhino-section-title">游玩类型</div>
         <div class="zhino-info-value">{{ dreamtalk.playStyle }}</div>
+      </div>
+
+      <!-- 基础信息 -->
+      <div class="zhino-section">
+        <div class="zhino-section-header">
+          <div class="zhino-section-title">基础信息</div>
+          <button v-if="editingSection !== 'userInfo'" class="zhino-btn-sm" @click="startEdit('userInfo')">编辑</button>
+          <div v-else class="zhino-btn-group">
+            <button class="zhino-btn-sm zhino-btn-save" @click="saveEdit">保存</button>
+            <button class="zhino-btn-sm" @click="editingSection = null">取消</button>
+          </div>
+        </div>
+        <template v-if="editingSection === 'userInfo'">
+          <textarea v-model="editingText" class="zhino-textarea" rows="5" />
+        </template>
+        <template v-else>
+          <div class="zhino-userinfo-grid">
+            <div v-if="dreamtalk.userInfo.basic" class="zhino-userinfo-row">
+              <span class="zhino-userinfo-label">基本信息</span>
+              <span class="zhino-userinfo-val">{{ dreamtalk.userInfo.basic }}</span>
+            </div>
+            <div v-if="dreamtalk.userInfo.appearance && dreamtalk.userInfo.appearance !== '待观察'" class="zhino-userinfo-row">
+              <span class="zhino-userinfo-label">外貌</span>
+              <span class="zhino-userinfo-val">{{ dreamtalk.userInfo.appearance }}</span>
+            </div>
+            <div v-if="dreamtalk.userInfo.background && dreamtalk.userInfo.background !== '待观察'" class="zhino-userinfo-row">
+              <span class="zhino-userinfo-label">背景</span>
+              <span class="zhino-userinfo-val">{{ dreamtalk.userInfo.background }}</span>
+            </div>
+            <div v-if="dreamtalk.userInfo.relationship && dreamtalk.userInfo.relationship !== '待观察'" class="zhino-userinfo-row">
+              <span class="zhino-userinfo-label">关系</span>
+              <span class="zhino-userinfo-val">{{ dreamtalk.userInfo.relationship }}</span>
+            </div>
+            <div v-if="!dreamtalk.userInfo.basic && !dreamtalk.userInfo.relationship" class="zhino-empty-hint">暂无数据</div>
+          </div>
+        </template>
+      </div>
+
+      <!-- 性格调色盘（抢话党专属） -->
+      <div v-if="isSpeakForUser && dreamtalk.personality" class="zhino-section">
+        <div class="zhino-section-header">
+          <div class="zhino-section-title">性格调色盘</div>
+          <button v-if="editingSection !== 'personality'" class="zhino-btn-sm" @click="startEdit('personality')">编辑</button>
+          <div v-else class="zhino-btn-group">
+            <button class="zhino-btn-sm zhino-btn-save" @click="saveEdit">保存</button>
+            <button class="zhino-btn-sm" @click="editingSection = null">取消</button>
+          </div>
+        </div>
+        <template v-if="editingSection === 'personality'">
+          <textarea v-model="editingText" class="zhino-textarea" rows="7" />
+        </template>
+        <template v-else>
+          <div class="zhino-palette">
+            <div v-if="dreamtalk.personality.baseColor" class="zhino-palette-row"><span class="zhino-palette-label">底色</span><span class="zhino-palette-val">{{ dreamtalk.personality.baseColor }}</span></div>
+            <div v-if="dreamtalk.personality.mainColor" class="zhino-palette-row"><span class="zhino-palette-label">主色调</span><span class="zhino-palette-val">{{ dreamtalk.personality.mainColor }}</span></div>
+            <div v-if="dreamtalk.personality.accent" class="zhino-palette-row"><span class="zhino-palette-label">点缀</span><span class="zhino-palette-val">{{ dreamtalk.personality.accent }}</span></div>
+            <div v-if="dreamtalk.personality.derivations.length > 0">
+              <div class="zhino-v2-label" style="margin-top:4px">衍生</div>
+              <div v-for="(d, i) in dreamtalk.personality.derivations" :key="i" class="zhino-behavior-item zhino-behavior-pattern">{{ d }}</div>
+            </div>
+            <div v-if="dreamtalk.personality.boundary" class="zhino-palette-row" style="margin-top:4px"><span class="zhino-palette-label">边界</span><span class="zhino-palette-val boundary">{{ dreamtalk.personality.boundary }}</span></div>
+          </div>
+        </template>
       </div>
 
       <!-- 肢体接触 -->
@@ -375,6 +448,19 @@ async function triggerAnalysis() {
 .zhino-emotion-name { color: rgba(252,211,77,0.8); font-weight: 500; min-width: 32px; }
 .zhino-emotion-shows { color: rgba(255,255,255,0.7); flex: 1; }
 .zhino-emotion-prevent { color: rgba(248,113,113,0.45); font-size: 10px; font-style: italic; }
+
+/* 基础信息 */
+.zhino-userinfo-grid { display: flex; flex-direction: column; gap: 3px; }
+.zhino-userinfo-row { display: flex; gap: 6px; align-items: baseline; padding: 2px 4px; font-size: 12px; }
+.zhino-userinfo-label { color: rgba(167,139,250,0.5); font-size: 10px; min-width: 36px; }
+.zhino-userinfo-val { color: rgba(255,255,255,0.7); }
+
+/* 性格调色盘 */
+.zhino-palette { display: flex; flex-direction: column; gap: 2px; }
+.zhino-palette-row { display: flex; gap: 6px; align-items: baseline; padding: 2px 4px; font-size: 12px; }
+.zhino-palette-label { color: rgba(252,211,77,0.6); font-size: 10px; min-width: 36px; }
+.zhino-palette-val { color: rgba(255,255,255,0.75); }
+.zhino-palette-val.boundary { color: rgba(252,211,77,0.7); font-style: italic; }
 
 .zhino-behavior-item.zhino-roll-like { border-left-color: rgba(74,222,128,0.4); }
 .zhino-behavior-item.zhino-roll-dislike { border-left-color: rgba(248,113,113,0.4); }

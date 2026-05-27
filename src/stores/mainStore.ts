@@ -298,10 +298,16 @@ export const useMainStore = defineStore('main', () => {
     chatData.value.chatId = currentChatId;
   }
 
-  // 梦呓 v1 → v2 迁移：检测旧格式（有 generalBehaviors 字段），自动丢弃让下次大总结重新生成
+  // 梦呓 v1 → v2 迁移：检测旧格式（有 generalBehaviors 字段），自动丢弃
   if (chatData.value.dreamtalk && (chatData.value.dreamtalk as any).generalBehaviors !== undefined) {
     console.info('[智脑] 检测到梦呓 v1 旧格式，已自动迁移为 v2（下次大总结时重新分析）');
     chatData.value.dreamtalk = null;
+  }
+
+  // 梦呓 v2 补字段：旧 v2 数据不含 userInfo/personality，补默认值
+  if (chatData.value.dreamtalk && !chatData.value.dreamtalk.userInfo) {
+    (chatData.value.dreamtalk as any).userInfo = { basic: '', appearance: '', background: '', relationship: '' };
+    (chatData.value.dreamtalk as any).personality = null;
   }
 
   // ========== 运行状态（不持久化，脚本重载后重置） ==========
