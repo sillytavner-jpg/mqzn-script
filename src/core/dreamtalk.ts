@@ -308,7 +308,7 @@ function buildDreamtalkMaterial(userInputs: UserInputRecord[], userPersonaRaw: s
   parts.push('## 用户最近10轮输入与对应AI回复（含roll记录）');
   parts.push('');
 
-  for (const record of userInputs) {
+  for (const record of userInputs.slice(-10)) {
     parts.push(`### 楼层 #${record.messageId}`);
     parts.push(`【用户输入】${record.userInput}`);
     parts.push(`【AI回复】${record.aiResponse.slice(0, 500)}`);
