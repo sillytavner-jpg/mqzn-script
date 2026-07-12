@@ -1,0 +1,139 @@
+/* ============================================================
+   智脑 · 共享组件类（全局，.zhino-root 前缀防污染酒馆）
+   跨页面复用的工具类在此只定义一次，消除各组件 scoped 里的重复。
+   ============================================================ */
+
+/* ── 按钮族 ── */
+.zhino-root .zn-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--zn-space-1);
+  padding: 6px 14px;
+  font-size: var(--zn-fs-body);
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--zn-text-primary);
+  background: var(--zn-bg-surface2);
+  border: 1px solid var(--zn-border-base);
+  border-radius: var(--zn-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--zn-dur) var(--zn-ease);
+}
+.zhino-root .zn-btn:hover { background: var(--zn-bg-surface2); border-color: var(--zn-accent); color: var(--zn-text-primary); }
+.zhino-root .zn-btn:active { transform: scale(0.98); }
+.zhino-root .zn-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+.zhino-root .zn-btn-primary {
+  color: #fff;
+  background: rgba(var(--zn-accent-rgb), 0.9);
+  border-color: var(--zn-accent);
+}
+.zhino-root .zn-btn-primary:hover { background: var(--zn-accent); box-shadow: var(--zn-glow-accent); }
+
+.zhino-root .zn-btn-ghost { background: transparent; border-color: var(--zn-border-light); color: var(--zn-text-regular); }
+.zhino-root .zn-btn-ghost:hover { background: var(--zn-bg-surface2); color: var(--zn-text-primary); }
+
+.zhino-root .zn-btn-danger {
+  color: var(--zn-danger);
+  background: rgba(var(--zn-danger-rgb), 0.1);
+  border-color: rgba(var(--zn-danger-rgb), 0.35);
+}
+.zhino-root .zn-btn-danger:hover { background: rgba(var(--zn-danger-rgb), 0.2); box-shadow: 0 0 10px rgba(var(--zn-danger-rgb), 0.3); }
+
+.zhino-root .zn-btn-sm { padding: 3px 10px; font-size: var(--zn-fs-label); }
+.zhino-root .zn-btn-xs { padding: 2px 8px; font-size: var(--zn-fs-label); border-radius: var(--zn-radius-sm); }
+
+.zhino-root .zn-btn-row { display: flex; flex-wrap: wrap; gap: var(--zn-space-2); align-items: center; }
+
+/* ── Section 容器 ── */
+.zhino-root .zn-section {
+  padding: var(--zn-space-3);
+  background: var(--zn-bg-surface1);
+  border: 1px solid var(--zn-border-light);
+  border-radius: var(--zn-radius);
+}
+.zhino-root .zn-section-title {
+  font-size: var(--zn-fs-body);
+  font-weight: 600;
+  color: var(--zn-text-primary);
+  margin-bottom: var(--zn-space-2);
+}
+
+/* ── 输入控件 ── */
+.zhino-root .zn-input,
+.zhino-root .zn-textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: var(--zn-fs-body);
+  color: var(--zn-text-primary);
+  background: var(--zn-bg-surface1);
+  border: 1px solid var(--zn-border-base);
+  border-radius: var(--zn-radius-sm);
+  padding: 6px 10px;
+  transition: border-color var(--zn-dur) var(--zn-ease), box-shadow var(--zn-dur) var(--zn-ease);
+}
+.zhino-root .zn-textarea { resize: vertical; min-height: 4em; line-height: 1.6; }
+.zhino-root .zn-input:focus,
+.zhino-root .zn-textarea:focus {
+  outline: none;
+  border-color: var(--zn-accent);
+  box-shadow: 0 0 0 2px rgba(var(--zn-accent-rgb), 0.18);
+}
+.zhino-root .zn-input::placeholder,
+.zhino-root .zn-textarea::placeholder { color: var(--zn-text-muted); }
+
+/* ── 徽标 ── */
+.zhino-root .zn-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  font-size: var(--zn-fs-label);
+  font-weight: 500;
+  border-radius: var(--zn-radius-sm);
+  background: var(--zn-bg-surface2);
+  color: var(--zn-text-regular);
+  border: 1px solid var(--zn-border-light);
+  white-space: nowrap;
+}
+.zhino-root .zn-badge-accent { color: var(--zn-accent); background: var(--zn-accent-dim); border-color: rgba(var(--zn-accent-rgb), 0.3); }
+.zhino-root .zn-badge-success { color: var(--zn-success); background: rgba(var(--zn-success-rgb), 0.12); border-color: rgba(var(--zn-success-rgb), 0.3); }
+.zhino-root .zn-badge-warn { color: var(--zn-warn); background: rgba(var(--zn-warn-rgb), 0.12); border-color: rgba(var(--zn-warn-rgb), 0.3); }
+.zhino-root .zn-badge-danger { color: var(--zn-danger); background: rgba(var(--zn-danger-rgb), 0.12); border-color: rgba(var(--zn-danger-rgb), 0.3); }
+
+/* ── 分割线 ── */
+.zhino-root .zn-divider { height: 1px; background: var(--zn-border-light); border: none; margin: var(--zn-space-2) 0; }
+
+/* ── 卡片（可展开条目等） ── */
+.zhino-root .zn-card {
+  background: var(--zn-bg-surface1);
+  border: 1px solid var(--zn-border-light);
+  border-radius: var(--zn-radius);
+  overflow: hidden;
+  transition: border-color var(--zn-dur) var(--zn-ease), background var(--zn-dur) var(--zn-ease);
+}
+.zhino-root .zn-card:hover { border-color: var(--zn-border-base); background: var(--zn-bg-surface2); }
+
+/* ── 移动端触控目标加固 ── */
+@media (pointer: coarse) {
+  .zhino-root .zn-btn { min-height: 40px; }
+  .zhino-root .zn-btn-sm, .zhino-root .zn-btn-xs { min-height: 36px; }
+}
+
+/* ── 列表入场 stagger（页面给列表容器加 .zn-stagger 即可） ── */
+.zhino-root .zn-stagger > * {
+  animation: zn-stagger-in 0.32s var(--zn-ease) both;
+}
+.zhino-root .zn-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.zhino-root .zn-stagger > *:nth-child(2) { animation-delay: 45ms; }
+.zhino-root .zn-stagger > *:nth-child(3) { animation-delay: 90ms; }
+.zhino-root .zn-stagger > *:nth-child(4) { animation-delay: 135ms; }
+.zhino-root .zn-stagger > *:nth-child(5) { animation-delay: 180ms; }
+.zhino-root .zn-stagger > *:nth-child(6) { animation-delay: 225ms; }
+.zhino-root .zn-stagger > *:nth-child(7) { animation-delay: 270ms; }
+.zhino-root .zn-stagger > *:nth-child(8) { animation-delay: 315ms; }
+@keyframes zn-stagger-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

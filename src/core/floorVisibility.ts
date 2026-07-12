@@ -1,5 +1,5 @@
 import type { CapturedContent } from '../stores/mainStore';
-import { PRESERVE_RECENT_COUNT } from './summary';
+import { logInfo } from '../utils/logger';
 
 export interface HiddenFloor {
   messageId: number;
@@ -16,10 +16,17 @@ function getExistingMessageIds(ids: number[]): number[] {
   if (uniqueIds.length === 0) return [];
 
   const existingIds = new Set<number>();
+  const missingIds: number[] = [];
   for (const id of uniqueIds) {
-    if (getChatMessages(id).length > 0) {
+    const msgs = getChatMessages(id);
+    if (msgs && msgs.length > 0) {
       existingIds.add(id);
+    } else {
+      missingIds.push(id);
     }
+  }
+  if (missingIds.length > 0) {
+    logInfo('楼层', '消息ID校验', `${existingIds.size}个存在, ${missingIds.length}个不存在`);
   }
   return Array.from(existingIds).sort((a, b) => a - b);
 }
@@ -95,7 +102,9 @@ export function getCapturedContentAndUserMessageIds(contents: CapturedContent[])
   );
 }
 
-export function getRecentFloorIdsToKeepVisible(aiCount = PRESERVE_RECENT_COUNT): number[] {
+export function getRecentFloorIdsToKeepVisible(aiCount = 4): number[] {
+  if (aiCount <= 0) return []; // slice(-0) === slice(0) 会返回全部元素！
+
   let lastMessageId = -1;
   try {
     lastMessageId = getLastMessageId();
@@ -119,8 +128,11 @@ export function getRecentFloorIdsToKeepVisible(aiCount = PRESERVE_RECENT_COUNT):
   return uniqueSortedIds(ids);
 }
 
-export async function ensureRecentFloorsVisible(refresh: SetChatMessagesOption['refresh'] = 'affected'): Promise<number[]> {
-  const protectedIds = getRecentFloorIdsToKeepVisible();
+export async function ensureRecentFloorsVisible(
+  refresh: SetChatMessagesOption['refresh'] = 'affected',
+  aiCount = 4,
+): Promise<number[]> {
+  const protectedIds = getRecentFloorIdsToKeepVisible(aiCount);
   if (protectedIds.length === 0) return [];
 
   const protectedSet = new Set(protectedIds);
@@ -134,7 +146,6 @@ export async function ensureRecentFloorsVisible(refresh: SetChatMessagesOption['
     hiddenProtectedIds.map(message_id => ({ message_id, is_hidden: false })),
     { refresh },
   );
-  console.info(`[智脑] 安全检查：已取消隐藏最新 ${hiddenProtectedIds.length} 个楼层`);
   return hiddenProtectedIds;
 }
 
@@ -142,20 +153,46 @@ export async function setFloorsHidden(
   messageIds: number[],
   isHidden: boolean,
   refresh: SetChatMessagesOption['refresh'] = 'affected',
+  preserveCount = 4,
 ): Promise<number[]> {
+  logInfo('楼层', `${isHidden ? '隐藏' : '取消隐藏'} ${messageIds.length}个楼层`);
   const existingIds = getExistingMessageIds(messageIds);
-  if (existingIds.length === 0) return [];
+  if (existingIds.length === 0) {
+    return [];
+  }
 
+  logInfo('楼层', `实际${isHidden ? '隐藏' : '取消隐藏'} ${existingIds.length}个楼层`);
   await setChatMessages(
     existingIds.map(message_id => ({ message_id, is_hidden: isHidden })),
     { refresh },
   );
 
   if (isHidden) {
-    await ensureRecentFloorsVisible(refresh);
+    await ensureRecentFloorsVisible(refresh, preserveCount);
   }
 
   return existingIds;
+}
+
+/**
+ * 大总结后隐藏楼层：所有 <= maxSummarizedId 的楼层都隐藏
+ * （最新 N 条 AI 回复通过 getContentsSinceLast 排除，不会被总结，自然不会被隐藏）
+ */
+export async function hideSummaryFloors(
+  maxSummarizedId: number,
+  preserveCount: number,
+  refresh: SetChatMessagesOption['refresh'] = 'affected',
+): Promise<number[]> {
+  const cutoff = maxSummarizedId - preserveCount;
+  if (cutoff <= 0) {
+    return [];
+  }
+  const idsToHide: number[] = [];
+  for (let id = 0; id <= cutoff; id++) {
+    idsToHide.push(id);
+  }
+
+  return setFloorsHidden(idsToHide, true, refresh, preserveCount);
 }
 
 export async function hideCapturedContentsWithUsers(

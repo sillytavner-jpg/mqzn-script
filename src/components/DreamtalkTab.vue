@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useMainStore } from '../stores/mainStore';
 import { executeDreamtalkAnalysis } from '../core/dreamtalk';
+import { logInfo, logError } from '../utils/logger';
 
 const store = useMainStore();
 
@@ -53,7 +54,10 @@ function startEdit(section: string) {
     selectedInteractionChar.value = charName;
     const interaction = dt.characterInteractions.find((i: any) => i.characterName === charName);
     if (interaction) {
-      editingText.value = (interaction.entries || []).map((e: any) => `- ${e.text}` + (e.prevent ? ` | ${e.prevent}` : '')).join('\n');
+      editingText.value = (interaction.entries || []).map((e: any) => {
+        const text = e.scenario ? `${e.scenario}: ${e.text}` : e.text;
+        return `- ${text}` + (e.prevent ? ` | ${e.prevent}` : '');
+      }).join('\n');
     }
   }
   editingSection.value = section;
@@ -95,20 +99,37 @@ function saveEdit() {
     }
     dt.personality = { baseColor, mainColor, accent, derivations, boundary };
   } else {
-    // 行为翻译块：每行 "- text | prevent"
+    // 行为翻译块：每行 "- [情境: ]text | prevent"
     const entries: any[] = [];
     const lines = editingText.value.split('\n');
     for (const rawLine of lines) {
       const line = rawLine.trim();
       if (!line || !line.startsWith('- ')) continue;
-      const content = line.slice(2).trim();
+      let content = line.slice(2).trim();
+
+      // 尝试提取情境前缀（如"靠近时: 行为"）
+      let scenario: string | undefined;
+      const scenarioMatch = content.match(/^(.+?)[：:]\s*(.+)/);
+      if (scenarioMatch) {
+        scenario = scenarioMatch[1].trim();
+        content = scenarioMatch[2].trim();
+      }
+
       const pipeIdx = content.lastIndexOf('|');
       if (pipeIdx === -1) {
-        if (content) entries.push({ text: content, prevent: '' });
+        if (content) {
+          const entry: any = { text: content, prevent: '' };
+          if (scenario) entry.scenario = scenario;
+          entries.push(entry);
+        }
       } else {
         const text = content.slice(0, pipeIdx).trim();
         const prevent = content.slice(pipeIdx + 1).trim();
-        if (text) entries.push({ text, prevent });
+        if (text) {
+          const entry: any = { text, prevent };
+          if (scenario) entry.scenario = scenario;
+          entries.push(entry);
+        }
       }
     }
     if (section === 'bodyContact') dt.bodyContact = { entries };
@@ -129,7 +150,6 @@ function saveEdit() {
 
   store.updateDreamtalk({ ...dt });
   editingSection.value = null;
-  console.info('[智脑] 已保存');
 }
 
 // Roll 编辑
@@ -156,21 +176,36 @@ function saveRollDislikes() {
   isEditingRollDislikes.value = false;
 }
 
+// 游玩类型选择（与 store.settings.preferredPlayStyle 双向绑定）
+const preferredPlayStyle = computed({
+  get: () => store.settings.preferredPlayStyle || '',
+  set: (val: string) => store.updateSettings({ preferredPlayStyle: val }),
+});
+
 // 手动触发分析
 async function triggerAnalysis() {
   if (store.userInputRecords.length === 0) {
-    console.info('[智脑] 没有可用的用户输入记录');
+    logInfo('梦呓', '没有可用的用户输入记录');
     return;
   }
   store.setDreamtalkInProgress(true);
-  console.info('[智脑] 手动触发梦呓分析...');
+  const style = preferredPlayStyle.value || undefined;
+  logInfo('梦呓', '手动触发分析');
   try {
-    const { dreamtalk: result, nsfwDreamtalk } = await executeDreamtalkAnalysis(store.userInputRecords, store.persona.rawInput || '');
+    const { dreamtalk: result, nsfwDreamtalk } = await executeDreamtalkAnalysis(
+      store.userInputRecords,
+      store.persona.rawInput || '',
+      store.dreamtalk,
+      style,
+      store.getUserName(),
+    );
     store.updateDreamtalk(result);
     if (nsfwDreamtalk) store.updateNsfwDreamtalk(nsfwDreamtalk);
-    console.info(`[智脑] 梦呓分析完成 (${result.characterInteractions.length} 角色交互模式)`);
-  } catch (error) {
-    console.error('[智脑] 梦呓分析失败:', error);
+    logInfo('梦呓', `分析完成 (${result.characterInteractions.length} 角色)`);
+  } catch (error: any) {
+    logError('梦呓', '分析失败', String(error));
+    const msg = error?.message || String(error);
+    try { window.toastr?.error(msg, '❌ 梦呓分析失败', { timeOut: 8000, extendedTimeOut: 3000 }); } catch(_) {}
   } finally {
     store.setDreamtalkInProgress(false);
   }
@@ -182,16 +217,32 @@ async function triggerAnalysis() {
     <!-- 空状态 -->
     <div v-if="!dreamtalk" class="zhino-section">
       <div class="zhino-empty-hint">梦呓数据尚未生成。大总结完成后会自动分析，或手动触发。</div>
+      <!-- 游玩类型选择 -->
+      <div class="zhino-playstyle-row">
+        <span class="zhino-playstyle-label">游玩类型：</span>
+        <label class="zhino-playstyle-radio"><input type="radio" value="" v-model="preferredPlayStyle" name="playstyle" /> 自动判定</label>
+        <label class="zhino-playstyle-radio"><input type="radio" value="不抢话" v-model="preferredPlayStyle" name="playstyle" /> 不抢话党</label>
+        <label class="zhino-playstyle-radio"><input type="radio" value="抢话" v-model="preferredPlayStyle" name="playstyle" /> 抢话党</label>
+        <label class="zhino-playstyle-radio"><input type="radio" value="混合" v-model="preferredPlayStyle" name="playstyle" /> 混合</label>
+      </div>
       <button class="zhino-btn" :disabled="store.dreamtalkInProgress || store.userInputRecords.length === 0" @click="triggerAnalysis">
         {{ store.dreamtalkInProgress ? '分析中...' : '手动分析' }}
       </button>
     </div>
 
     <template v-else>
-      <!-- 游玩类型 -->
+      <!-- 游玩类型选择 -->
       <div class="zhino-section">
         <div class="zhino-section-title">游玩类型</div>
-        <div class="zhino-info-value">{{ dreamtalk.playStyle }}</div>
+        <div class="zhino-playstyle-row">
+          <label class="zhino-playstyle-radio"><input type="radio" value="" v-model="preferredPlayStyle" name="playstyle" /> 自动判定</label>
+          <label class="zhino-playstyle-radio"><input type="radio" value="不抢话" v-model="preferredPlayStyle" name="playstyle" /> 不抢话党</label>
+          <label class="zhino-playstyle-radio"><input type="radio" value="抢话" v-model="preferredPlayStyle" name="playstyle" /> 抢话党</label>
+          <label class="zhino-playstyle-radio"><input type="radio" value="混合" v-model="preferredPlayStyle" name="playstyle" /> 混合</label>
+        </div>
+        <div class="zhino-playstyle-hint">
+          AI 分析结果: {{ dreamtalk.playStyle }} | 下次手动/自动分析时将使用上方选择
+        </div>
       </div>
 
       <!-- 基础信息 -->
@@ -359,7 +410,7 @@ async function triggerAnalysis() {
             <div class="zhino-v2-block">
               <div v-if="selectedInteraction.entries.length > 0">
                 <div v-for="(e, i) in selectedInteraction.entries" :key="i" class="zhino-entry-row">
-                  <span class="zhino-entry-text">{{ e.text }}</span>
+                  <span class="zhino-entry-text">{{ e.scenario ? e.scenario + ': ' + e.text : e.text }}</span>
                   <span v-if="e.prevent" class="zhino-entry-prevent">{{ e.prevent }}</span>
                 </div>
               </div>
@@ -427,66 +478,76 @@ async function triggerAnalysis() {
 </template>
 
 <style scoped>
-.zhino-dreamtalk { display: flex; flex-direction: column; gap: 12px; }
-.zhino-section { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 10px 12px; }
-.zhino-section-title { font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.6); margin-bottom: 8px; }
+.zhino-dreamtalk { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.zhino-section { background: var(--zn-bg-surface1); border: 1px solid var(--zn-border-light); border-radius: 8px; padding: 10px 12px; }
+.zhino-section-title { font-size: 12px; font-weight: 600; color: var(--zn-text-regular); margin-bottom: 8px; letter-spacing: 0.5px; }
 .zhino-section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.zhino-info-value { font-size: 13px; color: rgba(167,139,250,0.9); font-weight: 500; }
+.zhino-info-value { font-size: 13px; color: rgba(var(--zn-accent-rgb), 0.9); font-weight: 500; }
 .zhino-behavior-list { display: flex; flex-direction: column; gap: 4px; }
-.zhino-behavior-item { font-size: 12px; color: rgba(255,255,255,0.7); padding: 4px 8px; background: rgba(255,255,255,0.03); border-radius: 4px; }
+.zhino-behavior-item { font-size: 12px; color: var(--zn-text-regular); padding: 4px 8px; background: var(--zn-bg-surface1); border: 1px solid var(--zn-border-light); border-radius: 4px; }
 
 /* v2 样式 */
 .zhino-v2-block { display: flex; flex-direction: column; gap: 3px; }
-.zhino-v2-label { font-size: 10px; color: rgba(255,255,255,0.3); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
-.zhino-v2-prevent-label { color: rgba(248,113,113,0.4); margin-top: 6px; }
+.zhino-v2-label { font-size: 10px; color: var(--zn-text-muted); margin-top: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+.zhino-v2-prevent-label { color: rgba(var(--zn-danger-rgb), 0.4); margin-top: 6px; }
 
 /* 配对条目 */
-.zhino-entry-row { display: flex; flex-direction: column; gap: 1px; padding: 3px 8px; background: rgba(255,255,255,0.02); border-radius: 4px; border-left: 2px solid rgba(167,139,250,0.3); margin-bottom: 2px; }
-.zhino-entry-text { font-size: 12px; color: rgba(255,255,255,0.7); }
-.zhino-entry-prevent { font-size: 10px; color: rgba(248,113,113,0.5); font-style: italic; }
+.zhino-entry-row { display: flex; flex-direction: column; gap: 1px; padding: 3px 8px; background: var(--zn-bg-surface1); border-radius: 4px; border-left: 2px solid rgba(var(--zn-accent-rgb), 0.3); margin-bottom: 2px; }
+.zhino-entry-text { font-size: 12px; color: var(--zn-text-regular); }
+.zhino-entry-prevent { font-size: 10px; color: rgba(var(--zn-danger-rgb), 0.5); font-style: italic; }
 
 /* 情绪表达 */
-.zhino-emotion-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 8px; background: rgba(255,255,255,0.02); border-radius: 4px; border-left: 2px solid rgba(252,211,77,0.3); margin-bottom: 2px; font-size: 12px; }
-.zhino-emotion-name { color: rgba(252,211,77,0.8); font-weight: 500; min-width: 32px; }
-.zhino-emotion-shows { color: rgba(255,255,255,0.7); flex: 1; }
-.zhino-emotion-prevent { color: rgba(248,113,113,0.45); font-size: 10px; font-style: italic; }
+.zhino-emotion-row { display: flex; align-items: baseline; gap: 6px; padding: 3px 8px; background: var(--zn-bg-surface1); border-radius: 4px; border-left: 2px solid rgba(var(--zn-warn-rgb), 0.3); margin-bottom: 2px; font-size: 12px; }
+.zhino-emotion-name { color: rgba(var(--zn-warn-rgb), 0.8); font-weight: 500; min-width: 32px; }
+.zhino-emotion-shows { color: var(--zn-text-regular); flex: 1; }
+.zhino-emotion-prevent { color: rgba(var(--zn-danger-rgb), 0.45); font-size: 10px; font-style: italic; }
 
 /* 基础信息 */
 .zhino-userinfo-grid { display: flex; flex-direction: column; gap: 3px; }
 .zhino-userinfo-row { display: flex; gap: 6px; align-items: baseline; padding: 2px 4px; font-size: 12px; }
-.zhino-userinfo-label { color: rgba(167,139,250,0.5); font-size: 10px; min-width: 36px; }
-.zhino-userinfo-val { color: rgba(255,255,255,0.7); }
+.zhino-userinfo-label { color: rgba(var(--zn-accent-rgb), 0.5); font-size: 10px; min-width: 36px; }
+.zhino-userinfo-val { color: var(--zn-text-regular); }
 
 /* 性格调色盘 */
 .zhino-palette { display: flex; flex-direction: column; gap: 2px; }
 .zhino-palette-row { display: flex; gap: 6px; align-items: baseline; padding: 2px 4px; font-size: 12px; }
-.zhino-palette-label { color: rgba(252,211,77,0.6); font-size: 10px; min-width: 36px; }
-.zhino-palette-val { color: rgba(255,255,255,0.75); }
-.zhino-palette-val.boundary { color: rgba(252,211,77,0.7); font-style: italic; }
+.zhino-palette-label { color: rgba(var(--zn-warn-rgb), 0.6); font-size: 10px; min-width: 36px; }
+.zhino-palette-val { color: var(--zn-text-primary); }
+.zhino-palette-val.boundary { color: rgba(var(--zn-warn-rgb), 0.7); font-style: italic; }
 
-.zhino-behavior-item.zhino-roll-like { border-left-color: rgba(74,222,128,0.4); }
-.zhino-behavior-item.zhino-roll-dislike { border-left-color: rgba(248,113,113,0.4); }
+.zhino-behavior-item.zhino-roll-like { border-left-color: rgba(var(--zn-success-rgb), 0.4); }
+.zhino-behavior-item.zhino-roll-dislike { border-left-color: rgba(var(--zn-danger-rgb), 0.4); }
 .zhino-roll-block { margin-bottom: 10px; }
 .zhino-roll-block:last-child { margin-bottom: 0; }
 .zhino-roll-label { font-weight: 500; font-size: 12px; flex-shrink: 0; }
-.zhino-roll-label.like { color: #4ade80; }
-.zhino-roll-label.dislike { color: #f87171; }
+.zhino-roll-label.like { color: var(--zn-success); }
+.zhino-roll-label.dislike { color: var(--zn-danger); }
 .zhino-char-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
-.zhino-char-tab { padding: 3px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.6); cursor: pointer; transition: all 0.15s; }
-.zhino-char-tab:hover { background: rgba(167,139,250,0.08); }
-.zhino-char-tab.active { background: rgba(167,139,250,0.15); border-color: rgba(167,139,250,0.3); color: rgba(167,139,250,0.9); }
+.zhino-char-tab { padding: 3px 10px; font-size: 11px; border-radius: 4px; border: 1px solid var(--zn-border-base); background: var(--zn-bg-surface1); color: var(--zn-text-regular); cursor: pointer; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.zhino-char-tab:hover { background: rgba(var(--zn-accent-rgb), 0.08); }
+.zhino-char-tab.active { background: rgba(var(--zn-accent-rgb), 0.15); border-color: rgba(var(--zn-accent-rgb), 0.3); color: rgba(var(--zn-accent-rgb), 0.9); }
 .zhino-interaction-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.zhino-meta { font-size: 10px; color: rgba(255,255,255,0.3); margin-top: 6px; }
-.zhino-empty-hint { font-size: 12px; color: rgba(255,255,255,0.3); margin-bottom: 8px; }
-.zhino-textarea { width: 100%; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 8px; font-size: 12px; color: rgba(255,255,255,0.85); resize: vertical; outline: none; font-family: inherit; box-sizing: border-box; }
-.zhino-textarea:focus { border-color: rgba(167,139,250,0.4); }
-.zhino-detail-label { color: rgba(255,255,255,0.4); font-size: 11px; }
-.zhino-btn { padding: 6px 14px; font-size: 12px; font-weight: 500; border-radius: 6px; border: 1px solid rgba(167,139,250,0.25); background: rgba(167,139,250,0.08); color: rgba(167,139,250,0.9); cursor: pointer; transition: all 0.15s; }
-.zhino-btn:hover:not(:disabled) { background: rgba(167,139,250,0.18); border-color: rgba(167,139,250,0.4); }
+.zhino-meta { font-size: 10px; color: var(--zn-text-muted); margin-top: 6px; }
+.zhino-empty-hint { font-size: 12px; color: var(--zn-text-muted); margin-bottom: 8px; }
+.zhino-textarea { width: 100%; background: var(--zn-bg-surface1); border: 1px solid var(--zn-border-base); border-radius: 6px; padding: 8px; font-size: 12px; color: var(--zn-text-primary); resize: vertical; outline: none; font-family: inherit; box-sizing: border-box; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.zhino-textarea:focus { border-color: var(--zn-primary); }
+.zhino-detail-label { color: var(--zn-text-muted); font-size: 11px; }
+
+/* 按钮 */
+.zhino-btn { padding: 6px 14px; font-size: 12px; font-weight: 500; border-radius: 6px; border: 1px solid var(--zn-border-base); background: transparent; color: var(--zn-text-regular); cursor: pointer; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.zhino-btn:hover:not(:disabled) { background: var(--zn-bg-surface2); color: var(--zn-text-primary); border-color: var(--zn-border-light); }
 .zhino-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.zhino-btn-sm { padding: 3px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.6); cursor: pointer; transition: all 0.15s; }
-.zhino-btn-sm:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.9); }
-.zhino-btn-save { border-color: rgba(167,139,250,0.3); color: rgba(167,139,250,0.9); }
-.zhino-btn-save:hover { background: rgba(167,139,250,0.15); }
+.zhino-btn-sm { padding: 4px 10px; font-size: 11px; border-radius: 4px; border: 1px solid var(--zn-border-base); background: var(--zn-bg-surface1); color: var(--zn-text-regular); cursor: pointer; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.zhino-btn-sm:hover { background: var(--zn-bg-surface2); color: var(--zn-text-primary); }
+.zhino-btn-save { border-color: rgba(var(--zn-accent-rgb), 0.3); color: rgba(var(--zn-accent-rgb), 0.9); }
+.zhino-btn-save:hover { background: rgba(var(--zn-accent-rgb), 0.15); }
 .zhino-btn-group { display: flex; gap: 4px; }
+
+/* 游玩类型选择 */
+.zhino-playstyle-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; align-items: center; }
+.zhino-playstyle-label { font-size: 12px; color: var(--zn-text-regular); }
+.zhino-playstyle-radio { font-size: 11px; color: var(--zn-text-regular); cursor: pointer; display: flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--zn-border-base); background: var(--zn-bg-surface1); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+.zhino-playstyle-radio:hover { background: var(--zn-bg-surface2); border-color: var(--zn-border-light); }
+.zhino-playstyle-radio input[type="radio"] { accent-color: var(--zn-accent); margin: 0; }
+.zhino-playstyle-hint { font-size: 10px; color: var(--zn-text-muted); margin-top: 4px; }
 </style>

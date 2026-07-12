@@ -1,0 +1,112 @@
+/* ============================================================
+   智脑 · 基础层
+   仅作用于 .zhino-root 内部，不污染酒馆本体。
+   ============================================================ */
+
+.zhino-root {
+  font-family: var(--zn-font-sans);
+  font-size: var(--zn-fs-base);
+  line-height: 1.5;
+  position: relative;
+  color: var(--zn-text-regular);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 段落 orphan 控制 */
+.zhino-root p { text-wrap: pretty; }
+
+/* ── 等宽 + 表格数字（数据/型号/错误） ── */
+.zhino-root .zn-mono,
+.zhino-root code,
+.zhino-root pre,
+.zhino-root .zhino-panel-model,
+.zhino-root .zhino-retry-toast-error {
+  font-family: var(--zn-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   星空覆盖层（夜空主题核心氛围；浅色下弱化为柔粉光点）
+   ============================================================ */
+.zhino-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(1px 1px at 12% 18%, var(--zn-star), transparent 60%),
+    radial-gradient(1px 1px at 28% 62%, var(--zn-star-dim), transparent 60%),
+    radial-gradient(1.2px 1.2px at 48% 30%, var(--zn-star), transparent 60%),
+    radial-gradient(1px 1px at 65% 78%, var(--zn-star-dim), transparent 60%),
+    radial-gradient(1px 1px at 80% 22%, var(--zn-star), transparent 60%),
+    radial-gradient(1.5px 1.5px at 88% 60%, var(--zn-star), transparent 60%),
+    radial-gradient(1px 1px at 38% 88%, var(--zn-star-dim), transparent 60%),
+    radial-gradient(1px 1px at 72% 45%, var(--zn-star-dim), transparent 60%);
+  background-repeat: no-repeat;
+  opacity: 0.4;
+  animation: zn-twinkle 4.5s var(--zn-ease) infinite;
+}
+/* 内容层在星光之上 */
+.zhino-panel-inner { position: relative; z-index: 1; }
+
+@keyframes zn-twinkle {
+  0%, 100% { opacity: 0.2; }
+  50%      { opacity: 0.45; }
+}
+
+/* ── 噪点叠层（打破纯平，极弱） ── */
+.zhino-panel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.022;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ============================================================
+   滚动条
+   ============================================================ */
+.zhino-root ::-webkit-scrollbar { width: 8px; height: 8px; }
+.zhino-root ::-webkit-scrollbar-track { background: transparent; }
+.zhino-root ::-webkit-scrollbar-thumb {
+  background: var(--zn-border-base);
+  border-radius: var(--zn-radius-pill);
+}
+.zhino-root ::-webkit-scrollbar-thumb:hover { background: var(--zn-accent-dim); }
+
+/* ============================================================
+   焦点可达（键盘导航必备）
+   ============================================================ */
+.zhino-root :focus-visible {
+  outline: 2px solid var(--zn-accent);
+  outline-offset: 1px;
+  border-radius: var(--zn-radius-sm);
+}
+
+/* 平滑滚动 + 入场动画 */
+.zhino-panel-content {
+  scroll-behavior: smooth;
+  animation: zn-content-in 0.3s var(--zn-ease) both;
+}
+@keyframes zn-content-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── 无障碍：尊重系统的「减少动态」偏好好 ── */
+@media (prefers-reduced-motion: reduce) {
+  .zhino-root,
+  .zhino-root *,
+  .zhino-root *::before,
+  .zhino-root *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

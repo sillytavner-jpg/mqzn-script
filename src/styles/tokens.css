@@ -1,0 +1,135 @@
+/* ============================================================
+   智脑 · 夜空星光玻璃 — 设计 Token（唯一真相源）
+   深色 = 夜空（默认） / 浅色 = 白昼樱花（[data-theme="light"]）
+   所有组件只消费 var(--zn-*)，禁止再硬编码色值。
+   ============================================================ */
+
+.zhino-root {
+  /* ── 字体 ── */
+  --zn-font-sans: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif;
+  --zn-font-mono: ui-monospace, 'JetBrains Mono', 'Cascadia Code', 'SF Mono', 'Consolas', monospace;
+
+  /* ── 字号阶（rem，随根字号缩放） ── */
+  --zn-fs-display: 1.25rem;
+  --zn-fs-title:   1rem;
+  --zn-fs-body:    0.875rem;
+  --zn-fs-label:   0.75rem;
+  --zn-fs-data:    0.8125rem;
+  --zn-fs-base:    14px;            /* 根字号；界面大小切换 13/14/16 */
+
+  /* ── 圆角（内紧外柔） ── */
+  --zn-radius-sm:   8px;
+  --zn-radius:      12px;
+  --zn-radius-lg:   16px;
+  --zn-radius-pill: 999px;
+
+  /* ── 间距阶 ── */
+  --zn-space-1: 4px;
+  --zn-space-2: 8px;
+  --zn-space-3: 12px;
+  --zn-space-4: 16px;
+  --zn-space-5: 24px;
+  --zn-space-6: 32px;
+
+  /* ── 运动 ── */
+  --zn-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --zn-dur: 0.2s;
+  --zn-dur-fast: 0.15s;
+  --zn-dur-slow: 0.3s;
+
+  /* ── z 层级 ── */
+  --zn-z-fab: 9999;
+  --zn-z-panel: 9999;
+  --zn-z-resize: 5;
+  --zn-z-overlay: 100000;
+  --zn-z-toast: 100001;
+
+  /* ═══════════ 深色 · 夜空（默认） ═══════════ */
+  --zn-bg: #0e0b1f;                          /* 深靛紫底 */
+  --zn-glass-bg: rgba(16, 13, 34, 0.95);     /* 近实色夜空（保证文字可读，玻璃质感靠边框/高光/星光） */
+  --zn-glass-border: rgba(167, 139, 250, 0.22);
+  --zn-glass-blur: blur(10px) saturate(120%);
+  --zn-glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+
+  /* 强调色（统一紫） */
+  --zn-accent: #a78bfa;
+  --zn-accent-rgb: 167, 139, 250;
+  --zn-accent-dim: rgba(167, 139, 250, 0.14);
+  --zn-accent-glow: rgba(167, 139, 250, 0.35);
+
+  /* 文字透明度阶梯 */
+  --zn-text-primary: rgba(255, 255, 255, 0.92);
+  --zn-text-regular: rgba(255, 255, 255, 0.70);
+  --zn-text-muted:   rgba(255, 255, 255, 0.40);
+
+  /* 表面 */
+  --zn-bg-surface1: rgba(255, 255, 255, 0.03);
+  --zn-bg-surface2: rgba(255, 255, 255, 0.06);
+  --zn-surface-sunken: rgba(0, 0, 0, 0.22);    /* 侧栏/底栏下沉重色 */
+  --zn-card-bg: #16142a;                       /* 实色卡片底（toast/弹窗） */
+
+  /* 边框 */
+  --zn-border-light: rgba(255, 255, 255, 0.08);
+  --zn-border-base:  rgba(255, 255, 255, 0.15);
+
+  /* 星光 */
+  --zn-star: rgba(255, 255, 255, 0.7);
+  --zn-star-dim: rgba(167, 139, 250, 0.55);
+
+  /* 阴影 / 光晕 */
+  --zn-shadow-glass: 0 24px 48px rgba(10, 8, 30, 0.6);
+  --zn-shadow-soft: 0 4px 16px rgba(10, 8, 30, 0.4);
+  --zn-glow-accent: 0 0 24px var(--zn-accent-glow);
+
+  /* 语义色（附 rgb 便于 rgba() 调透明度） */
+  --zn-success: #4ade80; --zn-success-rgb: 74, 222, 128;
+  --zn-warn:    #fbbf24; --zn-warn-rgb:    251, 191, 36;
+  --zn-danger:  #f87171; --zn-danger-rgb:  248, 113, 113;
+  --zn-info:    #a78bfa;
+
+  /* 兼容旧别名（旧代码用 --zn-primary 等名） */
+  --zn-primary: var(--zn-accent);
+  --zn-primary-dim: var(--zn-accent-dim);
+  --zn-text: var(--zn-text-primary);
+  --zn-text-dim: var(--zn-text-muted);
+  --zn-border: var(--zn-border-light);
+}
+
+/* ════════════════════════════════════════
+   浅色 · 白昼樱花
+   ════════════════════════════════════════ */
+.zhino-root[data-theme='light'] {
+  --zn-bg: #fdf6fb;                          /* 暖樱白 */
+  --zn-glass-bg: rgba(253, 246, 251, 0.96);  /* 近实色樱花白 */
+  --zn-glass-border: rgba(167, 139, 250, 0.28);
+  --zn-glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+
+  --zn-accent: #8b5cf6;                      /* 加深保对比 */
+  --zn-accent-rgb: 139, 92, 246;
+  --zn-accent-dim: rgba(139, 92, 246, 0.10);
+  --zn-accent-glow: rgba(139, 92, 246, 0.25);
+
+  --zn-text-primary: #2a2440;
+  --zn-text-regular: #5a527a;
+  --zn-text-muted:   #8b85a3;
+
+  --zn-bg-surface1: rgba(139, 92, 246, 0.04);
+  --zn-bg-surface2: rgba(139, 92, 246, 0.08);
+  --zn-surface-sunken: rgba(139, 92, 246, 0.05);
+  --zn-card-bg: #ffffff;
+
+  --zn-border-light: rgba(42, 36, 64, 0.08);
+  --zn-border-base:  rgba(42, 36, 64, 0.16);
+
+  --zn-star: rgba(139, 92, 246, 0.45);
+  --zn-star-dim: rgba(255, 182, 213, 0.6);
+
+  --zn-shadow-glass: 0 24px 48px rgba(180, 160, 200, 0.28);
+  --zn-shadow-soft: 0 4px 16px rgba(180, 160, 200, 0.18);
+  --zn-glow-accent: 0 0 24px var(--zn-accent-glow);
+
+  --zn-success: #16a34a; --zn-success-rgb: 22, 163, 74;
+  --zn-warn:    #d97706; --zn-warn-rgb:    217, 119, 6;
+  --zn-danger:  #dc2626; --zn-danger-rgb:  220, 38, 38;
+  --zn-info:    #8b5cf6;
+}

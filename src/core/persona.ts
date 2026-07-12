@@ -8,11 +8,14 @@
  */
 
 import { callGenerateRaw } from '../utils/apiCaller';
+import { replaceUserReferences } from '../utils/textCleanup';
+import { logInfo } from '../utils/logger';
+import { getDefaultJailbreakPrompt, parseJailbreakHead } from '../utils/jailbreakPrompts';
 
 /**
  * 分析用户人设，生成结构化人格画像
  */
-export async function analyzePersona(rawInput: string): Promise<string> {
+export async function analyzePersona(rawInput: string, userName = '{{user}}'): Promise<string> {
   if (!rawInput.trim()) {
     throw new Error('用户人设不能为空');
   }
@@ -40,28 +43,36 @@ ${rawInput}
 ---
 
 请直接输出分析结果，不要有任何前言或解释。`;
+  const jailbreak = getDefaultJailbreakPrompt('persona', userName);
+  const jailbreakHead = parseJailbreakHead(jailbreak.head);
 
   const result = await callGenerateRaw({
     user_input: userPrompt,
+    _monitorLabel: '人设分析',
+    _analysisType: 'persona',
     ordered_prompts: [
+      ...jailbreakHead,
       { role: 'system', content: systemPrompt },
       'user_input',
+      { role: 'assistant', content: jailbreak.tail },
     ],
     should_silence: true,
     max_chat_history: 0,
   });
 
-  return result.trim();
+  const cleaned = result.trim().replace(/^Qiuqingzi[:：]\s*/i, '');
+  return replaceUserReferences(cleaned, userName);
 }
 
 /**
  * 构建注入到提示词中的用户人格文本
  * 这段文本会替代酒馆原生的"玩家描述"
  */
-export function buildPersonaInjection(analyzedProfile: string, rawInput: string): string {
+export function buildPersonaInjection(analyzedProfile: string, rawInput: string, userName: string): string {
+  const name = userName || '{{user}}';
   return `<user_persona type="analyzed">
-【用户角色·人格画像】
-以下是对<user>角色的深度分析，请据此理解<user>的行为逻辑和表达方式：
+【${name}·人格画像】
+以下是对${name}角色的深度分析，请据此理解${name}的行为逻辑和表达方式：
 
 ${analyzedProfile}
 
@@ -92,8 +103,9 @@ export function injectPersonaIntoCompletion(
   messages: SillyTavern.SendingMessage[],
   analyzedProfile: string,
   rawInput: string,
+  userName: string,
 ): void {
-  const injectionText = buildPersonaInjection(analyzedProfile, rawInput);
+  const injectionText = buildPersonaInjection(analyzedProfile, rawInput, userName);
 
   // 策略：直接在聊天记录前（D2附近）注入
   // 找到 <深度2> 标记或 </additional_settings> 标记附近
@@ -139,5 +151,5 @@ export function injectPersonaIntoCompletion(
     });
   }
 
-  console.info(`[智脑] 用户人格已注入提示词 (injected=${injected})`);
+  logInfo('用户人格', `已注入提示词`);
 }

@@ -7,6 +7,7 @@
  */
 
 import type { DynamicProfile } from '../stores/mainStore';
+import { logInfo } from '../utils/logger';
 import { scanCharacterNamesFromContent } from './dreamtalk';
 
 /**
@@ -46,6 +47,7 @@ export function injectDynamicProfiles(
   dynamicProfiles: DynamicProfile[],
   latestContent: string,
   allCharacterNames: string[],
+  characterEntries?: Array<{ name: string; aliases: string[] }>,
 ): void {
   // 先移除旧的注入
   if (currentInjection) {
@@ -53,8 +55,10 @@ export function injectDynamicProfiles(
     currentInjection = null;
   }
 
-  // 扫描当前在场角色
-  const currentCharacters = scanCharacterNamesFromContent(latestContent, allCharacterNames);
+  // 扫描当前在场角色（支持别名，和神经链记忆保持一致）
+  const currentCharacters = characterEntries
+    ? scanCharacterNamesFromContent(latestContent, allCharacterNames, characterEntries)
+    : scanCharacterNamesFromContent(latestContent, allCharacterNames);
 
   // 构建注入文本
   const injectionText = buildDynamicProfileInjection(dynamicProfiles, currentCharacters);
@@ -72,7 +76,7 @@ export function injectDynamicProfiles(
     },
   ]);
 
-  console.info(`[智脑] 动态人设已注入 (${currentCharacters.length} 角色)`);
+  logInfo('动态人设', `已注入 (${currentCharacters.length} 角色)`);
 }
 
 /**

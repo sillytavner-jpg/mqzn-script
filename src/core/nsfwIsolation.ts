@@ -10,6 +10,8 @@
  * 4. 提供NSFW导航页注入（告知AI两部分彻底切割）
  */
 
+import { logInfo } from '../utils/logger';
+
 // ========== NSFW数据结构 ==========
 
 export interface NsfwCharacterMemory {
@@ -63,7 +65,7 @@ export function isNsfwActive(): boolean {
 // ========== NSFW数据解析 ==========
 
 /**
- * 从大总结的第四SECTION解析NSFW记忆数据
+ * 从大总结的第三SECTION解析NSFW记忆数据
  */
 export function parseNsfwSection(nsfwSection: string): NsfwCharacterMemory[] {
   const memories: NsfwCharacterMemory[] = [];
@@ -288,7 +290,7 @@ export function injectNsfwData(
     },
   ]);
 
-  console.info(`[智脑] NSFW隔离数据已注入 (${currentCharacters.length} 角色)`);
+  logInfo('NSFW隔离', `已注入 (${currentCharacters.length} 角色)`);
 }
 
 export function removeNsfwInjection(): void {
