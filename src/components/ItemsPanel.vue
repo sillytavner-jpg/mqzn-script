@@ -30,13 +30,21 @@
           <div v-if="item.brief" class="wt-item-brief">{{ item.brief }}</div>
           <div class="wt-item-meta">
             <span class="wt-meta-label">归属</span>
-            <span class="wt-meta-value wt-meta-belong">{{ item.belongName || '未指定' }}</span>
+            <span class="wt-meta-value wt-meta-belong">{{ item.owner || item.belongName || '未指定' }}</span>
+            <template v-if="item.location && item.location !== (item.owner || item.belongName)">
+              <span class="wt-meta-sep">·</span>
+              <span class="wt-meta-label">当前位置</span>
+              <span class="wt-meta-value">{{ item.location }}</span>
+            </template>
             <span v-if="item.quantity" class="wt-meta-sep">·</span>
             <span v-if="item.quantity" class="wt-meta-label">数量</span>
             <span v-if="item.quantity" class="wt-meta-value">{{ item.quantity }}</span>
-            <span v-if="item.state" class="wt-meta-sep">·</span>
-            <span v-if="item.state" class="wt-meta-label">状态</span>
-            <span v-if="item.state" class="wt-meta-value">{{ item.state }}</span>
+            <span v-if="item.status" class="wt-meta-sep">·</span>
+            <span v-if="item.status" class="wt-meta-label">方式</span>
+            <span v-if="item.status" class="wt-meta-value">{{ item.status }}</span>
+            <span v-if="item.statusDetail || item.state" class="wt-meta-sep">·</span>
+            <span v-if="item.statusDetail || item.state" class="wt-meta-label">细节</span>
+            <span v-if="item.statusDetail || item.state" class="wt-meta-value">{{ item.statusDetail || item.state }}</span>
             <span v-if="item.consumed" class="wt-meta-sep">·</span>
             <span v-if="item.consumed" class="wt-meta-value wt-meta-consumed">已消耗</span>
           </div>
@@ -61,11 +69,28 @@
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">归属</span>
-            <input v-model="editBelong" class="wt-edit-input" placeholder="角色名或地点名" />
+            <input v-model="editOwner" class="wt-edit-input" placeholder="角色名或地点名（仅在易主时改）" list="kg-owner-list" />
           </div>
           <div class="wt-edit-row">
-            <span class="wt-edit-label">状态</span>
-            <input v-model="editState" class="wt-edit-input" placeholder="如 拿在手上 / 床头的木盒中" />
+            <span class="wt-edit-label">当前位置</span>
+            <input v-model="editLocation" class="wt-edit-input" placeholder="放下/拿起/转交即改" list="kg-loc-list" />
+          </div>
+          <div class="wt-edit-row">
+            <span class="wt-edit-label">持有方式</span>
+            <select v-model="editStatus" class="wt-edit-input">
+              <option value="">未指定</option>
+              <option value="owned">专属持有（默认）</option>
+              <option value="held">拿在手上</option>
+              <option value="worn">穿/佩戴身上</option>
+              <option value="carried">随行携带</option>
+              <option value="placed">放在某地</option>
+              <option value="stored">装入容器/收纳</option>
+              <option value="lost">遗失/去向不明</option>
+            </select>
+          </div>
+          <div class="wt-edit-row">
+            <span class="wt-edit-label">位置细节</span>
+            <input v-model="editStatusDetail" class="wt-edit-input" placeholder="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" />
           </div>
           <label class="wt-edit-row wt-edit-check">
             <span class="wt-edit-label">消耗</span>
@@ -101,11 +126,28 @@
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">归属</span>
-          <input v-model="editBelong" class="wt-edit-input" placeholder="角色名或地点名" />
+          <input v-model="editOwner" class="wt-edit-input" placeholder="角色名或地点名（仅在易主时改）" list="kg-owner-list" />
         </div>
         <div class="wt-edit-row">
-          <span class="wt-edit-label">状态</span>
-          <input v-model="editState" class="wt-edit-input" placeholder="如 拿在手上 / 床头的木盒中" />
+          <span class="wt-edit-label">当前位置</span>
+          <input v-model="editLocation" class="wt-edit-input" placeholder="放下/拿起/转交即改" list="kg-loc-list" />
+        </div>
+        <div class="wt-edit-row">
+          <span class="wt-edit-label">持有方式</span>
+          <select v-model="editStatus" class="wt-edit-input">
+            <option value="">未指定</option>
+            <option value="owned">专属持有（默认）</option>
+            <option value="held">拿在手上</option>
+            <option value="worn">穿/佩戴身上</option>
+            <option value="carried">随行携带</option>
+            <option value="placed">放在某地</option>
+            <option value="stored">装入容器/收纳</option>
+            <option value="lost">遗失/去向不明</option>
+          </select>
+        </div>
+        <div class="wt-edit-row">
+          <span class="wt-edit-label">位置细节</span>
+          <input v-model="editStatusDetail" class="wt-edit-input" placeholder="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" />
         </div>
         <label class="wt-edit-row wt-edit-check">
           <span class="wt-edit-label">消耗</span>
@@ -118,6 +160,13 @@
         <button class="wt-btn-xs-save" @click="saveNew">保存</button>
       </template>
     </Modal>
+    <!-- 归属/位置 datalist（角色名+地点名+characterLocations 顶层键去重） -->
+    <datalist id="kg-owner-list">
+      <option v-for="n in ownerAndLocationCandidates" :key="n" :value="n" />
+    </datalist>
+    <datalist id="kg-loc-list">
+      <option v-for="n in ownerAndLocationCandidates" :key="n" :value="n" />
+    </datalist>
   </div>
 </template>
 
@@ -130,12 +179,13 @@ import { buildStableId, createEmptyKnowledgeGraph } from '../core/knowledgeGraph
 const store = useMainStore();
 
 // ═══════════════════════════════════════
-// 物品库 — 读知识图谱 items + belongs_to 边
+// 物品库 — 读知识图谱 items（迁移后归属信息在 item.owner/location/status/statusDetail）
+// 仍兼容旧 belongs_to 边
 // ═══════════════════════════════════════
 
 const graph = computed<KnowledgeGraph>(() => store.chatData.knowledgeGraph || createEmptyKnowledgeGraph());
 
-/** 物品 + 归属/状态的合并视图 */
+/** 物品 + 归属/位置的合并视图 */
 interface ItemView {
   sourceIndex: number;
   id: string;
@@ -143,10 +193,16 @@ interface ItemView {
   brief: string;
   quantity?: string;
   aliases?: string[];
-  belongTo?: string;   // belongs_to 边的 to（地点 id 或角色名）
-  belongName?: string;  // 归属显示名（地点名或角色名）
-  state?: string;       // belongs_to 边的 detail
-  consumed?: boolean;   // 是否已消耗/毁坏/用尽
+  // 新字段
+  owner?: string;          // 静态所有权（角色名/地点名）
+  location?: string;       // 当前动态位置（角色名/地点名）
+  status?: string;         // 持有/存放方式枚举
+  statusDetail?: string;   // 位置/状态细节
+  // 兼容旧字段
+  belongTo?: string;       // 旧 belongs_to 边的 to
+  belongName?: string;     // 归属显示名（地点名或角色名）
+  state?: string;          // 旧 belongs_to 边的 detail
+  consumed?: boolean;
 }
 
 const items = computed<ItemView[]>(() => {
@@ -163,6 +219,10 @@ const items = computed<ItemView[]>(() => {
       brief: it.brief,
       quantity: it.quantity,
       aliases: it.aliases,
+      owner: it.owner,
+      location: it.location,
+      status: it.status,
+      statusDetail: it.statusDetail,
       belongTo,
       belongName,
       state: edge?.detail,
@@ -170,6 +230,23 @@ const items = computed<ItemView[]>(() => {
     };
   });
 });
+
+// 归属/位置 datalist 候选：角色名 + 角色别名 + 地点名 + 地点别名 + 玩家键
+const ownerAndLocationCandidates = computed(() => {
+  const g = graph.value;
+  const names = new Set<string>();
+  for (const ch of (g.characters || [])) {
+    names.add(ch.name);
+    for (const a of (ch.aliases || [])) names.add(a);
+  }
+  for (const l of (g.locations || [])) {
+    names.add(l.name);
+    for (const a of (l.aliases || [])) names.add(a);
+  }
+  for (const k of Object.keys(store.chatData?.characterLocations || {})) names.add(k);
+  return Array.from(names).filter(n => n).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+});
+
 const itemSearch = ref('');
 const filteredItems = computed(() => {
   const q = normalizeSearch(itemSearch.value);
@@ -184,8 +261,10 @@ const editName = ref('');
 const editAliases = ref('');
 const editBrief = ref('');
 const editQuantity = ref('');
-const editBelong = ref('');
-const editState = ref('');
+const editOwner = ref('');
+const editLocation = ref('');
+const editStatus = ref('');
+const editStatusDetail = ref('');
 const editConsumed = ref(false);
 
 function startNew(): void {
@@ -195,8 +274,10 @@ function startNew(): void {
   editAliases.value = '';
   editBrief.value = '';
   editQuantity.value = '';
-  editBelong.value = '';
-  editState.value = '';
+  editOwner.value = '';
+  editLocation.value = '';
+  editStatus.value = '';
+  editStatusDetail.value = '';
   editConsumed.value = false;
 }
 
@@ -212,8 +293,10 @@ function startEdit(idx: number): void {
   editAliases.value = (v.aliases || []).join('/');
   editBrief.value = v.brief || '';
   editQuantity.value = v.quantity || '';
-  editBelong.value = v.belongName || '';
-  editState.value = v.state || '';
+  editOwner.value = v.owner || v.belongName || '';
+  editLocation.value = v.location || v.belongName || '';
+  editStatus.value = v.status || '';
+  editStatusDetail.value = v.statusDetail || v.state || '';
   editConsumed.value = v.consumed === true;
 }
 
@@ -226,24 +309,17 @@ function commitGraph(next: KnowledgeGraph): void {
   store.setKnowledgeGraphWithoutHistory(next);
 }
 
-/** 根据 belongTo 名称解析为地点 id 或保留角色名 */
-function resolveBelongTo(belongName: string, next: KnowledgeGraph): string {
+/** 把归属/位置输入字符串归一为正式名（地点命中→地点名；角色命中→角色名；都未命中→原文） */
+function resolvePlaceOrCharName(belongName: string, next: KnowledgeGraph): string {
   const trimmed = belongName.trim();
   if (!trimmed) return '';
-  // 先按地点名/别名匹配
   for (const l of next.locations) {
-    if (l.name === trimmed || (l.aliases || []).includes(trimmed)) return l.id;
+    if (l.name === trimmed || (l.aliases || []).includes(trimmed)) return l.name;
   }
-  // 未命中地点 → 视为角色名，保留原文
+  for (const ch of next.characters || []) {
+    if (ch.name === trimmed || (ch.aliases || []).includes(trimmed)) return ch.name;
+  }
   return trimmed;
-}
-
-function upsertBelongEdge(next: KnowledgeGraph, itemId: string, belongTo: string, state: string): void {
-  // 先删旧边
-  next.edges = next.edges.filter(e => !(e.type === 'belongs_to' && e.from === itemId));
-  if (belongTo) {
-    next.edges.push({ type: 'belongs_to', from: itemId, to: belongTo, detail: state || undefined });
-  }
 }
 
 function saveEdit(existingIdx: number): void {
@@ -260,8 +336,13 @@ function saveEdit(existingIdx: number): void {
     it.quantity = editQuantity.value.trim() || undefined;
     it.aliases = aliases.length ? aliases : undefined;
     it.consumed = editConsumed.value ? true : undefined;
-    const belongTo = resolveBelongTo(editBelong.value, next);
-    upsertBelongEdge(next, it.id, belongTo, editState.value.trim());
+    it.owner = resolvePlaceOrCharName(editOwner.value, next) || undefined;
+    it.location = resolvePlaceOrCharName(editLocation.value, next) || undefined;
+    it.status = (editStatus.value as GraphItem['status']) || undefined;
+    it.statusDetail = editStatusDetail.value.trim() || undefined;
+    it.existence = 'unique';
+    // 清掉旧 belongs_to 边（迁移已迁移完，UI 编辑不再依赖边）
+    next.edges = next.edges.filter(e => !(e.type === 'belongs_to' && e.from === it.id));
   }
   next.updatedAt = new Date().toISOString();
   commitGraph(next);
@@ -283,10 +364,13 @@ function saveNew(): void {
       quantity: editQuantity.value.trim() || undefined,
       aliases: aliases.length ? aliases : undefined,
       consumed: editConsumed.value ? true : undefined,
+      owner: resolvePlaceOrCharName(editOwner.value, next) || undefined,
+      location: resolvePlaceOrCharName(editLocation.value, next) || undefined,
+      status: (editStatus.value as GraphItem['status']) || undefined,
+      statusDetail: editStatusDetail.value.trim() || undefined,
+      existence: 'unique',
     };
     next.items.push(newItem);
-    const belongTo = resolveBelongTo(editBelong.value, next);
-    upsertBelongEdge(next, id, belongTo, editState.value.trim());
   }
   next.updatedAt = new Date().toISOString();
   commitGraph(next);
@@ -313,6 +397,10 @@ function itemSearchText(item: ItemView): string {
     item.name,
     item.brief,
     item.quantity,
+    item.owner,
+    item.location,
+    item.status,
+    item.statusDetail,
     item.belongName,
     item.state,
     item.consumed ? '已消耗' : '',

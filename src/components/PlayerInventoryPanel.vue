@@ -46,6 +46,7 @@
       :item="editingItem"
       :default-owner="defaultOwner"
       @close="showItemModal = false"
+      @delete="onDeleteItem"
     />
   </div>
 </template>
@@ -104,6 +105,19 @@ function onAddItem() {
   editingItem.value = undefined;
   itemModalMode.value = 'add';
   showItemModal.value = true;
+}
+
+// 从知识图谱中删除指定物品（深拷贝 → splice → 清旧边 → 提交）
+function onDeleteItem(item: OwnedItem) {
+  const g = graph.value;
+  const next: KnowledgeGraph = JSON.parse(JSON.stringify(g));
+  const idx = next.items.findIndex(i => i.id === item.item.id);
+  if (idx < 0) return;
+  next.items.splice(idx, 1);
+  const itemId = item.item.id;
+  next.edges = (next.edges || []).filter(e => !(e.type === 'belongs_to' && e.from === itemId));
+  next.updatedAt = new Date().toISOString();
+  store.setKnowledgeGraphWithoutHistory(next);
 }
 
 const isEditingLoc = ref(false);

@@ -79,6 +79,13 @@ const data = computed(() => buildGraphViewData({
   showItems: showItems.value,
 }));
 
+// 选中节点对应的物品真实数据（用于详情面板展示 owner/location/status/statusDetail）
+const selectedItem = computed(() => {
+  const node = selectedNode.value;
+  if (!node || node.type !== 'item') return null;
+  return (props.graph.items || []).find(it => it.id === node.id) || null;
+});
+
 const MAX_NODES = 80;
 // shallowRef：d3-force tick 期间频繁改 n.x/n.y，避免每属性都穿透 Vue Proxy 触发依赖追踪
 const nodes = shallowRef<VNode[]>([]);
@@ -812,6 +819,34 @@ watch(() => [props.graph, props.characterLocations, props.relationshipProfiles, 
             @click="emit('merge', selectedNode.name)"
             title="把这个角色合并到另一个角色，被合并者会变成主角色的别名"
           >⇄ 合并到其他角色…</button>
+        </div>
+
+        <!-- 物品专属：归属/当前位置/持有方式/位置细节/数量/消耗 -->
+        <div v-if="selectedNode.type === 'item' && selectedItem">
+          <div class="kgv-detail-row">
+            <span class="kgv-detail-label">归属</span>
+            <span class="kgv-item-meta-value">{{ selectedItem.owner || '未指定' }}</span>
+          </div>
+          <div v-if="selectedItem.location && selectedItem.location !== selectedItem.owner" class="kgv-detail-row">
+            <span class="kgv-detail-label">当前位置</span>
+            <span class="kgv-item-meta-value">{{ selectedItem.location }}</span>
+          </div>
+          <div v-if="selectedItem.status" class="kgv-detail-row">
+            <span class="kgv-detail-label">持有方式</span>
+            <span class="kgv-item-meta-value">{{ selectedItem.status }}</span>
+          </div>
+          <div v-if="selectedItem.statusDetail" class="kgv-detail-row">
+            <span class="kgv-detail-label">位置细节</span>
+            <span class="kgv-item-meta-value">{{ selectedItem.statusDetail }}</span>
+          </div>
+          <div v-if="selectedItem.quantity" class="kgv-detail-row">
+            <span class="kgv-detail-label">数量</span>
+            <span class="kgv-item-meta-value">{{ selectedItem.quantity }}</span>
+          </div>
+          <div v-if="selectedItem.consumed" class="kgv-detail-row">
+            <span class="kgv-detail-label">状态</span>
+            <span class="kgv-item-meta-value kgv-item-consumed">已消耗</span>
+          </div>
         </div>
 
         <!-- 通用：连线列表 -->

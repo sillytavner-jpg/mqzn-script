@@ -96,16 +96,15 @@ const writeResult = ref<NpcWorldbookWriteResult | null>(null);
 
 const characterNames = computed(() => {
   try {
-    const ignored = new Set(store.chatData.ignoredCharacters || []);
     const names = new Set<string>();
     for (const name of store.getAllCharacterNames()) {
-      if (name && !ignored.has(name)) names.add(name);
+      if (name) names.add(name);
     }
     for (const profile of store.chatData.dynamicProfilesV2 || []) {
-      if (profile.characterName && !ignored.has(profile.characterName)) names.add(profile.characterName);
+      if (profile.characterName) names.add(profile.characterName);
     }
     for (const name of Object.keys(store.chatData.characterProfiles || {})) {
-      if (name && !ignored.has(name)) names.add(name);
+      if (name) names.add(name);
     }
     return [...names].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
   } catch (error) {

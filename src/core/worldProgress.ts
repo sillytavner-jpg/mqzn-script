@@ -16,10 +16,10 @@ import type { CapturedContent, GrandSummary, SmallSummaryRecord } from '../store
 import type { PlotOutline } from './plotDirector';
 import {
   getLocationAllItems,
-  getLocationFullInfo,
   type GraphLocation,
   type KnowledgeGraph,
 } from './knowledgeGraph';
+import { formatItemLine, type ItemEntry } from './worldGraphInject';
 
 // ========== 数据结构 ==========
 
@@ -265,35 +265,79 @@ function getCandidateLocationName(candidate: WorldProgressCandidate, graph?: Kno
   return byId?.name || byName?.name || candidate.locationName || candidate.locationId || '未知地点';
 }
 
-function formatLocationItems(graph: KnowledgeGraph | null | undefined, locationId?: string): string {
-  if (!graph || !locationId) return '';
-  const items = getLocationAllItems(graph, locationId);
-  if (items.length === 0) return '无已知物品。';
-  return items
-    .map(({ item, state }) => `- ${item.name}${item.brief ? `：${item.brief}` : ''}${state ? `（${state}）` : ''}`)
-    .join('\n');
-}
-
-function formatConnectedLocationInfo(graph: KnowledgeGraph | null | undefined, locationId?: string): string {
+// 地点精简块：[地点]名：简介 + 包含地点(一行) + 相连地点(一行不展开)
+// 与正文注入的 formatCurrentLocationInfo 格式对齐，不含物品（物品走独立段），
+// 相连地点不递归全展开（避免连通地点的"连通"段反向指回主地点，低级模型读不清）
+function formatLocationBrief(graph: KnowledgeGraph | null | undefined, locationId?: string): string {
   if (!graph || !locationId) return '';
   const loc = resolveLocationById(graph, locationId);
   if (!loc) return '';
   const lines: string[] = [];
-  const seen = new Set<string>();
+  lines.push(`[地点]${loc.name}${loc.brief ? '：' + loc.brief : ''}`);
+  // 子地点（contains 边）——只列名+简介一行
+  const children = (graph.edges || [])
+    .filter(e => e.type === 'contains' && e.from === loc.id)
+    .map(e => graph.locations.find(l => l.id === e.to))
+    .filter((l): l is GraphLocation => !!l);
+  if (children.length > 0) {
+    lines.push('  包含地点:');
+    for (const c of children) {
+      lines.push(`  - ${c.name}${c.brief ? '：' + c.brief : ''}`);
+    }
+  }
+  // 相连地点（connected 边）——只列名+简介+路径一行，不展开对方子地点/连通
+  const connectedLines: string[] = [];
+  const seenConnected = new Set<string>();
   for (const edge of graph.edges || []) {
     if (edge.type !== 'connected' || (edge.from !== loc.id && edge.to !== loc.id)) continue;
     const otherId = edge.from === loc.id ? edge.to : edge.from;
-    if (seen.has(otherId)) continue;
-    seen.add(otherId);
+    if (seenConnected.has(otherId)) continue;
+    seenConnected.add(otherId);
     const other = graph.locations.find(l => l.id === otherId);
     if (!other) continue;
-    const full = getLocationFullInfo(graph, other.name);
-    if (full) {
-      lines.push(`### ${other.name}${edge.detail ? `（路径：${edge.detail}）` : ''}`);
-      lines.push(full);
-    }
+    const path = edge.detail ? `（路径：${edge.detail}）` : '';
+    connectedLines.push(`  - 通往${other.name}${other.brief ? '：' + other.brief : ''}${path}`);
+  }
+  if (connectedLines.length > 0) {
+    lines.push('  相连地点:');
+    lines.push(...connectedLines);
   }
   return lines.join('\n');
+}
+
+// 角色身上持有的物品：owner 命中该角色（含别名），且 location 也命中该角色（在身上，
+// 不是放在某地点）。用 formatItemLine 格式（includeBelong=false，因为 owner 就是该角色）
+function formatCharacterOwnedItems(
+  graph: KnowledgeGraph | null | undefined,
+  charName: string,
+  aliases?: string[],
+): string {
+  if (!graph || !charName) return '';
+  const names = new Set<string>([charName, ...(aliases || [])].map(n => n.trim()).filter(Boolean));
+  if (names.size === 0) return '';
+  const entries: ItemEntry[] = [];
+  for (const item of graph.items || []) {
+    if (item.consumed) continue;
+    const owner = (item.owner || '').trim();
+    const loc = (item.location || '').trim();
+    if (!owner || !names.has(owner)) continue;        // owner 不是该角色 → 不是她的持有物
+    if (loc && !names.has(loc)) continue;             // location 不在角色名集合 → 物品被放在别处，不算"身上"
+    entries.push({ item, state: undefined, belongName: undefined });
+  }
+  if (entries.length === 0) return '';
+  return entries.map(e => formatItemLine(e, false)).join('\n');
+}
+
+// 地点物品：复用 getLocationAllItems，格式升级到 formatItemLine（含 owner/location/status/statusDetail）。
+// includeBelong=true —— 地点物品的 owner 可能是别人（如江念把陶罐放在石凳上），需要显示归属。
+function formatLocationItems(graph: KnowledgeGraph | null | undefined, locationId?: string): string {
+  if (!graph || !locationId) return '';
+  const items = getLocationAllItems(graph, locationId);
+  const entries: ItemEntry[] = items
+    .filter(({ item }) => !item.consumed)
+    .map(({ item, state }) => ({ item, state, belongName: undefined }));
+  if (entries.length === 0) return '';
+  return entries.map(e => formatItemLine(e, true)).join('\n');
 }
 
 function getLatestActionForCharacter(
@@ -401,16 +445,24 @@ function buildWorldProgressMaterial(
       }
 
       if (knowledgeGraph && locName && locName !== '未知地点') {
-        const full = getLocationFullInfo(knowledgeGraph, locName);
-        if (full) {
-          parts.push('- 所在地点基础信息:');
-          parts.push(full);
+        const brief = formatLocationBrief(knowledgeGraph, locName);
+        if (brief) {
+          parts.push('- 所在地点:');
+          parts.push(brief);
         }
       }
 
+      // 角色身上持有的物品（owner 是该角色，且 location 也在该角色身上）
+      const carried = formatCharacterOwnedItems(knowledgeGraph, candidate.characterName, candidate.aliases);
+      if (carried) {
+        parts.push('- 角色持有物品:');
+        parts.push(carried);
+      }
+
+      // 地点物品（在该地点上的，owner 可能是别人 → 显示归属）
       const items = formatLocationItems(knowledgeGraph, locId);
       if (items) {
-        parts.push('- 所在地所有物品:');
+        parts.push('- 地点物品:');
         parts.push(items);
       }
 
@@ -433,12 +485,6 @@ function buildWorldProgressMaterial(
       const coLocatedCharacters = Array.from(coLocatedCharacterNames).slice(0, 8);
       if (coLocatedCharacters.length > 0) {
         parts.push(`- 同地点已知人物（只表示可能碰面，不代表熟识）: ${coLocatedCharacters.join('、')}`);
-      }
-
-      const connected = formatConnectedLocationInfo(knowledgeGraph, locId);
-      if (connected) {
-        parts.push('- 连通地点信息:');
-        parts.push(connected.slice(0, Math.max(1000, (kgInjectTopK || 6) * 350)));
       }
       parts.push('');
     });

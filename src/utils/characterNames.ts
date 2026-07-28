@@ -23,6 +23,8 @@ function lookupKeys(name?: string): string[] {
   return [...new Set([raw, normalized, lower, normalizedLower].filter(Boolean))];
 }
 
+export const MEANINGLESS_ALIASES = new Set(['无', '无', 'None', 'none', 'N/A', 'n/a', 'null', 'undefined', '0', '-']);
+
 export function cleanCharacterAliases(aliases: string[] | undefined, characterName: string): string[] {
   const canonical = normalizeCharacterName(characterName);
   const seen = new Set<string>();
@@ -30,6 +32,7 @@ export function cleanCharacterAliases(aliases: string[] | undefined, characterNa
   for (const raw of aliases || []) {
     const alias = String(raw || '').trim();
     if (!alias) continue;
+    if (MEANINGLESS_ALIASES.has(alias)) continue;
     if (alias === characterName || normalizeCharacterName(alias) === canonical) continue;
     const key = normalizeCharacterName(alias).toLowerCase();
     if (seen.has(key)) continue;

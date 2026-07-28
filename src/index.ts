@@ -17,7 +17,6 @@ import './styles/components.css';
 import './components/ui'; // UI 原语库（统一出口，强制参与编译）
 import App from './App.vue';
 import { buildDreamtalkInjection, executeDreamtalkAnalysis, scanCharacterNamesFromContent } from './core/dreamtalk';
-import { removeDynamicProfileInjection } from './core/dynamicProfile';
 import { injectPersonaIntoCompletion } from './core/persona';
 import { injectNeuralChain, removeNeuralChainInjection } from './core/neuralChain';
 import { injectNsfwData, isNsfwActive, removeNsfwInjection } from './core/nsfwIsolation';
@@ -33,7 +32,7 @@ import {
 } from './core/floorVisibility';
 import { enqueueAnalysis, clearSchedulerQueue } from './core/backgroundQueue';
 import { embedTimelineEvents, embedCharacterMemories, getEmbedding, cosineSimilarity } from './core/embedding';
-import { executeSmallSummary, type SmallSummaryKgOptions } from './core/smallSummary';
+import { executeSmallSummary, type SmallSummaryKgOptions, type PreviousRoundContext } from './core/smallSummary';
 import { applyKnowledgeGraphDiff, createEmptyKnowledgeGraph, embedKnowledgeGraphNodes, hasMissingEmbedding, buildStableId } from './core/knowledgeGraph';
 import type { KnowledgeGraph } from './core/knowledgeGraph';
 import { buildWorldGraphInjection, injectWorldGraphIntoCompletion, removeWorldGraphInjection } from './core/worldGraphInject';
@@ -46,6 +45,7 @@ import {
 } from './utils/messageParser';
 import { cleanCharacterAliases, normalizeCharacterName } from './utils/characterNames';
 import { logInfo, logWarn, logError } from './utils/logger';
+import { isMvuExtraAnalysis, stripZhinoInjectionsFromCompletion } from './utils/mvuGuard';
 import { useMainStore, type CapturedContent, type CharacterMemory, type GrandSummary, type TimelineEvent } from './stores/mainStore';
 
 // ========== 新模块导入 ==========
@@ -83,7 +83,6 @@ const MQZN_BUILD_MARK = 'chat-vars-persist-20260707-smooth-ingest';
 
 try {
   (window as any).__MQZN_BUILD_MARK = MQZN_BUILD_MARK;
-  console.info('[智脑] 已加载版本', MQZN_BUILD_MARK);
 } catch {
   // ignore
 }
@@ -207,14 +206,14 @@ function blockInvalidMainContent(
       `本次 AI 正文只有 ${textLength} 字，少于 ${MIN_VALID_CONTENT_TEXT_LENGTH}，已视为回空并停止智脑后处理。请重 roll 或重新生成。`,
       '正文回空拦截',
       { timeOut: 6000, extendedTimeOut: 3000 },
-    );
-  } catch (_) {}
+	    );
+	  } catch (_) { /* ignore */ }
 }
 
 function buildMemoryActivationList(store: ReturnType<typeof useMainStore>): CharacterMemory[] {
   const normalizeName = (name: string) => normalizeCharacterName(name);
   const entryByNorm = new Map(
-    store.getCharacterNameEntries({ includeIgnored: true, includeUser: false })
+    store.getCharacterNameEntries({ includeUser: false })
       .map(entry => [normalizeName(entry.name), entry]),
   );
   const collectAliases = (characterName: string): string[] => {
@@ -492,13 +491,6 @@ $(() => {
   }
 
   eventOn(tavern_events.WORLDINFO_ENTRIES_LOADED, (lores) => {
-    console.log('[世界推进] WORLDINFO_ENTRIES_LOADED 触发:', JSON.stringify({
-      keys: Object.keys(lores || {}),
-      characterLoreCount: (lores?.characterLore || []).length,
-      globalLoreCount: (lores?.globalLore || []).length,
-      chatLoreCount: (lores?.chatLore || []).length,
-      personaLoreCount: (lores?.personaLore || []).length,
-    }));
     updateRelationshipWorldbookCacheFromLore(lores);
     // 保存原始条目供后续重新扫描（过滤关闭的条目）
     const allRawEntries = [
@@ -508,7 +500,6 @@ $(() => {
       ...(lores.personaLore || []),
     ];
     worldBookRawEntries = allRawEntries.filter((e: any) => e.enabled !== false);
-    console.log('[世界推进] worldBookRawEntries 统计:', JSON.stringify({ total: allRawEntries.length, enabled: worldBookRawEntries.length, sample: worldBookRawEntries.slice(0, 3).map(e => ({ key: e.key, comment: e.comment, name: e.name, hasContent: !!(e.content || '').trim() })) }));
     const store = useMainStore(pinia);
     // 轻量列表（条目名+所属世界书名）持久化进 chat 变量，供剧情导演/世界推进 UI 勾选；
     // 完整正文不入 chat 变量，改存 store 的非持久化运行时缓存 worldBookRawCache，
@@ -545,7 +536,6 @@ $(() => {
       store.chatData.savedPlotWB,
       store.worldBookRawCache,
     );
-    console.log('[世界推进] worldBookRawCache 已更新:', JSON.stringify({ count: store.worldBookRawCache.length, keys: store.worldBookRawCache.map(e => e.key) }));
     store.schedulePersist({ settings: false });
     refreshWorldBookCache(store);
   });
@@ -665,8 +655,34 @@ $(() => {
             worldProgressMaterial: wpMaterial.material,
           }
         : undefined;
+
+      // 上一轮在场角色 + 物品快照，作为本轮小总结判重上下文
+      let previousContext: PreviousRoundContext | undefined;
+      try {
+        const prevRecords = (store.chatData.smallSummaries || []).filter(
+          r => r.floorRange && r.floorRange.end < aiFloor,
+        );
+        const prevRecord = prevRecords.length > 0 ? prevRecords[prevRecords.length - 1] : null;
+        const presentCharacters = prevRecord?.presentCharacters || [];
+        const characterLocations = prevRecord?.characterLocations || [];
+        const items = ((baseGraphState.graph?.items) || [])
+          .filter(it => !it.consumed)
+          .slice(0, 30)
+          .map(it => ({
+            name: it.name,
+            owner: it.owner,
+            location: it.location,
+            status: it.status,
+          }));
+        if (presentCharacters.length > 0 || items.length > 0) {
+          previousContext = { presentCharacters, characterLocations, items };
+        }
+      } catch (e) {
+        logWarn('小总结', '上一轮上下文组装失败，降级不带', String(e));
+      }
+
       let { record, graphDiff, characterLocations: parsedCharLocs } = await executeSmallSummary(
-        userText, aiText, userFloor, aiFloor, allNames, store.getUserName(), kgOptions, characterEntries,
+        userText, aiText, userFloor, aiFloor, allNames, store.getUserName(), kgOptions, characterEntries, previousContext,
       );
       record.presentCharacters = store.resolveKnownCharacterNames(record.presentCharacters, true);
       if (record.interactingCharacters && record.interactingCharacters.length > 0) {
@@ -758,7 +774,11 @@ $(() => {
               parsedCharLocs,
               userNameNorm,
             );
-            store.commitKnowledgeGraph(nextGraph, aiFloor, nextCharacterLocations);
+            // 离场降级并集：presentCharacters ∪ interactingCharacters；玩家名由 commitKnowledgeGraph 内部补
+            const presentSet = new Set<string>();
+            for (const n of (record.presentCharacters || [])) if (n) presentSet.add(n);
+            for (const n of (record.interactingCharacters || [])) if (n) presentSet.add(n);
+            store.commitKnowledgeGraph(nextGraph, aiFloor, nextCharacterLocations, presentSet);
             logInfo('知识图谱', `顺风车更新 v${nextGraph.version}`);
             // 异步补嵌入（不阻塞主流程）
             if (store.settings.embeddingEnabled && store.settings.embeddingApiKey && store.settings.kgEmbeddingEnabled !== false) {
@@ -959,14 +979,6 @@ $(() => {
       }
     }
 
-    console.log('[世界推进] MESSAGE_SENT 检查:', JSON.stringify({
-      enabled: store.settings.worldProgressEnabled,
-      pending: store.chatData.pendingWorldProgress,
-      pendingFloor: store.chatData.pendingWorldProgressFloor,
-      lastId,
-      lastWorldProgressFloor: store.chatData.lastWorldProgressFloor,
-      savedWPWB: (store.chatData.savedWPWB || []).map(e => e.key),
-    }));
     if (store.settings.worldProgressEnabled && store.chatData.pendingWorldProgress) {
       const pendingFloor = store.chatData.pendingWorldProgressFloor ?? -1;
       store.chatData.pendingWorldProgress = false;
@@ -984,23 +996,18 @@ $(() => {
         .slice(-1)[0]
         || latestRounds.slice(-1)[0];
 
-      console.log('[世界推进] 准备触发:', JSON.stringify({ pendingFloor, latestRoundsCount: latestRounds.length, targetFloor: target?.messageId }));
       store.forcePersist({ settings: false });
       if (target) {
         enqueueAnalysis('world_progress', async () => {
-          console.log('[世界推进] 队列任务开始执行');
           if (!isCapturedContentCurrent(store, target.messageId, target.content)) {
             logWarn('世界推进', `跳过过期正文任务: 楼层 ${target.messageId}`);
             return;
           }
           await triggerWorldProgress(store, target.messageId, latestRounds);
-          console.log('[世界推进] 队列任务执行完毕');
         });
       } else {
-        console.log('[世界推进] 无 target，跳过');
       }
     } else {
-      console.log('[世界推进] 未触发: 开关或 pending 不满足');
     }
   });
 
@@ -1044,7 +1051,6 @@ $(() => {
     }, 500);
   });
 
-
   // ========== 提示词注入系统 ==========
 
   eventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY, async completion => {
@@ -1069,14 +1075,14 @@ $(() => {
         if (val && typeof val === 'object' && typeof (val as any).content === 'string') {
           if ((val as any).content.includes('<!--ZHINO_BG-->')) { bgMarkerFound = true; break; }
         }
-      } catch (_) {}
-    }
-    // 兜底：JSON 序列化整个 completion
+	      } catch (_) { /* ignore */ }
+	    }
+	    // 兜底：JSON 序列化整个 completion
     if (!bgMarkerFound) {
       try {
         const full = JSON.stringify(completion);
         bgMarkerFound = full.includes('<!--ZHINO_BG-->');
-      } catch (_) {}
+	      } catch (_) { /* ignore */ }
     }
 
     if (bgMarkerFound) {
@@ -1084,6 +1090,39 @@ $(() => {
     }
     // 兼容旧逻辑：_isBackgroundCall 标记也检查（自定义 API 路径仍使用此标记）
     if (store._isBackgroundCall) {
+      return;
+    }
+
+    // quiet/raw 调用守卫：CC_SR 的 payload 自带 type 字段（openai.js:2743 generate_data.type）。
+    // 只有 normal/continue（真实聊天 / 用户主动续写）才注入智脑内容；
+    // quiet/command/extension/impersonate 及无 type 的调用一律跳过，
+    // 避免污染"解析变量"等仅用主 API 做轻量解析的后台调用。
+    // 直接读 payload.type，时序无关、无残留风险（比监听 GENERATION_STARTED 预标记可靠）。
+    if (store.quietInjectionGuard) {
+      const completionType = ((completion as any)?.type || '').toString().toLowerCase();
+      const REAL_CHAT_TYPES = new Set(['normal', 'continue']);
+      if (!REAL_CHAT_TYPES.has(completionType)) {
+        return;
+      }
+    }
+
+    // ═══ MVU 额外模型解析守护 ═══
+    // MVU 变量框架的"额外模型解析变量"功能用主 API 解析变量，
+    // 虽然走 type='normal'（与正常聊天相同），但只是变量解析、不是聊天，
+    // 不应注入智脑内容。靠 MVU 官方标志 Mvu.isDuringExtraAnalysis() 判别。
+    // 没装 MVU 时 typeof Mvu === 'undefined'，本守卫无副作用。
+    //
+    // 注意：此处 return 只能拦住"直接改 messages"类注入（大总结/人格/图谱/世界推进
+    // 入口/梦呓，这些本轮不执行就不会塞进去）+ "本轮重新注入"逻辑。
+    // 但拦不住已注册的持久句柄（injectPrompts 的 in_chat 注入）——那些在
+    // createGenerationParameters 里已被 getExtensionPrompt 塞进 generate_data.messages，
+    // 等 CHAT_COMPLETION_SETTINGS_READY 触发时消息已组装完。
+    // 因此 MVU 轮还要额外调用 stripZhinoInjectionsFromCompletion 清洗 messages。
+    if (isMvuExtraAnalysis()) {
+      // 清洗 generate_data.messages 里已注入的智脑标签块，
+      // fetch 在 emit 之后才发（openai.js:3055 JSON.stringify(generate_data)），
+      // 改 messages.content 能生效。
+      stripZhinoInjectionsFromCompletion(completion);
       return;
     }
 
@@ -1383,6 +1422,7 @@ $(() => {
             queryText: sharedQueryText || userTextKG,
             queryEmb: sharedQueryEmb,
             topK: store.settings.kgInjectTopK || 8,
+            perCharacterItemLimit: store.settings.kgPerCharacterItemLimit || 0,
           });
           if (injectWorldGraphIntoCompletion(completion.messages, kgText)) {
             logInfo(
@@ -1763,7 +1803,7 @@ $(() => {
     } catch (error: any) {
       logError('梦呓', '分析失败', String(error));
       const msg = error?.message || String(error);
-      try { window.toastr?.error(msg, '❌ 梦呓分析失败', { timeOut: 8000, extendedTimeOut: 3000 }); } catch(_) {}
+      try { window.toastr?.error(msg, '❌ 梦呓分析失败', { timeOut: 8000, extendedTimeOut: 3000 }); } catch(_) { /* ignore */ }
     } finally {
       store.setDreamtalkInProgress(false);
     }
@@ -2048,7 +2088,7 @@ $(() => {
             '⚠️ 明月秋青',
             { timeOut: 8000, extendedTimeOut: 3000 },
           );
-        } catch(e) {}
+        } catch(e) { /* ignore */ }
       }
 
       store.addSummary(summary, summarizedUpTo, summarizedMessageIds);
@@ -2129,7 +2169,7 @@ $(() => {
       };
       store.addSummary(failedSummary, failedSummary.upToMessageId, summarizedMessageIds);
       const msg = error?.message || String(error);
-      try { window.toastr?.error(msg, '❌ 大总结失败：请重新总结', { timeOut: 8000, extendedTimeOut: 3000 }); } catch(_) {}
+      try { window.toastr?.error(msg, '❌ 大总结失败：请重新总结', { timeOut: 8000, extendedTimeOut: 3000 }); } catch(_) { /* ignore */ }
     } finally {
       store.setSummaryInProgress(false);
       // ★ 仅在"上次成功推进了游标"的前提下补一次重检：
@@ -2244,10 +2284,8 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
 }
 
   async function triggerWorldProgress(store: ReturnType<typeof useMainStore>, currentFloor: number, recentContents: CapturedContent[] = []): Promise<void> {
-    console.log('[世界推进] triggerWorldProgress 开始:', JSON.stringify({ currentFloor, recentContentsCount: recentContents.length, savedWPWB: (store.chatData.savedWPWB || []).map(e => e.key) }));
     try {
       const latestSummary = store.getLatestSummary() || undefined;
-      console.log('[世界推进] latestSummary 已获取:', !!latestSummary);
 
       // 世界推进选中的世界书条目：执行前再从运行时全文缓存补一次，兼容旧数据只有 key 没有 content 的情况。
       const wpWorldBook = hydrateSelectedWorldBookEntries(
@@ -2273,7 +2311,6 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
       if (previousWPSignature !== nextWPSignature) {
         store.schedulePersist({ settings: false });
       }
-      console.log('[世界推进] wpWorldBook:', JSON.stringify(wpWorldBook.map(e => ({ key: e.key, hasContent: !!e.content }))));
       // 关键：每次"到点排推"都先推进一次 attempt 序号 —— 不论随后是否真推演（被冷却跳过、或没候选跳过都算一次"尝试"）。
       // 这样基于 attempt 差的冷却才能在没候选/被冷却压制时仍逐轮递减，避免"只剩一个候选 → 被永久封锁"的死循环。
       // 初始对齐：老存档 worldProgressAttempts=-1（首次启用 attempt 机制），第一次起步对齐到当前楼层，
@@ -2290,19 +2327,15 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
         2,
         thisAttempt,
       );
-      console.log('[世界推进] candidates:', JSON.stringify(candidates.map(c => ({ name: c.characterName, inEntryHintCooldown: !!c.inEntryHintCooldown }))),
-        'attempt:', thisAttempt);
 
       if (candidates.length === 0) {
         // 没候选不推，但 attempt 已 +1 → 后续冷却逐步递减
         store.chatData.lastWorldProgressFloor = Math.max(store.chatData.lastWorldProgressFloor ?? -1, currentFloor);
         store.forcePersist({ settings: false });
         logInfo('世界推进', `跳过: 楼层 ${currentFloor} 没有可推演的不在场角色 (attempt=${thisAttempt})`);
-        console.log('[世界推进] 无候选角色，返回');
         return;
       }
 
-      console.log('[世界推进] 即将调用 executeWorldProgress');
       const record = await executeWorldProgress(
         latestSummary,
         store.chatData.smallSummaries,
@@ -2351,7 +2384,6 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
   // 聊天切换时清理：释放所有注入句柄 + 清空调度队列
   eventOn(tavern_events.CHAT_CHANGED, () => {
     clearSchedulerQueue();
-    removeDynamicProfileInjection();
     removeDynamicProfileV2Injection();
     removeWorldGraphInjection();
     removeWorldProgressInjection();

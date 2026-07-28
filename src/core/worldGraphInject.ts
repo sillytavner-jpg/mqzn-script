@@ -50,9 +50,11 @@ export interface WorldGraphInjectCtx {
   queryEmb: number[] | null;
   /** 召回注入条数设置；正文图谱会额外硬限制为每类最多 10 个。 */
   topK: number;
+  /** 每个角色（含玩家）当前可用物品的注入上限；缺省 0 = 不限制。 */
+  perCharacterItemLimit?: number;
 }
 
-interface ItemEntry {
+export interface ItemEntry {
   item: GraphItem;
   state?: string;
   belongName?: string;
@@ -186,6 +188,39 @@ function getOwnedItems(
 ): ItemEntry[] {
   const entries: ItemEntry[] = [];
   const seenItems = new Set<string>();
+  // 新字段优先：item.owner / item.location 命中 ownerKeys
+  for (const item of graph.items || []) {
+    if (injectedItemIds.has(item.id)) continue;
+    if (seenItems.has(item.id)) continue;
+    if (!includeConsumed && isConsumedItem(item)) continue;
+    // owner（静态所有权）或 location（当前位置）任一命中即视为该所有者的物品
+    const candidates = [item.owner, item.location].filter(
+      (v): v is string => typeof v === 'string' && v.trim().length > 0,
+    );
+    const hit = candidates.find(c => ownerMatches(c, ownerKeys));
+    if (hit) {
+      seenItems.add(item.id);
+      // state 取 statusDetail；如无则回退旧字段
+      const state = item.statusDetail || getLegacyItemState(item);
+      entries.push({
+        item,
+        state,
+        belongName: getBelongDisplayName(graph, hit),
+      });
+      continue;
+    }
+    // 旧 fallback：item.belongTo / 旧字段命中（migration 未跑过的旧数据）
+    const legacyOwner = getLegacyItemOwnerCandidates(item).find(owner => ownerMatches(owner, ownerKeys));
+    if (legacyOwner) {
+      seenItems.add(item.id);
+      entries.push({
+        item,
+        state: getLegacyItemState(item),
+        belongName: getBelongDisplayName(graph, legacyOwner),
+      });
+    }
+  }
+  // 旧 fallback：belongs_to 边命中 ownerKeys（migration 未跑过的旧数据 + 物品节点本身没挂 owner/location）
   for (const edge of graph.edges || []) {
     if (edge.type !== 'belongs_to' || !ownerMatches(edge.to, ownerKeys)) continue;
     if (injectedItemIds.has(edge.from)) continue;
@@ -198,19 +233,6 @@ function getOwnedItems(
       item,
       state: edge.detail,
       belongName: getBelongDisplayName(graph, edge.to),
-    });
-  }
-  for (const item of graph.items || []) {
-    if (injectedItemIds.has(item.id)) continue;
-    if (seenItems.has(item.id)) continue;
-    if (!includeConsumed && isConsumedItem(item)) continue;
-    const legacyOwner = getLegacyItemOwnerCandidates(item).find(owner => ownerMatches(owner, ownerKeys));
-    if (!legacyOwner) continue;
-    seenItems.add(item.id);
-    entries.push({
-      item,
-      state: getLegacyItemState(item),
-      belongName: getBelongDisplayName(graph, legacyOwner),
     });
   }
   return entries;
@@ -230,6 +252,12 @@ function buildItemSignature(graph: KnowledgeGraph, itemId: string): string {
     aliases: [...(item.aliases || [])].sort(),
     quantity: item.quantity || '',
     consumed: item.consumed === true,
+    // 新字段
+    owner: item.owner || '',
+    location: item.location || '',
+    status: item.status || '',
+    statusDetail: item.statusDetail || '',
+    // 旧字段（迁移期 fallback 签名也参与比较，确保迁移后签名变化能触发 changedFloor）
     belongTo: edge?.to || '',
     state: edge?.detail || '',
   });
@@ -308,14 +336,23 @@ function getRecentlyChangedLocationItems(
     .slice(0, limit);
 }
 
-function formatItemLine(entry: ItemEntry, includeBelong = false): string {
+export function formatItemLine(entry: ItemEntry, includeBelong = false): string {
   const { item, state, belongName } = entry;
   const brief = item.brief ? `：${item.brief}` : '';
   const quantity = item.quantity ? ` 数量:${item.quantity}` : '';
-  const belong = includeBelong && belongName ? ` 归属:${belongName}` : '';
-  const stateText = state ? ` 状态:${state}` : '';
+  // 新字段优先：owner / location / status / statusDetail
+  // 兼容旧数据：item 缺新字段时回退 belongName + state
+  const ownerTxt = item.owner
+    ? (includeBelong ? ` 归属:${item.owner}` : '')
+    : (includeBelong && belongName ? ` 归属:${belongName}` : '');
+  // location 与 owner 不同时单独显示当前位置；同则省略
+  const locTxt = item.location && item.location !== item.owner
+    ? ` 当前位置:${item.location}`
+    : (!item.location && state && !item.statusDetail ? ` 当前位置:${state}` : '');
+  const statusTxt = item.status ? ` 方式:${item.status}` : '';
+  const detailTxt = item.statusDetail ? ` 细节:${item.statusDetail}` : (state && !item.statusDetail ? ` 细节:${state}` : '');
   const consumed = item.consumed ? ' 已消耗' : '';
-  return `- [物品]${item.name}${brief}${quantity}${belong}${stateText}${consumed}`;
+  return `- [物品]${item.name}${brief}${quantity}${ownerTxt}${locTxt}${statusTxt}${detailTxt}${consumed}`;
 }
 
 function addItemSection(
@@ -433,10 +470,12 @@ function recallItemEntry(graph: KnowledgeGraph, recalled: RecalledEntity): ItemE
   const item = graph.items.find(it => it.id === recalled.id);
   if (!item) return null;
   const edge = (graph.edges || []).find(e => e.type === 'belongs_to' && e.from === item.id);
+  // 新字段优先：item.owner/location/status/statusDetail
+  const ownerRaw = item.owner || edge?.to || recalled.owner;
   return {
     item,
-    state: edge?.detail || recalled.state,
-    belongName: edge ? getBelongDisplayName(graph, edge.to) : recalled.belongTo,
+    state: item.statusDetail || edge?.detail || recalled.statusDetail,
+    belongName: ownerRaw ? getBelongDisplayName(graph, ownerRaw) : '',
   };
 }
 
@@ -454,13 +493,31 @@ export function buildWorldGraphInjection(ctx: WorldGraphInjectCtx): string {
 
     const sceneLocIds = findSceneLocationIds(ctx);
 
+    // 用于"每角色物品只注入最近变化的 N 件"：itemId → 最近变化的楼层号
+    const changedFloorMap = buildItemChangeFloorMap(ctx);
+    const perCharLimit = typeof ctx.perCharacterItemLimit === 'number' && ctx.perCharacterItemLimit > 0
+      ? ctx.perCharacterItemLimit
+      : 0;
+    // 给 entries 按"最近变化优先 + 名字稳定排序"截断到 perCharLimit
+    const sliceByRecent = (entries: ItemEntry[]): ItemEntry[] => {
+      if (perCharLimit <= 0 || entries.length <= perCharLimit) return entries;
+      return entries
+        .map(e => ({ ...e, changedFloor: changedFloorMap.get(e.item.id) || 0 }))
+        .sort((a, b) => {
+          const diff = (b.changedFloor || 0) - (a.changedFloor || 0);
+          if (diff !== 0) return diff;
+          return a.item.name.localeCompare(b.item.name, 'zh-Hans-CN');
+        })
+        .slice(0, perCharLimit);
+    };
+
     // 1) 玩家物品（当前可用，排除已消耗）
-    const playerItems = getOwnedItems(
+    const playerItems = sliceByRecent(getOwnedItems(
       graph,
       getPlayerOwnerKeys(graph, userName),
       injectedItemIds,
       false,
-    );
+    ));
     hasContent = addItemSection(lines, '[玩家当前可用物品]', playerItems, injectedItemIds, true) || hasContent;
 
     // 2) 与玩家同场景角色的物品（当前可用，排除已消耗）
@@ -469,7 +526,7 @@ export function buildWorldGraphInjection(ctx: WorldGraphInjectCtx): string {
     if (sameSceneCharacters.length > 0) {
       const groupedLines: string[] = [];
       for (const ch of sameSceneCharacters) {
-        const entries = getOwnedItems(graph, getCharacterOwnerKeys(graph, ch.name), injectedItemIds, false);
+        const entries = sliceByRecent(getOwnedItems(graph, getCharacterOwnerKeys(graph, ch.name), injectedItemIds, false));
         if (entries.length === 0) continue;
         groupedLines.push(`${ch.name}:`);
         for (const entry of entries) {

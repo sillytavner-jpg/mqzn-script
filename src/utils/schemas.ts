@@ -154,15 +154,17 @@ export const KnowledgeGraphDiffSchema = z.object({
 	      brief: z.string().optional().default(''),
 	      aliases: z.array(z.string()).optional().default([]),
     })).optional().default([]),
-    items: z.array(z.object({
+items: z.array(z.object({
       name: z.string(),
 	      brief: z.string().optional().default(''),
 	      aliases: z.array(z.string()).optional().default([]),
 	      quantity: z.string().optional(),
-	      belongTo: z.string().optional().default(''),
-	      state: z.string().optional().default(''),
+	      owner: z.string().optional().default(''),
+	      location: z.string().optional().default(''),
+	      status: z.string().optional().default(''),
+	      statusDetail: z.string().optional().default(''),
 	      consumed: z.boolean().optional(),
-    })).optional().default([]),
+	    })).optional().default([]),
     edges: z.array(z.object({
       type: z.string().optional().default('contains'),
       from: z.string(),

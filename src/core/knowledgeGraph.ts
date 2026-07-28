@@ -33,6 +33,19 @@ export interface GraphLocation {
   embedding?: number[];
 }
 
+/** 物品持有/存放方式枚举 */
+export type GraphItemStatus =
+  | 'owned'    // 专属持有中（默认）
+  | 'held'     // 拿在手上
+  | 'worn'     // 穿/佩戴身上
+  | 'carried'  // 随行携带（在身上但未特指手/身）
+  | 'placed'   // 放在某地
+  | 'stored'   // 装入容器/收纳
+  | 'lost';    // 遗失/去向不明
+
+/** 物品实体身份模式 */
+export type GraphItemExistence = 'unique'; // 预留：'batch' 同类可累加（桂花糕型）
+
 /** 物品节点 */
 export interface GraphItem {
   /** 稳定键：slug(name) */
@@ -46,6 +59,23 @@ export interface GraphItem {
   quantity?: string;
   /** 已消耗/已毁/已用尽，不能再作为当前可用物品注入 */
   consumed?: boolean;
+  /**
+   * 静态所有权（角色名或地点名）。只在"送/给/抢/易主"时更新。
+   * 区别于 location：owner 表示"是谁的"，即使物品被放下、暂存他处也不变。
+   */
+  owner?: string;
+  /**
+   * 当前动态位置（角色名或地点名）。放下、取出、移动即更新。
+   * 与 owner 分离，避免"放下了仍归属原主"的语义歧义。
+   * 物品在谁手上时 location = 该角色名；被放在某地时 location = 地点名。
+   */
+  location?: string;
+  /** 持有/存放方式枚举（owned/held/worn/carried/placed/stored/lost），驱动"穿/拿/放"等动作判别 */
+  status?: GraphItemStatus;
+  /** 持有/存放细节补充（具体位置、损坏、朝向等自由文本） */
+  statusDetail?: string;
+  /** 实体身份模式，本期固定 unique：同 owner + 同 name/aliases 命中才合并 */
+  existence?: GraphItemExistence;
   /** 语义向量（召回用，可选） */
   embedding?: number[];
 }
@@ -102,8 +132,14 @@ export interface KnowledgeGraphDiff {
       brief?: string;
       aliases?: string[];
       quantity?: string;
-      belongTo?: string;
-      state?: string;
+      /** 静态所有权（角色名或地点名） */
+      owner?: string;
+      /** 当前动态位置（角色名或地点名） */
+      location?: string;
+      /** 持有/存放方式枚举 */
+      status?: string;
+      /** 持有/存放细节补充 */
+      statusDetail?: string;
       consumed?: boolean;
     }>;
     edges?: Array<{
@@ -133,10 +169,14 @@ export interface RecalledEntity {
   name: string;
   brief: string;
   aliases?: string[];
-  /** 物品归属对象名（角色名/地点名，来自 belongs_to 边） */
-  belongTo?: string;
-  /** 物品具体状态/位置细节（belongs_to 边的 detail） */
-  state?: string;
+  /** 物品静态所有权（角色名/地点名） */
+  owner?: string;
+  /** 物品当前动态位置（角色名/地点名） */
+  location?: string;
+  /** 物品持有/存放方式枚举 */
+  status?: string;
+  /** 物品持有/存放细节补充 */
+  statusDetail?: string;
   /** 物品数量 */
   quantity?: string;
   /** 已消耗/已毁/已用尽，召回时可作为历史事实提示 */
@@ -489,32 +529,80 @@ function mergeAliasFromIncoming(existingName: string, incomingName: string, inco
   return aliases;
 }
 
-/** 物品归属：插入或更新 belongs_to 边（to = 地点 id 或角色名，detail = 具体状态） */
-function upsertBelongsTo(
-  graph: KnowledgeGraph,
-  itemId: string,
-  belongTo: string,
-  state: string,
+/**
+ * 把任意归属/位置字符串归一化为正式名：
+ * - 命中地点名/别名 → 返回地点正式名（不是 id，便于注入展示）
+ * - 命中角色名/别名 → 返回角色正式名
+ * - 都未命中 → 原样返回（让上层判断）
+ */
+function resolvePlaceOrCharName(
+  raw: string,
+  locations: GraphLocation[],
   locNameToId: Map<string, string>,
-  charNameToCanonical?: Map<string, string>,
-): void {
-  const target = belongTo.trim();
-  if (!target) return;
-  // 地点命中→用 id；否则视为角色名（角色不是图节点，保留原名）
-  const to = locNameToId.get(target)
-    || locNameToId.get(buildStableId(target))
-    || charNameToCanonical?.get(target)
-    || charNameToCanonical?.get(buildStableId(target))
-    || target;
-  const existing = graph.edges.find(e => e.type === 'belongs_to' && e.from === itemId);
-  if (existing) {
-    const targetChanged = existing.to !== to;
-    existing.to = to;
-    if (state) existing.detail = state;
-    else if (targetChanged) existing.detail = undefined;
-  } else {
-    graph.edges.push({ type: 'belongs_to', from: itemId, to, detail: state || undefined });
+  charLookupToName: Map<string, string>,
+): string {
+  const t = (raw || '').trim();
+  if (!t) return '';
+  // 角色命中优先（角色不是图节点，保留原名）
+  const charName = charLookupToName.get(t) || charLookupToName.get(buildStableId(t));
+  if (charName) return charName;
+  // 地点命中 → 用正式名（不是 id）
+  const locId = locNameToId.get(t) || locNameToId.get(buildStableId(t));
+  if (locId) {
+    const loc = locations.find(l => l.id === locId);
+    if (loc) return loc.name;
   }
+  // 也可能直接是地点 id：返回该地点的正式名
+  const locById = locations.find(l => l.id === t);
+  if (locById) return locById.name;
+  return t;
+}
+
+/** 物品 status 归一化：枚举值小写匹配 + 同义词归并；不合法则返回 undefined */
+function normalizeItemStatus(raw: string | undefined): GraphItemStatus | undefined {
+  if (!raw) return undefined;
+  const v = String(raw).trim().toLowerCase();
+  if (!v) return undefined;
+  const map: Record<string, GraphItemStatus> = {
+    owned: 'owned', own: 'owned', 持有: 'owned', 专属: 'owned',
+    held: 'held', hold: 'held', 拿: 'held', 拿在手上: 'held', 拿着: 'held', 手上: 'held', 手中: 'held',
+    worn: 'worn', wear: 'worn', 穿: 'worn', 穿着: 'worn', 佩戴: 'worn', 戴: 'worn', 佩戴在身上: 'worn', 身上: 'worn',
+    carried: 'carried', carry: 'carried', 随身: 'carried', 随行: 'carried', 携带: 'carried', 带在身上: 'carried',
+    placed: 'placed', place: 'placed', 放: 'placed', 放下: 'placed', 放在: 'placed', 搁: 'placed', 搁在: 'placed',
+    stored: 'stored', store: 'stored', 装入: 'stored', 收: 'stored', 收纳: 'stored', 存: 'stored', 存入: 'stored', 入: 'stored',
+    lost: 'lost', lose: 'lost', 丢失: 'lost', 遗失: 'lost', 去向不明: 'lost', 不明: 'lost',
+  };
+  return map[v];
+}
+
+/**
+ * 把旧 belongs_to 边的 detail / 旧 state 字符串拆解为 status + statusDetail。
+ * 例："被江念放在草棚边的石凳上" → { status: 'placed', detail: '草棚边的石凳上' }
+ *      "拿在手上"               → { status: 'held', detail: '' }
+ *      "床头的木盒中"           → { status: 'stored', detail: '床头的木盒中' }
+ * 找不到明确动作词时 status 留空，全部塞进 detail。
+ */
+function parseLegacyState(raw: string | undefined): { status?: GraphItemStatus; detail: string } {
+  const text = (raw || '').trim();
+  if (!text) return { detail: '' };
+  const rules: Array<{ re: RegExp; status: GraphItemStatus; strip?: RegExp }> = [
+    { re: /拿在手上|拿(着)?|手中|手上/, status: 'held', strip: /^被.+?(拿|握)|拿在手上|拿着?|手中|手上/g },
+    { re: /穿(着)?|佩戴(在身上)?|戴上?|戴在/, status: 'worn', strip: /穿着?|佩戴在身上?|戴在?|戴上?/g },
+    { re: /随身|携带|带在身上|随身携带/, status: 'carried', strip: /随身携带|随身|携带|带在身上/g },
+    { re: /放在?|搁在?|置于|丢在?|撂在?/, status: 'placed', strip: /^被.+?[放搁置丢撂]在?|放在?|搁在?|置于|丢在?|撂在?/g },
+    { re: /装入?|放入?|存入?|收纳进?|装在/, status: 'stored', strip: /装入?|放入?|存入?|收纳进?|装在/g },
+    { re: /遗失|丢失|去向不明|不明|下落不明/, status: 'lost', strip: /去向不明|下落不明|遗失|丢失|不明/g },
+  ];
+  for (const r of rules) {
+    if (!r.re.test(text)) continue;
+    let detail = text;
+    if (r.strip) detail = detail.replace(r.strip, '').trim();
+    // 清掉残留下来的"被某某"前缀（角色名+放下/递给等动词结构）
+    detail = detail.replace(/^被[^，。、\s]{1,12}?/, '').trim();
+    detail = detail.replace(/^[的将把以，,。、\s]+/, '').trim();
+    return { status: r.status, detail };
+  }
+  return { detail: text };
 }
 
 // ========== 增量合并 ==========
@@ -641,6 +729,9 @@ export function applyKnowledgeGraphDiff(graph: KnowledgeGraph, diff: KnowledgeGr
   }
 
   // —— add.items ——
+  // 物品字段：owner（静态所有权）/location（当前位置）/status（持有方式）/statusDetail（细节）
+  // owner/location 既可写角色名也可写地点名；命中地点→转正式名，命中角色→转正式名，未命中→原样保留。
+  const resolvePlaceOrChar = (raw: string): string => resolvePlaceOrCharName(raw, next.locations, locNameToId, charLookupToName);
   for (const it of diff.add?.items || []) {
     if (!it.name) continue;
     const id = buildStableId(it.name);
@@ -651,8 +742,20 @@ export function applyKnowledgeGraphDiff(graph: KnowledgeGraph, diff: KnowledgeGr
       if (typeof it.consumed === 'boolean') existing.consumed = it.consumed;
       const aliases = mergeAliasFromIncoming(existing.name, it.name, it.aliases || []);
       if (aliases.length) existing.aliases = mergeUnique(existing.aliases || [], aliases);
+      // owner 只在易主时更新；传入的 owner 与已存相同时不改。
+      if (typeof it.owner === 'string' && it.owner.trim()) {
+        const resolvedOwner = resolvePlaceOrChar(it.owner);
+        if (resolvedOwner && resolvedOwner !== existing.owner) existing.owner = resolvedOwner;
+      }
+      // location 每段覆盖（放下/取出/移动即变更）
+      if (typeof it.location === 'string') {
+        const resolvedLoc = resolvePlaceOrChar(it.location);
+        if (resolvedLoc) existing.location = resolvedLoc;
+        else if (it.location.trim() === '') existing.location = undefined;
+      }
+      if (typeof it.status === 'string' && it.status.trim()) existing.status = normalizeItemStatus(it.status);
+      if (typeof it.statusDetail === 'string') existing.statusDetail = it.statusDetail.trim() || undefined;
       rememberItem(existing);
-      if (it.belongTo) upsertBelongsTo(next, existing.id, it.belongTo, it.state || '', locNameToId, charLookupToName);
     } else {
       const newNode: GraphItem = {
         id,
@@ -661,17 +764,21 @@ export function applyKnowledgeGraphDiff(graph: KnowledgeGraph, diff: KnowledgeGr
         aliases: it.aliases?.length ? [...it.aliases] : undefined,
         quantity: it.quantity?.trim() || undefined,
         consumed: it.consumed === true ? true : undefined,
+        owner: typeof it.owner === 'string' ? resolvePlaceOrChar(it.owner) : undefined,
+        location: typeof it.location === 'string' ? resolvePlaceOrChar(it.location) : undefined,
+        status: typeof it.status === 'string' ? normalizeItemStatus(it.status) : undefined,
+        statusDetail: typeof it.statusDetail === 'string' ? it.statusDetail.trim() || undefined : undefined,
+        existence: 'unique',
       };
       next.items.push(newNode);
       rememberItem(newNode);
-      if (it.belongTo) upsertBelongsTo(next, newNode.id, it.belongTo, it.state || '', locNameToId, charLookupToName);
     }
   }
 
   // —— update ——
   for (const u of diff.update || []) {
     const { id, field, value } = u;
-    const itemOnlyField = ['quantity', 'count', 'amount', 'consumed', 'isConsumed', 'usedUp', 'depleted', 'belongTo', 'owner', 'currentOwner', 'state', 'currentState'].includes(field);
+    const itemOnlyField = ['quantity', 'count', 'amount', 'consumed', 'isConsumed', 'usedUp', 'depleted', 'owner', 'currentOwner', 'location', 'currentLocation', 'status', 'statusDetail', 'state', 'currentState'].includes(field);
     const itemFirst = itemOnlyField ? next.items.find(i => i.id === id) : undefined;
     if (itemFirst) {
       if (['consumed', 'isConsumed', 'usedUp', 'depleted'].includes(field)) {
@@ -679,12 +786,21 @@ export function applyKnowledgeGraphDiff(graph: KnowledgeGraph, diff: KnowledgeGr
       } else if (['quantity', 'count', 'amount'].includes(field)) {
         const text = String(value ?? '').trim();
         itemFirst.quantity = text || undefined;
-      } else if (['belongTo', 'owner', 'currentOwner'].includes(field) && typeof value === 'string') {
-        const current = next.edges.find(e => e.type === 'belongs_to' && e.from === itemFirst.id);
-        upsertBelongsTo(next, itemFirst.id, value, current?.detail || '', locNameToId, charLookupToName);
+      } else if (['owner', 'currentOwner'].includes(field) && typeof value === 'string') {
+        const resolved = resolvePlaceOrChar(value);
+        if (resolved) itemFirst.owner = resolved;
+      } else if (['location', 'currentLocation'].includes(field) && typeof value === 'string') {
+        const resolved = resolvePlaceOrChar(value);
+        if (resolved) itemFirst.location = resolved;
+      } else if (['status'].includes(field) && typeof value === 'string') {
+        itemFirst.status = normalizeItemStatus(value);
+      } else if (['statusDetail'].includes(field) && typeof value === 'string') {
+        itemFirst.statusDetail = value.trim() || undefined;
       } else if (['state', 'currentState'].includes(field) && typeof value === 'string') {
-        const current = next.edges.find(e => e.type === 'belongs_to' && e.from === itemFirst.id);
-        if (current) current.detail = value;
+        // 兼容旧字段：把旧 state 拆解为 status + statusDetail
+        const parsed = parseLegacyState(value);
+        if (parsed.status) itemFirst.status = parsed.status;
+        if (parsed.detail) itemFirst.statusDetail = parsed.detail;
       }
       continue;
     }
@@ -697,12 +813,21 @@ export function applyKnowledgeGraphDiff(graph: KnowledgeGraph, diff: KnowledgeGr
       } else if (['quantity', 'count', 'amount'].includes(field)) {
         const text = String(value ?? '').trim();
         item.quantity = text || undefined;
-      } else if (['belongTo', 'owner', 'currentOwner', 'location'].includes(field) && typeof value === 'string') {
-        const current = next.edges.find(e => e.type === 'belongs_to' && e.from === item.id);
-        upsertBelongsTo(next, item.id, value, current?.detail || '', locNameToId, charLookupToName);
+      } else if (['owner', 'currentOwner'].includes(field) && typeof value === 'string') {
+        const resolved = resolvePlaceOrChar(value);
+        if (resolved) item.owner = resolved;
+      } else if (['location', 'currentLocation'].includes(field) && typeof value === 'string') {
+        const resolved = resolvePlaceOrChar(value);
+        if (resolved) item.location = resolved;
+      } else if (['status'].includes(field) && typeof value === 'string') {
+        item.status = normalizeItemStatus(value);
+      } else if (['statusDetail'].includes(field) && typeof value === 'string') {
+        item.statusDetail = value.trim() || undefined;
       } else if (['state', 'currentState'].includes(field) && typeof value === 'string') {
-        const current = next.edges.find(e => e.type === 'belongs_to' && e.from === item.id);
-        if (current) current.detail = value;
+        // 兼容旧字段：把旧 state 拆解为 status + statusDetail
+        const parsed = parseLegacyState(value);
+        if (parsed.status) item.status = parsed.status;
+        if (parsed.detail) item.statusDetail = parsed.detail;
       } else {
         applyFieldUpdate(item, field, value);
       }
@@ -779,14 +904,7 @@ export function recallKnowledgeGraph(
     ? { nodeFilter: nodeFilterOrOptions }
     : (nodeFilterOrOptions || {});
 
-  // 物品 id → 归属名+状态（从 belongs_to 边推导）
-  const itemBelong = new Map<string, { belongTo: string; state: string }>();
-  for (const e of graph.edges) {
-    if (e.type !== 'belongs_to') continue;
-    const toName = graph.locations.find(l => l.id === e.to)?.name || e.to;
-    itemBelong.set(e.from, { belongTo: toName, state: e.detail || '' });
-  }
-
+  // 物品归属信息：从 item.owner/location/status/statusDetail 直接读取（新结构，不再查 belongs_to 边）
   const candidates: RecalledEntity[] = [];
   const useEmb = !!queryEmb && queryEmb.length > 0;
   const filterSet = options.nodeFilter ?? null;
@@ -839,7 +957,6 @@ export function recallKnowledgeGraph(
         if (names.some(n => q.includes(n))) sim = Math.max(sim, 0.6);
       }
     }
-    const belong = itemBelong.get(it.id);
     candidates.push({
       kind: 'item',
       id: it.id,
@@ -847,8 +964,10 @@ export function recallKnowledgeGraph(
       brief: it.brief || '',
       aliases: it.aliases,
       quantity: it.quantity,
-      belongTo: belong?.belongTo,
-      state: belong?.state,
+      owner: it.owner,
+      location: it.location,
+      status: it.status,
+      statusDetail: it.statusDetail,
       consumed: it.consumed === true,
       sim,
     });
@@ -904,6 +1023,10 @@ interface KgDigestFormatOptions {
   otherCharactersTitle?: string;
 }
 
+/**
+ * 兼容旧结构：item 缺 owner/location 时回退取 belongs_to 边的信息。
+ * 新结构 item.owner/location 一般已直接挂节点，这里仅迁移期兜底用。
+ */
 function buildItemBelongMap(graph: KnowledgeGraph): Map<string, { belongTo: string; state: string }> {
   const itemBelong = new Map<string, { belongTo: string; state: string }>();
   for (const e of graph.edges || []) {
@@ -927,10 +1050,10 @@ function locationToRecalled(loc: GraphLocation, sim = 1): RecalledEntity {
 
 function itemToRecalled(
   item: GraphItem,
-  itemBelong: Map<string, { belongTo: string; state: string }>,
+  itemBelongFallback: Map<string, { belongTo: string; state: string }>,
   sim = 1,
 ): RecalledEntity {
-  const belong = itemBelong.get(item.id);
+  const fallback = itemBelongFallback.get(item.id);
   return {
     kind: 'item',
     id: item.id,
@@ -938,8 +1061,10 @@ function itemToRecalled(
     brief: item.brief || '',
     aliases: item.aliases,
     quantity: item.quantity,
-    belongTo: belong?.belongTo,
-    state: belong?.state,
+    owner: item.owner || fallback?.belongTo,
+    location: item.location || fallback?.belongTo,
+    status: item.status || (fallback?.state ? parseLegacyState(fallback.state).status : undefined),
+    statusDetail: item.statusDetail || (fallback?.state ? parseLegacyState(fallback.state).detail : undefined),
     consumed: item.consumed === true,
     sim,
   };
@@ -1074,14 +1199,16 @@ function formatKgDigestForSmallSummary(
   }
   if (items.length > 0) {
     lines.push(options.itemTitle || '### 已有相关物品（update/delete 回填其 id；本次正文新出现且不在此列 → add）');
-    lines.push('⚠️ 列表里的"持有"即物品当前归属。本段若出现同名物品但持有者不同、且正文无"递给/送给/还给/抢走/转交"等明确转移证据时，按新实例 add，不要覆盖旧条目。');
+    lines.push('⚠️ 判重铁律：owner 相同且 name/aliases 命中 → 合并更新；owner 不同或 owner 不明 → 按独立新实例 add，不要覆盖旧条目。');
     for (const it of items) {
       const al = it.aliases?.length ? ` 别名:${it.aliases.join('/')}` : '';
-      const belong = it.belongTo ? ` [${it.belongTo}持有]` : '';
-      const state = it.state ? ` 状态:${it.state}` : '';
+      const ownerTxt = it.owner ? ` [所有:${it.owner}]` : '';
+      const locTxt = it.location && it.location !== it.owner ? ` 当前位置:${it.location}` : '';
+      const statusTxt = it.status ? ` 方式:${it.status}` : '';
+      const detailTxt = it.statusDetail ? ` 细节:${it.statusDetail}` : '';
       const quantity = it.quantity ? ` 数量:${it.quantity}` : '';
       const consumed = it.consumed ? ' 已消耗:true' : '';
-      lines.push(`- id=${it.id} | ${it.name}${belong}${it.brief ? '：' + it.brief : ''}${quantity}${state}${consumed}${al}`);
+      lines.push(`- id=${it.id} | ${it.name}${ownerTxt}${locTxt}${statusTxt}${detailTxt}${it.brief ? '：' + it.brief : ''}${quantity}${consumed}${al}`);
     }
   }
   if (chars.length > 0) {
@@ -1190,17 +1317,58 @@ export function buildContextualKgDigestForSmallSummary(options: SmallSummaryKgDi
   }
 
   // 中心角色持有物 + 中心地点物品，统一限额，避免玩家背包/地点堆积撑爆 prompt。
+  // 新结构：item.owner 或 item.location 命中中心角色/中心地点即纳入（迁移期 fallback：belongs_to 边）
   let centeredItemCount = 0;
+  // 中心地点 id → 归一化小写集合，便于匹配 item.location 是地点名而非 id 的情况
+  const centerLocIdSet = new Set(centerLocIds);
+  const centerLocNameLowerSet = new Set<string>();
+  for (const id of centerLocIds) {
+    const l = (graph.locations || []).find(x => x.id === id);
+    centerLocNameLowerSet.add(normalizeOwnerName(id));
+    if (l) {
+      centerLocNameLowerSet.add(normalizeOwnerName(l.name));
+      for (const a of l.aliases || []) centerLocNameLowerSet.add(normalizeOwnerName(a));
+    }
+  }
+  const isItemCentered = (item: GraphItem): boolean => {
+    // 新字段：owner 是中心角色 / location 是中心角色或中心地点
+    if (item.owner && targetMatchesLookup(item.owner, centerOwnerKeys)) return true;
+    if (item.location) {
+      if (targetMatchesLookup(item.location, centerOwnerKeys)) return true;
+      // location 命中中心地点：判地点 id / 正式名 / 别名
+      const norm = normalizeOwnerName(item.location);
+      if (centerLocNameLowerSet.has(norm)) return true;
+      const loc = (graph.locations || []).find(l => l.id === item.location);
+      if (loc && centerLocIdSet.has(loc.id)) return true;
+    }
+    // 旧 fallback：belongs_to 边命中中心角色或中心地点
+    const edge = (graph.edges || []).find(e => e.type === 'belongs_to' && e.from === item.id);
+    if (edge) {
+      if (targetMatchesLookup(edge.to, centerOwnerKeys)) return true;
+      if (centerLocIdSet.has(edge.to)) return true;
+      const loc = (graph.locations || []).find(l => l.id === edge.to);
+      if (loc && centerLocIdSet.has(loc.id)) return true;
+    }
+    return false;
+  };
+  for (const item of graph.items || []) {
+    if (centeredItemCount >= centerItemLimit) break;
+    if (!isItemCentered(item)) continue;
+    if (pushUniqueRecalled(centered, used, itemToRecalled(item, itemBelong, 1.1))) {
+      centeredItemCount++;
+    }
+  }
+  // 旧 fallback：可能某些 item 已被 skipped（owner/location 都没挂且没 belongs_to 边命中），也走一遍 edge 主循环补漏
   for (const edge of graph.edges || []) {
+    if (centeredItemCount >= centerItemLimit) break;
     if (edge.type !== 'belongs_to') continue;
     const ownedByCenterCharacter = targetMatchesLookup(edge.to, centerOwnerKeys);
-    const locatedAtCenter = centerLocIds.has(edge.to);
+    const locatedAtCenter = centerLocIdSet.has(edge.to);
     if (!ownedByCenterCharacter && !locatedAtCenter) continue;
     const item = graph.items.find(it => it.id === edge.from);
     if (!item) continue;
     if (pushUniqueRecalled(centered, used, itemToRecalled(item, itemBelong, 1.1))) {
       centeredItemCount++;
-      if (centeredItemCount >= centerItemLimit) break;
     }
   }
 
@@ -1337,17 +1505,39 @@ export function getLocationFullInfo(graph: KnowledgeGraph | null, locationName: 
     }
   }
 
-  // 此处物品（belongs_to，含状态）
-  const itemsHere = graph.edges
-    .filter(e => e.type === 'belongs_to' && e.to === loc.id)
-    .map(e => ({ item: graph.items.find(i => i.id === e.from), state: e.detail }))
-    .filter((x): x is { item: GraphItem; state?: string } => !!x.item);
+  // 此处物品（item.location 命中本地点）
+  // 迁移期兼容：item.location 字段尚未挂上时回退取 belongs_to 边
+  const itemsHere: Array<{ item: GraphItem; state?: string }> = [];
+  for (const item of graph.items || []) {
+    const itemLoc = item.location
+      || graph.edges.find(e => e.type === 'belongs_to' && e.from === item.id && e.to === loc.id)
+        ? (() => {
+          const e = graph.edges.find(ed => ed.type === 'belongs_to' && ed.from === item.id);
+          return e ? (graph.locations.find(l => l.id === e.to)?.name || e.to) : undefined;
+        })()
+      : undefined;
+    // 严格判断该物品当前位置（item.location 或 fallback）是否命中此地点
+    const locId = loc.id;
+    const hitsThisLoc = (() => {
+      if (!itemLoc) return false;
+      if (itemLoc === loc.name || itemLoc === locId) return true;
+      const targetLoc = (graph.locations || []).find(l => l.name === itemLoc);
+      return !!targetLoc && targetLoc.id === locId;
+    })();
+    if (hitsThisLoc) {
+      const state = item.statusDetail
+        || graph.edges.find(e => e.type === 'belongs_to' && e.from === item.id)?.detail
+        || undefined;
+      itemsHere.push({ item, state });
+    }
+  }
   if (itemsHere.length > 0) {
     lines.push('  此处物品:');
     for (const { item, state } of itemsHere) {
       const quantity = item.quantity ? `（数量：${item.quantity}）` : '';
+      const statusTxt = item.status ? `（${item.status}）` : (state ? `（${state}）` : '');
       lines.push(
-        `  - ${item.name}${item.brief ? '：' + item.brief : ''}${quantity}${state ? `（${state}）` : ''}`,
+        `  - ${item.name}${item.brief ? '：' + item.brief : ''}${quantity}${statusTxt}`,
       );
     }
   }
@@ -1358,20 +1548,47 @@ export function getLocationFullInfo(graph: KnowledgeGraph | null, locationName: 
 // ========== 图谱注入辅助函数 ==========
 
 /**
- * 获取某地点下的全部物品（belongs_to 边，无 top-K 截断）。
+ * 获取某地点下的全部物品（item.location 命中该地点，无 top-K 截断）。
  * 供聊天上下文注入时全量展开。
  */
 export function getLocationAllItems(graph: KnowledgeGraph, locationId: string): Array<{ item: GraphItem; state?: string }> {
-  return graph.edges
-    .filter(e => e.type === 'belongs_to' && e.to === locationId)
-    .map(e => ({ item: graph.items.find(i => i.id === e.from), state: e.detail }))
-    .filter((x): x is { item: GraphItem; state?: string } => !!x.item);
+  const loc = (graph.locations || []).find(l => l.id === locationId);
+  if (!loc) return [];
+  const targets = new Set([locationId.toLowerCase(), loc.name.toLowerCase()]);
+  for (const a of loc.aliases || []) targets.add(a.toLowerCase());
+
+  const result: Array<{ item: GraphItem; state?: string }> = [];
+  for (const item of graph.items || []) {
+    const raw = (item.location || '').toLowerCase().trim();
+    if (!raw) {
+      // 迁移期 fallback：取旧 belongs_to 边命中此地点者
+      const edge = graph.edges.find(e => e.type === 'belongs_to' && e.from === item.id && e.to === locationId);
+      if (edge) {
+        result.push({ item, state: edge.detail });
+      }
+      continue;
+    }
+    if (targets.has(raw)) {
+      result.push({ item, state: item.statusDetail });
+    }
+  }
+  return result;
 }
 
 /** 归属于某所有者（角色/玩家/地点）的物品视图 */
 export interface OwnedItem {
   item: GraphItem;
+  /** 当前持有/存放方式 */
+  status?: string;
+  /** 当前位置细节 */
+  statusDetail?: string;
+  /** 物品当前归属对象名（角色名/地点名） */
+  owner?: string;
+  /** 物品当前位置名 */
+  location?: string;
+  /** 兼容：旧状态文本（statusDetail 同义） */
   state?: string;
+  /** 兼容：旧 belongTo 同义 */
   belongTo?: string;
 }
 
@@ -1382,8 +1599,8 @@ function normalizeOwnerName(name: string): string {
 /**
  * 查询归属于指定所有者集合的物品。
  * 所有者可以是角色名、玩家别名或地点 id/名称/别名；命中规则：
- * 1. belongs_to 边的 to 直接等于任一 ownerName（忽略大小写）
- * 2. belongs_to 的 to 是地点 id，且该地点的名称/别名匹配任一 ownerName
+ * 1. item.owner 或 item.location 命中任一 ownerName（角色作为静态 owner 或当前持有者均可）
+ * 2. 迁移期 fallback：item.owner/location 都为空时退回查 belongs_to 边
  */
 export function getItemsBelongingTo(
   graph: KnowledgeGraph,
@@ -1393,23 +1610,71 @@ export function getItemsBelongingTo(
   if (ownerSet.size === 0) return [];
 
   const locById = new Map(graph.locations.map(l => [normalizeOwnerName(l.id), l]));
+  // 地点别名表：地点正式名/别名 → 正式名（小写归一）
+  const locAliasToName = new Map<string, string>();
+  for (const l of graph.locations) {
+    locAliasToName.set(normalizeOwnerName(l.name), l.name);
+    locAliasToName.set(normalizeOwnerName(l.id), l.name);
+    for (const a of l.aliases || []) locAliasToName.set(normalizeOwnerName(a), l.name);
+  }
+
+  const matchOwnerKey = (raw: string): string | undefined => {
+    const norm = normalizeOwnerName(raw);
+    if (ownerSet.has(norm)) return raw;
+    // owner 写的是地点 id → 转成正式名后命中
+    const loc = locById.get(norm);
+    if (loc) {
+      const names = [loc.name, ...(loc.aliases || [])];
+      const hit = names.find(n => ownerSet.has(normalizeOwnerName(n)));
+      if (hit) return loc.name;
+    }
+    return undefined;
+  };
 
   return graph.items
     .map(item => {
+      // 新字段优先：item.owner / item.location 命中
+      if (item.owner) {
+        const matched = matchOwnerKey(item.owner);
+        if (matched !== undefined) {
+          return {
+            item,
+            status: item.status,
+            statusDetail: item.statusDetail,
+            owner: item.owner,
+            location: item.location,
+            state: item.statusDetail,
+            belongTo: item.owner,
+          } as OwnedItem;
+        }
+      }
+      if (item.location) {
+        const matched = matchOwnerKey(item.location);
+        if (matched !== undefined) {
+          return {
+            item,
+            status: item.status,
+            statusDetail: item.statusDetail,
+            owner: item.owner,
+            location: item.location,
+            state: item.statusDetail,
+            belongTo: matched,
+          } as OwnedItem;
+        }
+      }
+      // 旧 fallback：取 belongs_to 边
       const edge = graph.edges.find(e => e.type === 'belongs_to' && e.from === item.id);
       if (!edge) return null;
-
       const toRaw = edge.to;
       const toNorm = normalizeOwnerName(toRaw);
       if (ownerSet.has(toNorm)) {
-        return { item, state: edge.detail, belongTo: toRaw };
+        return { item, state: edge.detail, belongTo: toRaw } as OwnedItem;
       }
-
       const loc = locById.get(toNorm);
       if (loc) {
         const locNames = [loc.name, ...(loc.aliases || [])];
         if (locNames.some(n => ownerSet.has(normalizeOwnerName(n)))) {
-          return { item, state: edge.detail, belongTo: loc.name };
+          return { item, state: edge.detail, belongTo: loc.name } as OwnedItem;
         }
       }
       return null;
@@ -1534,10 +1799,12 @@ export function buildKnowledgeGraphMaterialForProgress(
       } else if (r.kind === 'character') {
         parts.push(`- [人物]${r.name}${r.brief ? ` → 位于 ${r.brief}` : ''}`);
       } else {
-        const belong = r.belongTo ? ` 归属:${r.belongTo}` : '';
+        const owner = r.owner ? ` 归属:${r.owner}` : '';
+        const loc = r.location && r.location !== r.owner ? ` 当前位置:${r.location}` : '';
         const quantity = r.quantity ? ` 数量:${r.quantity}` : '';
-        const state = r.state ? ` 状态:${r.state}` : '';
-        parts.push(`- [物品]${r.name}${r.brief ? '：' + r.brief : ''}${quantity}${belong}${state}`);
+        const status = r.status ? ` 方式:${r.status}` : '';
+        const detail = r.statusDetail ? ` 细节:${r.statusDetail}` : '';
+        parts.push(`- [物品]${r.name}${r.brief ? '：' + r.brief : ''}${quantity}${owner}${loc}${status}${detail}`);
       }
     }
   }
@@ -1560,6 +1827,10 @@ function buildKgItemEmbedText(item: GraphItem): string {
   const parts: string[] = [`[物品] ${item.name}`];
   if (item.brief) parts.push(item.brief);
   if (item.quantity) parts.push(`数量:${item.quantity}`);
+  if (item.owner) parts.push(`归属:${item.owner}`);
+  if (item.location && item.location !== item.owner) parts.push(`当前位置:${item.location}`);
+  if (item.status) parts.push(`方式:${item.status}`);
+  if (item.statusDetail) parts.push(`位置细节:${item.statusDetail}`);
   if (item.aliases?.length) parts.push(`别名:${item.aliases.join('/')}`);
   if (item.consumed) parts.push('已消耗');
   return parts.join(' | ');
@@ -1661,4 +1932,144 @@ export function normalizeLegacyGraph(graph: KnowledgeGraph | null): KnowledgeGra
   }
 
   return changed ? next : graph;
+}
+
+/**
+ * 物品归属字段迁移（v1：belongs_to 边 → item.owner/location/status/statusDetail）
+ *
+ * 旧结构：物品归属挂在 GraphEdge (type 'belongs_to') 上，to=地点id或角色名，detail=状态描述。
+ * 新结构：物品自身挂 owner（静态所有权）+ location（当前动态位置）+ status + statusDetail。
+ *
+ * 迁移规则：
+ * - 物品有一条 belongs_to 边：
+ *   - to 是地点 id → owner=空（地点上的物品不一定是某人的）、location=该地点正式名、status=placed（除非 detail 命中其他动作词）
+ *   - to 是地点名但不在 locations 列表里 → 视为地点，同上但保留原 to 作 location
+ *   - to 是角色名 → owner=该角色名、location=该角色名（"在某人手上"即"在该角色处"）、status=owned（除非 detail 命中其他动作词）
+ * - 边的 detail 走 parseLegacyState 拆为 status + statusDetail
+ * - 物品多条 belongs_to 边（异常情况，按理至多一条）：以第一条为准，其余忽略
+ *
+ * 幂等：item 已存在 owner/location 两个字段都不为空时不再迁移；belongs_to 边在迁移后保留（不删，省一次回退兼容）
+ * 迁移完成后不做 owns/located_in 边替换——这些边仅旧图存档可能仍有，新代码读取一律走 item.x 直查。
+ */
+export function migrateItemPlacement(graph: KnowledgeGraph | null): KnowledgeGraph | null {
+  if (!graph) return null;
+  const items = graph.items || [];
+  if (items.length === 0) return graph;
+
+  // 既然这是 v1 迁移，新图也允许 owner/location 同时为 undefined 的纯新建物品（无 belongs_to 边）
+  // 通过一个全集 false 的判断决定是否需要做迁移
+  const hasLegacyEdges = (graph.edges || []).some(e => e.type === 'belongs_to');
+  if (!hasLegacyEdges) return graph;
+
+  // 地点 id → 正式名
+  const locNameById = new Map<string, string>();
+  for (const l of graph.locations) locNameById.set(l.id, l.name);
+
+  let migratedCount = 0;
+  for (const item of items) {
+    // 幂等：item 任意一个新字段已被设置 → 跳过（迁移只设未设过新字段的情况）
+    if (item.owner !== undefined || item.location !== undefined || item.status !== undefined || item.statusDetail !== undefined) {
+      continue;
+    }
+    const edge = (graph.edges || []).find(e => e.type === 'belongs_to' && e.from === item.id);
+    if (!edge) continue;
+    const toName = locNameById.get(edge.to) || locNameById.get(buildStableId(edge.to)) || edge.to;
+    // to 是地点 id/正式名 → 视为放在某地
+    const isLocationTarget = !!locNameById.get(edge.to) || !!locNameById.get(buildStableId(edge.to))
+      || (graph.locations || []).some(l => l.name === edge.to || (l.aliases || []).includes(edge.to));
+    const parsed = parseLegacyState(edge.detail);
+    if (isLocationTarget) {
+      item.location = toName;
+      item.owner = item.owner; // 地点上的物品 owner 留空（保持 undefined）
+      item.status = parsed.status || 'placed';
+      item.statusDetail = parsed.detail || undefined;
+    } else {
+      // 视为角色持有
+      item.owner = toName;
+      item.location = toName;
+      item.status = parsed.status || 'owned';
+      item.statusDetail = parsed.detail || undefined;
+    }
+    item.existence = 'unique';
+    migratedCount++;
+  }
+
+  // 清理已迁移物品的旧 belongs_to 边（保留 contains/connected）
+  // 用 from 过滤：item 已经走迁移分支且现在带 owner/location 任一字段 → 该 from 的边可删
+  const migratedItemIds = new Set(items.filter(i => i.owner !== undefined || i.location !== undefined).map(i => i.id));
+  if (migratedItemIds.size > 0) {
+    const beforeLen = graph.edges.length;
+    graph.edges = graph.edges.filter(e =>
+      !(e.type === 'belongs_to' && migratedItemIds.has(e.from))
+    );
+    if (graph.edges.length !== beforeLen) {
+      // 边删除视为结构变化
+    }
+  }
+
+  if (migratedCount > 0) {
+    logInfo('知识图谱', `迁移物品归属字段: ${migratedCount} 条 belongs_to 边 → item.owner/location/status/statusDetail`);
+  }
+  return graph;
+}
+
+/**
+ * 离场降级（瞬时持有态失效）—— A 方案的核心。
+ *
+ * 背景：玩家离开场景后，图谱里"清月-held-剑"等瞬时持有态会被冻结。
+ * 即便清月天然没再拿剑（改拿书），图谱仍记着 held——因为玩家"没观测到"
+ * 不等于"她还在拿"。需要一轮兜底，把"不在场角色"身上的瞬时持有态清掉。
+ *
+ * 规则（粗粒度）：
+ * - 物品 status ∈ {held, worn, carried}（三种瞬时持有态）
+ * - 且 owner 非空、归一化后不在 presentCharacterNames 里
+ * - → status=undefined、statusDetail=undefined、location=owner
+ *   （语义：东西还在该角色那儿，但当下持有方式不明）
+ *
+ * 不动：
+ * - placed/stored/lost/owned（物理稳定或语义已收敛，没观测到也合理）
+ * - owner 为空的物品（地点上的物品归地点逻辑管，不归本轮降级）
+ * - embedding：textHash 变化走 lazy/手动重算过渡，不清向量避免每轮 API 重算
+ *
+ * presentCharacterNames：本轮在场角色正式名集合（presentCharacters ∪
+ * interactingCharacters，外部已组装，可含玩家名）。内部用 normalizeOwnerName
+ * 归一化作 key 比较。传 null/undefined/空集合 → 跳过（回滚分支用）。
+ *
+ * 与 B 方案（提示词让 AI 降级在场但未描述物品）作用域正交：A 只动"不在场"
+ * 角色，B 只动"在场但 AI 不再描述"的物品，两者不互相撤销。
+ */
+export function demoteAbsentItems(
+  graph: KnowledgeGraph | null,
+  presentCharacterNames: ReadonlySet<string> | string[] | null | undefined,
+): number {
+  if (!graph) return 0;
+  const items = graph.items || [];
+  if (items.length === 0) return 0;
+
+  // 组装归一化在场集合
+  const presentSet = new Set<string>();
+  if (Array.isArray(presentCharacterNames)) {
+    for (const n of presentCharacterNames) if (n) presentSet.add(normalizeOwnerName(n));
+  } else if (presentCharacterNames) {
+    for (const n of presentCharacterNames) if (n) presentSet.add(normalizeOwnerName(n));
+  }
+  if (presentSet.size === 0) return 0;
+
+  let demoted = 0;
+  for (const it of items) {
+    const st = it.status;
+    if (st !== 'held' && st !== 'worn' && st !== 'carried') continue;
+    const owner = it.owner;
+    if (!owner) continue;
+    if (presentSet.has(normalizeOwnerName(owner))) continue; // owner 在场 → 留给 AI/提示词 B
+    // 不在场 → 清瞬时持有态
+    it.status = undefined;
+    it.statusDetail = undefined;
+    it.location = owner;
+    demoted++;
+  }
+  if (demoted > 0) {
+    logInfo('知识图谱', `离场降级: ${demoted} 件不在场角色的瞬时持有态物品已清 status`);
+  }
+  return demoted;
 }

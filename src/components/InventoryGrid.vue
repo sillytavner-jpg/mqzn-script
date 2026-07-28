@@ -10,8 +10,7 @@
         :key="it.item.id"
         class="inv-slot inv-item"
         :class="{ consumed: it.item.consumed }"
-        :title="tooltip(it)"
-        @click="emit('edit', it)"
+        @click.stop.prevent="emit('edit', it)"
       >
         <span class="inv-name">{{ it.item.name }}</span>
         <span v-if="it.item.quantity" class="inv-qty">{{ formatQuantity(it.item.quantity) }}</span>
@@ -21,10 +20,10 @@
         v-for="n in emptyCount"
         :key="'empty-' + n"
         class="inv-slot inv-empty"
-        @click="emit('add')"
+        @click.stop.prevent="emit('add')"
       />
 
-      <div class="inv-slot inv-add" title="新增物品" @click="emit('add')">＋</div>
+      <div class="inv-slot inv-add" title="新增物品" @click.stop.prevent="emit('add')">＋</div>
     </div>
 
     <div v-if="pageCount > 1" class="inv-pagination">
@@ -70,7 +69,11 @@ function formatQuantity(q: string): string {
 function tooltip(it: OwnedItem): string {
   const lines = [it.item.name];
   if (it.item.quantity) lines.push(`数量：${it.item.quantity}`);
-  if (it.state) lines.push(`状态：${it.state}`);
+  if (it.item.owner) lines.push(`归属：${it.item.owner}`);
+  if (it.item.location && it.item.location !== it.item.owner) lines.push(`当前位置：${it.item.location}`);
+  if (it.item.status) lines.push(`方式：${it.item.status}`);
+  if (it.item.statusDetail) lines.push(`细节：${it.item.statusDetail}`);
+  else if (it.state) lines.push(`细节：${it.state}`);
   if (it.item.brief) lines.push(it.item.brief);
   if (it.item.consumed) lines.push('【已消耗】');
   return lines.join('\n');
@@ -117,10 +120,23 @@ function tooltip(it: OwnedItem): string {
   cursor: pointer;
   transition: all 0.15s ease;
   flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
 }
-.inv-slot:hover {
-  border-color: var(--zn-accent);
-  background: rgba(var(--zn-accent-rgb), 0.06);
+@media (hover: hover) {
+  .inv-slot:hover {
+    border-color: var(--zn-accent);
+    background: rgba(var(--zn-accent-rgb), 0.06);
+  }
+  .inv-slot:active {
+    transform: scale(0.97);
+  }
+}
+@media (hover: none) {
+  .inv-slot:active {
+    background: rgba(var(--zn-accent-rgb), 0.1);
+  }
 }
 
 .inv-item {
@@ -157,8 +173,10 @@ function tooltip(it: OwnedItem): string {
   border-style: dashed;
   opacity: 0.45;
 }
-.inv-empty:hover {
-  opacity: 0.75;
+@media (hover: hover) {
+  .inv-empty:hover {
+    opacity: 0.75;
+  }
 }
 
 .inv-add {
@@ -166,8 +184,10 @@ function tooltip(it: OwnedItem): string {
   font-size: 20px;
   font-weight: 300;
 }
-.inv-add:hover {
-  color: var(--zn-accent);
+@media (hover: hover) {
+  .inv-add:hover {
+    color: var(--zn-accent);
+  }
 }
 
 .inv-item.consumed {

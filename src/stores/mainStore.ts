@@ -3,7 +3,7 @@ import type { DreamtalkData } from '../core/dreamtalk';
 import type { WorldProgressCandidate, WorldProgressRecord } from '../core/worldProgress';
 import type { DynamicProfileV2 } from '../core/dynamicProfileV2';
 import type { ItemMemory } from '../core/itemMemory';
-import type { CodeLogEntry } from '../utils/logger';
+import { logWarn, type CodeLogEntry } from '../utils/logger';
 import { removeItemHistoryByVersion } from '../core/itemMemory';
 import type { KnowledgeGraph, KnowledgeGraphDiff, KnowledgeGraphEmbeddingCache } from '../core/knowledgeGraph';
 import {
@@ -11,16 +11,50 @@ import {
   computeLocationHopDistance,
   createEmptyKnowledgeGraph,
   createEmptyKnowledgeGraphEmbeddingCache,
+  demoteAbsentItems,
   ensureKnowledgeGraphEmbeddingCache,
   hydrateKnowledgeGraphEmbeddingsFromCache,
+  migrateItemPlacement,
   normalizeLegacyGraph,
   pruneKnowledgeGraphEmbeddingCache,
   stripEmbeddingsFromGraph,
   syncKnowledgeGraphEmbeddingCache,
 } from '../core/knowledgeGraph';
 import type { PlotOutline, PlotCheckResult } from '../core/plotDirector';
-import type { DistillRecord } from '../core/worldBookDistill';
 import type { WorldBookEntryInfo, WorldBookTagBinding } from '../core/worldBookTags';
+
+// ── 世界书蒸馏记录类型（原 core/worldBookDistill.ts 已整体删除，类型迁移至此） ──
+export interface DistillSection {
+  /** 原文汇编（可编辑） */
+  text: string;
+  /** 来源条目名（溯源） */
+  sourceEntries: string[];
+}
+
+export interface DistillCharacterSection {
+  characterName: string;
+  /** 该角色相关原文汇编（可编辑） */
+  text: string;
+  sourceEntries: string[];
+}
+
+export interface DistillRecord {
+  id: string;
+  /** 本次蒸馏读了哪几本书（标识+溯源） */
+  sourceBookNames: string[];
+  /** 若为角色卡世界书蒸馏，记角色卡名 */
+  sourceCharName?: string;
+  distillAt: number;
+  /** 世界观一块 */
+  worldView: DistillSection;
+  /** 每角色一条 */
+  characters: DistillCharacterSection[];
+  /** 解析失败的兜底原文（仅保留 AI 原始输出，不再混入错误文案） */
+  rawJson?: string;
+  /** 失败时的错误信息（与 rawJson 分离，避免错误文案被当成蒸馏内容） */
+  error?: string;
+  status: 'ready' | 'failed';
+}
 import { charBigramSimilarity, cosineSimilarity } from '../core/embedding';
 
 import { getCapturedContentMessageIds, getHiddenFloorsFromChat, type HiddenFloor } from '../core/floorVisibility';
@@ -32,8 +66,20 @@ import {
   cleanCharacterAliases as cleanCharacterAliasList,
   normalizeCharacterName as normalizeCharacterNameKey,
   resolveCharacterName as resolveCharacterNameFromEntries,
+  MEANINGLESS_ALIASES,
   type CharacterNameEntry,
 } from '../utils/characterNames';
+import {
+  buildRegistryFromEntries,
+  getRegistryStats,
+  mergeInRegistry,
+  renameInRegistry,
+  resolveOrPending,
+  type CharacterRegistry,
+  type CharacterRecord,
+  type PendingResolution,
+  type ResolveResult,
+} from '../core/characterRegistry';
 
 const KNOWLEDGE_GRAPH_VERSION_LIMIT = 6;
 const DREAMTALK_RECORD_LIMIT = 20;
@@ -266,8 +312,6 @@ export interface ChatData {
   nsfwMemories: NsfwCharacterMemory[];
   nsfwDreamtalk: NsfwDreamtalkData | null;
   nsfwDynamicProfiles: NsfwDynamicProfile[];
-  // 倒果为因（已废弃，保留字段兼容旧数据）
-  plotFate: any;
 
   // 世界推进记录
   worldProgressRecords: WorldProgressRecord[];
@@ -284,14 +328,6 @@ export interface ChatData {
   relationshipProfiles: RelationshipProfile[];
   // 剧情日期格式记忆（首次总结时从AI输出中提取，后续总结传给AI参考）
   storyDateFormat: string;
-  // 已忽略角色（用户手动删除的路人NPC，后续总结不再生成）
-  ignoredCharacters: string[];
-  // 忽略角色的数据备份（恢复时还原，避免角色消失）
-  _ignoredBackup: Array<{
-    name: string;
-    memories: CharacterMemory[];
-    profile: any | null;
-  }>;
   // 小总结记录
   smallSummaries: SmallSummaryRecord[];
   // 小总结间隔触发追踪（上一次触发小总结的轮对话楼层，-1=从未触发；第0层开场白单独算一轮）
@@ -346,6 +382,12 @@ export interface ChatData {
   characterProfiles: Record<string, CharacterProfile>;
   // 保存的角色设定历史（手动点"保存人设"按钮存入，可存多个版本）
   savedCharacterProfiles: Array<{ name: string; profile: CharacterProfile; savedAt: string }>;
+  // ===== 角色名字系统重构：稳定 ID 注册表（P1，唯一真相源）=====
+  // null=尚未从旧数据迁移；首次访问时由 ensureCharacterRegistry() lazy 建。
+  characterRegistry: CharacterRegistry | null;
+  // P2 写入收口：AI 输出的名字 resolve 不中（歧义/未知）时挂入此队列，
+  // 不再无脑 fallback 新建角色。待 P5 人工/规则仲裁。
+  pendingUnresolved: PendingResolution[];
 }
 
 // ========== 存储拆分：脚本变量（全局共享） ==========
@@ -486,8 +528,6 @@ const ChatDataSchema = z
     nsfwMemories: z.array(z.any()).prefault([]),
     nsfwDreamtalk: z.any().prefault(null),
     nsfwDynamicProfiles: z.array(z.any()).prefault([]),
-    // 倒果为因
-    plotFate: z.any().prefault(null),
 
     // 世界推进记录
     worldProgressRecords: z.array(z.any()).prefault([]),
@@ -500,18 +540,6 @@ const ChatDataSchema = z
     relationshipProfiles: z.array(z.any()).prefault([]),
     // 剧情日期格式
     storyDateFormat: z.string().prefault(''),
-    // 已忽略角色
-    ignoredCharacters: z.array(z.string()).prefault([]),
-    // 忽略角色数据备份
-    _ignoredBackup: z
-      .array(
-        z.object({
-          name: z.string(),
-          memories: z.array(z.any()),
-          profile: z.any().nullable(),
-        }),
-      )
-      .prefault([]),
     // 小总结记录
     smallSummaries: z.array(z.any()).prefault([]),
     // 小总结间隔触发追踪
@@ -557,6 +585,10 @@ const ChatDataSchema = z
     characterProfiles: z.record(z.any()).prefault({}),
     // 保存的角色设定历史
     savedCharacterProfiles: z.array(z.any()).prefault([]),
+    // 角色名字系统重构：稳定 ID 注册表（P1，唯一真相源）
+    characterRegistry: z.any().prefault(null),
+    // P2 写入收口：待仲裁的歧义/未知角色名队列
+    pendingUnresolved: z.array(z.any()).prefault([]),
   })
   .prefault({});
 
@@ -652,6 +684,8 @@ const ScriptSettingsSchema = z
         kgEmbeddingEnabled: z.boolean().prefault(true),
         kgEmbeddingDimensions: z.coerce.number().prefault(0), // 0 = 跟随全局 embeddingDimensions
         kgInjectTopK: z.coerce.number().prefault(40),
+        /** 每个角色（含玩家）当前可用物品的注入上限；0 = 不限制。 */
+        kgPerCharacterItemLimit: z.coerce.number().prefault(6),
         kgDiagramShowCharacters: z.boolean().prefault(true),
         // ===== A5.x 开关与间隔体系扩展 =====
         smallSummaryInterval: z.coerce.number().prefault(1),
@@ -664,6 +698,8 @@ const ScriptSettingsSchema = z
         worldProgressInjectionEnabled: z.boolean().prefault(true),
         plotGuidanceInjectionEnabled: z.boolean().prefault(true),
         nsfwIsolationEnabled: z.boolean().prefault(true),
+        // quiet/raw 调用注入守卫：解析变量/后台用途的调用（quiet/command/extension/impersonate 及 generateRaw）不注入智脑内容
+        quietInjectionGuard: z.boolean().prefault(true),
 // 世界书蒸馏结果
         distillRecords: z.array(z.any()).prefault([]),
       })
@@ -688,12 +724,6 @@ const SETTINGS_KEY = 'mqzn_settings';
 const STABLE_ID = 'mqzn-script-data';
 /** localStorage key for global settings */
 const SETTINGS_LOCAL_KEY = 'mqzn_global_settings';
-const STORAGE_DEBUG = false;
-
-function storageDebug(message: string, detail?: any): void {
-  if (STORAGE_DEBUG) console.info(message, detail);
-}
-
 /**
  * 聊天变量里的某项是否为"智脑聊天记录"形状（即一条 ChatData）。
  *
@@ -936,22 +966,14 @@ function writeChatMetadataCurrent(chatId: string, data: any): void {
   const ctx = getSillyTavernContext();
   const activeChatId = getActiveChatIdFromContext(ctx);
   if (!chatId || !activeChatId || activeChatId !== chatId) {
-    console.warn('[智脑存储] 写入跳过：当前聊天已切换或关闭', { targetChatId: chatId, activeChatId });
+    logWarn('智脑存储', '写入跳过：当前聊天已切换或关闭', { targetChatId: chatId, activeChatId });
     return;
   }
 
   const payload = { [chatId]: slimChatDataForPersist(data) };
   const payloadString = JSON.stringify(payload);
-  storageDebug('[智脑存储] 写入聊天变量', {
-    chatId,
-    bytes: payloadString.length,
-    hasLocalVariableApi: !!ctx?.variables?.local?.set,
-    hasMetadataApi: !!ctx?.updateChatMetadata,
-  });
-
   if (ctx?.variables?.local?.set && typeof ctx.variables.local.set === 'function') {
     ctx.variables.local.set(CHAT_DATA_KEY, payloadString);
-    storageDebug('[智脑存储] variables.local.set 已调用', { chatId });
   }
 
   if (ctx?.updateChatMetadata && typeof ctx.updateChatMetadata === 'function') {
@@ -965,7 +987,6 @@ function writeChatMetadataCurrent(chatId: string, data: any): void {
     // 读取侧 extractChatMetadataRecords 优先读 variables 内的字符串副本①，
     // 顶层③仅作①parse 失败时的回退；放弃这层冗余换 ~50% metadata 体积瘦身。
     ctx.updateChatMetadata({ variables, tainted: true }, false);
-    storageDebug('[智脑存储] updateChatMetadata 已调用', { chatId });
 
     // ⭐ 主动清理顶层旧的副本③残留：updateChatMetadata 是浅合并，不传 [CHAT_DATA_KEY]
     // 只是不写新的、不会删旧的。这里持同一 chatMetadata 引用直接 delete，
@@ -981,14 +1002,13 @@ function writeChatMetadataCurrent(chatId: string, data: any): void {
 
   const metadata = getCurrentChatMetadata();
   if (!metadata) {
-    console.warn('[智脑存储] 写入跳过：当前聊天 metadata 不存在', { chatId });
+    logWarn('智脑存储', '写入跳过：当前聊天 metadata 不存在', { chatId });
     return;
   }
   if (!metadata.variables || typeof metadata.variables !== 'object') metadata.variables = {};
   metadata.variables[CHAT_DATA_KEY] = payloadString;
   metadata[CHAT_DATA_KEY] = payload;
   metadata.tainted = true;
-  storageDebug('[智脑存储] fallback metadata 已写入', { chatId });
 }
 
 function buildCurrentMetadataSnapshot(): Record<string, any> {
@@ -1000,12 +1020,12 @@ async function forceSaveCurrentChatMetadata(targetChatId: string): Promise<void>
   const ctx = getSillyTavernContext();
   const activeChatId = getActiveChatIdFromContext(ctx);
   if (!targetChatId || !activeChatId || activeChatId !== targetChatId) {
-    console.warn('[智脑存储] 强制保存跳过：当前聊天已切换或关闭', { targetChatId, activeChatId });
+    logWarn('智脑存储', '强制保存跳过：当前聊天已切换或关闭', { targetChatId, activeChatId });
     return;
   }
 
   if (!ctx?.getRequestHeaders || !Array.isArray(ctx.chat)) {
-    console.warn('[智脑存储] 强制保存跳过：SillyTavern 上下文不完整', {
+    logWarn('智脑存储', '强制保存跳过：SillyTavern 上下文不完整', {
       hasHeaders: !!ctx?.getRequestHeaders,
       hasChatArray: Array.isArray(ctx?.chat),
     });
@@ -1026,14 +1046,9 @@ async function forceSaveCurrentChatMetadata(targetChatId: string): Promise<void>
       const group = Array.isArray(ctx.groups) ? ctx.groups.find((x: any) => x.id === ctx.groupId) : null;
       const chatId = group?.chat_id || ctx.chatId;
       if (!chatId) {
-        console.warn('[智脑存储] 强制保存群聊跳过：找不到 chatId', { groupId: ctx.groupId });
+        logWarn('智脑存储', '强制保存群聊跳过：找不到 chatId', { groupId: ctx.groupId });
         return;
       }
-      storageDebug('[智脑存储] 开始强制保存群聊', {
-        chatId,
-        messageCount: ctx.chat.length,
-        metadataBytes,
-      });
       const response = await fetch('/api/chats/group/save', {
         method: 'POST',
         headers: ctx.getRequestHeaders(),
@@ -1045,9 +1060,8 @@ async function forceSaveCurrentChatMetadata(targetChatId: string): Promise<void>
       });
       if (!response.ok) {
         const detail = await response.text().catch(() => '');
-        console.warn('[智脑] 强制保存群聊 metadata 接口失败', response.status, detail);
+        logWarn('智脑', '强制保存群聊 metadata 接口失败', JSON.stringify({ status: response.status, detail }));
       } else {
-        storageDebug('[智脑存储] 强制保存群聊完成', { chatId, status: response.status });
       }
       return;
     }
@@ -1055,18 +1069,12 @@ async function forceSaveCurrentChatMetadata(targetChatId: string): Promise<void>
     const character = Array.isArray(ctx.characters) ? ctx.characters[ctx.characterId] : null;
     const fileName = character?.chat || ctx.chatId;
     if (!character || !fileName) {
-      console.warn('[智脑存储] 强制保存单聊跳过：找不到角色或聊天文件', {
+      logWarn('智脑存储', '强制保存单聊跳过：找不到角色或聊天文件', {
         characterId: ctx.characterId,
         fileName,
       });
       return;
     }
-    storageDebug('[智脑存储] 开始强制保存单聊', {
-      fileName,
-      characterName: character.name,
-      messageCount: ctx.chat.length,
-      metadataBytes,
-    });
     const response = await fetch('/api/chats/save', {
       method: 'POST',
       cache: 'no-cache',
@@ -1081,12 +1089,11 @@ async function forceSaveCurrentChatMetadata(targetChatId: string): Promise<void>
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
-      console.warn('[智脑] 强制保存聊天 metadata 接口失败', response.status, detail);
+      logWarn('智脑', '强制保存聊天 metadata 接口失败', JSON.stringify({ status: response.status, detail }));
     } else {
-      storageDebug('[智脑存储] 强制保存单聊完成', { fileName, status: response.status });
     }
   } catch (error) {
-    console.warn('[智脑] 强制保存聊天 metadata 失败', error);
+    logWarn('智脑', '强制保存聊天 metadata 失败', error);
   }
 }
 
@@ -1095,7 +1102,7 @@ function requestChatMetadataSave(targetChatId: string): void {
     const ctx = getSillyTavernContext();
     const activeChatId = getActiveChatIdFromContext(ctx);
     if (!targetChatId || !activeChatId || activeChatId !== targetChatId) {
-      console.warn('[智脑存储] 保存跳过：当前聊天已切换或关闭', { targetChatId, activeChatId });
+      logWarn('智脑存储', '保存跳过：当前聊天已切换或关闭', { targetChatId, activeChatId });
       return;
     }
 
@@ -1104,38 +1111,29 @@ function requestChatMetadataSave(targetChatId: string): void {
       metadata.tainted = true;
     }
     const saveOfficial = ctx?.saveMetadata || ctx?.saveChat;
-    storageDebug('[智脑存储] 触发保存链路', {
-      hasOfficialSave: typeof saveOfficial === 'function',
-      hasMetadata: !!metadata,
-      targetChatId,
-      activeChatId,
-    });
     const result = typeof saveOfficial === 'function' ? saveOfficial.call(ctx) : null;
     if (result && typeof result.then === 'function') {
       result
         .then(() => {
-          storageDebug('[智脑存储] 官方保存完成');
         })
         .catch((error: any) => {
-          console.warn('[智脑] 聊天变量保存失败', error);
+          logWarn('智脑', '聊天变量保存失败', error);
         });
     } else if (typeof saveOfficial === 'function') {
-      storageDebug('[智脑存储] 官方保存已触发（同步返回）');
     } else {
-      console.warn('[智脑存储] 官方保存函数不存在，将只尝试强制保存');
+      logWarn('智脑存储', '官方保存函数不存在，将只尝试强制保存');
       setTimeout(() => {
         const delayedCtx = getSillyTavernContext();
         const delayedActiveChatId = getActiveChatIdFromContext(delayedCtx);
         if (!targetChatId || !delayedActiveChatId || delayedActiveChatId !== targetChatId) {
-          console.warn('[智脑存储] 延迟强制保存跳过：当前聊天已切换或关闭', { targetChatId, activeChatId: delayedActiveChatId });
+          logWarn('智脑存储', '延迟强制保存跳过：当前聊天已切换或关闭', { targetChatId, activeChatId: delayedActiveChatId });
           return;
         }
-        storageDebug('[智脑存储] 触发延迟强制保存');
         forceSaveCurrentChatMetadata(targetChatId);
       }, 250);
     }
   } catch (error) {
-    console.warn('[智脑] 触发聊天变量保存失败', error);
+    logWarn('智脑', '触发聊天变量保存失败', error);
   }
 }
 
@@ -1149,7 +1147,7 @@ function writeChatScopeCurrent(chatId: string, data: any): void {
   const ctx = getSillyTavernContext();
   const activeChatId = getActiveChatIdFromContext(ctx);
   if (!chatId || !activeChatId || activeChatId !== chatId) {
-    console.warn('[智脑存储] 写入跳过：当前聊天已切换或关闭', { targetChatId: chatId, activeChatId });
+    logWarn('智脑存储', '写入跳过：当前聊天已切换或关闭', { targetChatId: chatId, activeChatId });
     return;
   }
   writeChatMetadataCurrent(chatId, data);
@@ -1172,7 +1170,7 @@ function writeChatScopeCurrent(chatId: string, data: any): void {
     }
     replaceVariables(next, { type: 'chat' });
   } catch (error) {
-    console.warn('[智脑] 兼容写入聊天变量失败，已写入官方 chatMetadata', error);
+    logWarn('智脑', '兼容写入聊天变量失败，已写入官方 chatMetadata', error);
   }
   requestChatMetadataSave(chatId);
 }
@@ -1242,7 +1240,7 @@ function tryReadData(currentScriptId: string, currentChatId: string): {
   const hasScriptSettings = settings && Object.keys(settings).length > 0;
 
   if (!currentChatId) {
-    console.warn('[智脑存储] 初始化读取跳过：当前没有聊天 id', {
+    logWarn('智脑存储', '初始化读取跳过：当前没有聊天 id', {
       chatVarKeys: primaryChat && typeof primaryChat === 'object' ? Object.keys(primaryChat) : [],
       stableRecordKeys: Object.keys(stableAllChats),
     });
@@ -1265,18 +1263,6 @@ function tryReadData(currentScriptId: string, currentChatId: string): {
   let currentChatInChatScope = Object.prototype.hasOwnProperty.call(chatRecords, currentChatId);
   const currentChatInStableBackup = Object.prototype.hasOwnProperty.call(stableAllChats, currentChatId);
   const stableCurrentChatData = stableAllChats[currentChatId];
-  storageDebug('[智脑存储] 初始化读取', {
-    currentChatId,
-    chatVarKeys: primaryChat && typeof primaryChat === 'object' ? Object.keys(primaryChat) : [],
-    variableRecordKeys: Object.keys(variableChatRecords),
-    metadataRecordKeys: Object.keys(metadataChatRecords),
-    stableRecordKeys: Object.keys(stableAllChats),
-    currentChatInChatScope,
-    currentChatInStableBackup,
-    currentHasPayload: hasChatPayload(chatRecords[currentChatId]),
-    stableHasPayload: hasChatPayload(stableCurrentChatData),
-  });
-
   // 是否为旧版"多聊天合并"格式：里面有>1个 key 且都是 ChatData 形状 → 需一次性瘦身迁移
   // （新格式下 type:'chat' 只含当前聊天单条，key 数应 = 1 或 0）
   const needsMultiChatSlim = Object.keys(variableChatRecords).length > 1;
@@ -1311,10 +1297,6 @@ function tryReadData(currentScriptId: string, currentChatId: string): {
         delete merged[adoptKey];
         merged[currentChatId] = relocated;
         currentChatInChatScope = true; // 认领后当前聊天已在 chatRecords 中
-        storageDebug('[智脑存储] 导入聊天 chatId 错位已认领', {
-          oldKey: adoptKey,
-          newKey: currentChatId,
-        });
       }
     }
   }
@@ -1424,7 +1406,7 @@ export const useMainStore = defineStore('main', () => {
       if (hasChatPayload(migrationCurrent)) {
         writeChatScopeCurrent(currentChatId, migrationCurrent);
       } else {
-        console.warn('[智脑存储] 初始化迁移跳过空数据回写', {
+        logWarn('智脑存储', '初始化迁移跳过空数据回写', {
           currentChatId,
           hasCurrentRecord: Object.prototype.hasOwnProperty.call(allChatsData.value, currentChatId),
           allKeys: Object.keys(allChatsData.value),
@@ -1581,6 +1563,8 @@ export const useMainStore = defineStore('main', () => {
     return true;
   }
 
+  // quiet 守卫已改为直接读 CC_SR payload.type（见 index.ts），不再需要预标记。
+
   // API 监听器日志（运行时，不持久化，最多5条）
   interface ApiMonitorEntry {
     timestamp: string;
@@ -1697,14 +1681,10 @@ export const useMainStore = defineStore('main', () => {
         chatData.value = parsed;
         allChatsData.value = { ...(allChatsData.value ?? {}), ...reread.allChatsData, [currentChatId]: parsed };
         _startupEmptyReadProtection = false;
-        storageDebug('[智脑存储] 空读启动保护：延迟读回聊天数据', {
-          currentChatId,
-          recoveredBytes: JSON.stringify(recovered).length,
-        });
         return true;
       }
     } catch (error) {
-      console.warn('[智脑存储] 空读启动保护：延迟读取失败', error);
+      logWarn('智脑存储', '空读启动保护：延迟读取失败', error);
     }
     return false;
   }
@@ -1752,7 +1732,7 @@ export const useMainStore = defineStore('main', () => {
       const strongPayload = hasStrongChatPayload(persistCopy);
       const bytes = JSON.stringify(persistCopy).length;
       if (!strongPayload || elapsedMs < 5000) {
-        console.warn('[智脑存储] 空读启动保护：跳过空壳写回', {
+        logWarn('智脑存储', '空读启动保护：跳过空壳写回', {
           currentChatId,
           elapsedMs,
           strongPayload,
@@ -1767,7 +1747,7 @@ export const useMainStore = defineStore('main', () => {
         return;
       }
       _startupEmptyReadProtection = false;
-      console.warn('[智脑存储] 空读启动保护：等待窗口结束，允许新内容写回', {
+      logWarn('智脑存储', '空读启动保护：等待窗口结束，允许新内容写回', {
         currentChatId,
         elapsedMs,
         bytes,
@@ -1880,6 +1860,8 @@ export const useMainStore = defineStore('main', () => {
   const capturedContents = computed(() => chatData.value.capturedContents);
   const summaries = computed(() => chatData.value.summaries);
   const dynamicProfiles = computed(() => chatData.value.dynamicProfiles || []);
+  const characterRegistry = computed(() => chatData.value.characterRegistry);
+  const pendingUnresolved = computed(() => chatData.value.pendingUnresolved || []);
   const dreamtalk = computed(() => chatData.value.dreamtalk);
   const userInputRecords = computed(() => chatData.value.userInputRecords);
   const lastSummaryAtMessageId = computed(() => chatData.value.lastSummaryAtMessageId);
@@ -2038,9 +2020,6 @@ export const useMainStore = defineStore('main', () => {
       }
     }
 
-    // 过滤已忽略角色
-    const ignored = new Set(chatData.value.ignoredCharacters.map(normalizeMemoryCharacterName));
-    summary.characterMemories = summary.characterMemories.filter(m => !ignored.has(normalizeMemoryCharacterName(m.characterName)));
     // 过滤用户自身（AI偶尔误生成user的记忆条目）
     summary.characterMemories = summary.characterMemories.filter(m => {
       const isUser = isUserCharacterName(m.characterName);
@@ -2403,10 +2382,7 @@ export const useMainStore = defineStore('main', () => {
         }
       }
       if (!memsEmpty) {
-        // 过滤掉已忽略角色
-        const ignored = new Set(chatData.value.ignoredCharacters.map(normalizeMemoryCharacterName));
-        summary.characterMemories = normalizeIncomingCharacterMemories(parsed.characterMemories)
-          .filter(m => !ignored.has(normalizeMemoryCharacterName(m.characterName)));
+        summary.characterMemories = normalizeIncomingCharacterMemories(parsed.characterMemories);
         summary.characterTable = normalizeIncomingCharacterTable(parsed.characterTable);
       }
 
@@ -3117,7 +3093,6 @@ export const useMainStore = defineStore('main', () => {
     const normName = normalizeMemoryCharacterName(name);
     if (!normName) return null;
     if (normName === normalizeMemoryCharacterName(userName) || normName === 'user') return null;
-    if ((chatData.value.ignoredCharacters || []).some(n => normalizeMemoryCharacterName(n) === normName)) return null;
 
     const profile = chatData.value.characterProfiles?.[name] || chatData.value.characterProfiles?.[normName];
     const fused = mem ? getFusedMemories(name, undefined, undefined, undefined, '') : [];
@@ -3686,9 +3661,8 @@ export const useMainStore = defineStore('main', () => {
     return norm === userNorm || norm === 'user' || norm === normalizeMemoryCharacterName('{{user}}').toLowerCase();
   }
 
-  function getCharacterNameEntries(options: { includeIgnored?: boolean; includeUser?: boolean } = {}): CharacterNameEntry[] {
+  function getCharacterNameEntries(options: { includeUser?: boolean } = {}): CharacterNameEntry[] {
     const byNorm = new Map<string, { name: string; aliases: Set<string> }>();
-    const ignored = new Set((chatData.value.ignoredCharacters || []).map(normalizeMemoryCharacterName).filter(Boolean));
     const sameLookupName = (a?: string, b?: string) => {
       const rawA = String(a || '').trim();
       const rawB = String(b || '').trim();
@@ -3720,8 +3694,7 @@ export const useMainStore = defineStore('main', () => {
       const norm = normalizeMemoryCharacterName(rawName);
       if (!rawName || !norm) return;
       if (!options.includeUser && isUserCharacterName(originalName || rawName)) return;
-      if (!options.includeIgnored && ignored.has(norm)) return;
-      const existing = findExistingEntry(rawName, [originalName, ...aliases]);
+      const existing = findExistingEntry(rawName, [originalName, ...aliases.filter(a => !MEANINGLESS_ALIASES.has(a))]);
       const entry = existing || { name: rawName, aliases: new Set<string>() };
       if (existing && normalizeMemoryCharacterName(entry.name) !== norm) entry.aliases.add(rawName);
       for (const alias of cleanCharacterAliases([originalName, ...aliases], entry.name)) entry.aliases.add(alias);
@@ -3791,15 +3764,112 @@ export const useMainStore = defineStore('main', () => {
       .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
   }
 
+  /**
+   * 从现有 13+ 处存储点的角色名收集结果，一次性迁移建注册表。
+   * 聚类策略保守：归一化后严格相等才合并为一个 record（宁可多建 id 也不错并）。
+   * P1 阶段：纯增量，不改任何读写路径。
+   */
+  function buildRegistryFromExistingData(): CharacterRegistry {
+    const entries = getCharacterNameEntries({ includeUser: true });
+    // preferredNames：characterMemories 里已确立的主名（用户/AI 已在用）
+    // 迁移时优先作 primaryName，避免"主名变排序先到的陌生名字"，保证发给 AI 的名字稳定
+    const preferredNames = new Set<string>();
+    const addPreferred = (name?: string) => {
+      const n = normalizeMemoryCharacterName(name || '');
+      if (n) preferredNames.add(n);
+    };
+    for (const mem of chatData.value.characterMemories || []) addPreferred(mem.characterName);
+    const latest = getLatestSummary();
+    for (const mem of latest?.characterMemories || []) addPreferred(mem.characterName);
+    for (const delta of chatData.value.summaries || []) {
+      for (const mem of delta.characterMemories || []) addPreferred(mem.characterName);
+    }
+    const registry = buildRegistryFromEntries(entries, preferredNames);
+    const stats = getRegistryStats(registry);
+    pushCodeLog({
+      id: _codeLogIdCounter++,
+      timestamp: new Date().toISOString(),
+      module: '存储',
+      level: 'info',
+      message: `角色注册表迁移完成：${stats.total} 角色（active ${stats.active}）`,
+    });
+    return registry;
+  }
+
+  /**
+   * 确保角色注册表已构建（lazy 初始化）。
+   * 旧存档无此字段（prefault=null），首次访问时从现有数据迁移建表，迁移后随 chatData 自动持久化。
+   * P1 阶段：供调试/后续阶段使用，现有读写路径暂不调用。
+   */
+  function ensureCharacterRegistry(): CharacterRegistry {
+    if (!chatData.value.characterRegistry) {
+      chatData.value.characterRegistry = buildRegistryFromExistingData();
+      doPersist();
+    }
+    return chatData.value.characterRegistry;
+  }
+
+  /**
+   * P5: 把 pendingUnresolved 中的某 rawName 归到指定角色（或新建）。
+   * 仲裁后该项从队列移除。characterId 留空=忽略该 rawName（不再提示）。
+   */
+  function resolvePendingCharacter(rawName: string, characterId?: string): void {
+    if (!chatData.value.pendingUnresolved) return;
+    const normRaw = normalizeMemoryCharacterName(rawName);
+    chatData.value.pendingUnresolved = chatData.value.pendingUnresolved.filter(
+      p => normalizeMemoryCharacterName(p.rawName) !== normRaw,
+    );
+    if (characterId) {
+      // 标记该 rawName 已归入 characterId（下次 AI 写入时 resolveOrPending 应能命中）
+      // 这里不主动改 registry aliases（resolveKnownCharacterName 已能通过 primaryName 仲裁），
+      // 仅清队列让用户裁决生效。如需把 rawName 加到该角色 aliases，用现有改名/合并 UI。
+    }
+    doPersist();
+  }
+
+  /** P5: 清空全部 pendingUnresolved（用户已批量处理或想忽略提示） */
+  function clearAllPendingUnresolved(): void {
+    if (chatData.value.pendingUnresolved?.length) {
+      chatData.value.pendingUnresolved = [];
+      doPersist();
+    }
+  }
+
   function resolveKnownCharacterName(rawName: string, fallbackToNormalized = false): string {
     const raw = String(rawName || '').trim();
     if (!raw) return '';
     if (isUserCharacterName(raw)) return getUserName();
+    // P3 读取收口：优先用 registry 按 id 仲裁（解决原 buildCharacterNameIndex "先注册先占" 的别名录错传染）
+    // registry 为空时回退原逻辑（双轨兜底，保证旧存档/未迁移时不崩）
+    const registry = chatData.value.characterRegistry;
+    if (registry && registry.records && Object.keys(registry.records).length > 0) {
+      const result = resolveOrPending(raw, registry);
+      if (result.status === 'resolved' && result.record) {
+        return result.record.primaryName;
+      }
+      // ambiguous/unknown → 回退原逻辑兜底（仍走"先注册先占"，但 P2 已记录到 pendingUnresolved）
+    }
     return resolveCharacterNameFromEntries(
       raw,
-      getCharacterNameEntries({ includeIgnored: true, includeUser: true }),
+      getCharacterNameEntries({ includeUser: true }),
       fallbackToNormalized,
     );
+  }
+
+  /**
+   * P3 读取收口：用名字解析到稳定 characterId。
+   * 返回空串表示未命中（registry 未建或该名未知/歧义）。
+   * 供 P4 改名/合并、UI 选中态使用。
+   */
+  function resolveKnownCharacterId(rawName: string): string {
+    const raw = String(rawName || '').trim();
+    if (!raw) return '';
+    if (isUserCharacterName(raw)) return '__zhino_user__';
+    const registry = chatData.value.characterRegistry;
+    if (!registry || !registry.records) return '';
+    const result = resolveOrPending(raw, registry);
+    if (result.status === 'resolved' && result.record) return result.record.id;
+    return '';
   }
 
   function resolveKnownCharacterNames(names: string[] | undefined, fallbackToNormalized = false): string[] {
@@ -3815,26 +3885,86 @@ export const useMainStore = defineStore('main', () => {
     return result;
   }
 
+  /**
+   * P2 写入收口：把 AI 输出的歧义/未知角色名挂入 pendingUnresolved 队列。
+   * 同 rawName 多次出现只累加 count，候选随 registry 更新刷新。
+   */
+  function pushPendingUnresolved(
+    rawName: string,
+    result: ResolveResult,
+    mem: CharacterMemory,
+  ) {
+    if (!chatData.value.pendingUnresolved) chatData.value.pendingUnresolved = [];
+    const queue = chatData.value.pendingUnresolved;
+    const normRaw = normalizeMemoryCharacterName(rawName);
+    const existing = queue.find(p => normalizeMemoryCharacterName(p.rawName) === normRaw);
+    const nowIso = new Date().toISOString();
+    const snippet = String(
+      (mem.recentMemories?.[0])
+        || (typeof (mem.coreMemories?.[0] as any) === 'object' ? (mem.coreMemories?.[0] as any)?.text : (mem.coreMemories?.[0] as any))
+        || '',
+    ).slice(0, 60);
+    if (existing) {
+      existing.count++;
+      existing.lastSeenAt = nowIso;
+      if (snippet) existing.snippet = snippet;
+      existing.candidateIds = result.candidateIds;
+      existing.candidateNames = result.candidateNames;
+    } else {
+      queue.push({
+        rawName,
+        candidateIds: result.candidateIds,
+        candidateNames: result.candidateNames,
+        firstSeenAt: nowIso,
+        lastSeenAt: nowIso,
+        count: 1,
+        snippet,
+      });
+    }
+  }
+
+  /**
+   * P2 写入收口：AI 输出的角色记忆归并入库。
+   * - resolved（命中唯一角色）→ 按 characterId 归并，mem 标记 _characterId
+   * - ambiguous/unknown → 旧 fallback 逻辑入库（不丢数据）+ 挂入 pendingUnresolved 队列
+   * 双轨期：resolved 的同时保留 characterName（兼容旧读取）+ 加 _characterId（P3/P4 用）。
+   */
   function normalizeIncomingCharacterMemories(memories: CharacterMemory[] = []): CharacterMemory[] {
-    const byNorm = new Map<string, CharacterMemory>();
+    const registry = ensureCharacterRegistry();
+    const byKey = new Map<string, CharacterMemory>();
     for (const rawMem of memories) {
       const mem = normalizeCharacterMemoryArrays(rawMem);
       const rawName = mem.characterName;
-      const canonical = resolveKnownCharacterName(rawName, true);
-      if (!canonical) continue;
-      mem.characterName = canonical;
-      mem.aliases = cleanCharacterAliases([
-        ...(mem.aliases || []),
-        rawName,
-      ], canonical);
+      const result = resolveOrPending(rawName, registry);
 
-      const key = normalizeMemoryCharacterName(canonical);
-      const existing = byNorm.get(key);
+      let canonical: string;
+      let mergeKey: string;
+
+      if (result.status === 'resolved' && result.record) {
+        canonical = result.record.primaryName;
+        mergeKey = `id:${result.record.id}`;
+        mem.characterName = canonical;
+        mem.aliases = cleanCharacterAliases([...(mem.aliases || []), rawName], canonical);
+        (mem as any)._characterId = result.record.id;
+      } else {
+        canonical = resolveKnownCharacterName(rawName, true);
+        if (!canonical) continue;
+        mergeKey = `name:${normalizeMemoryCharacterName(canonical)}`;
+        mem.characterName = canonical;
+        mem.aliases = cleanCharacterAliases([...(mem.aliases || []), rawName], canonical);
+        pushPendingUnresolved(rawName, result, mem);
+      }
+
+      const existing = byKey.get(mergeKey);
       if (!existing) {
-        byNorm.set(key, mem);
+        byKey.set(mergeKey, mem);
         continue;
       }
 
+      // resolved 的 _characterId 优先保留（旧条目可能没标）
+      if ((mem as any)._characterId && !(existing as any)._characterId) {
+        (existing as any)._characterId = (mem as any)._characterId;
+      }
       existing.aliases = cleanCharacterAliases([...(existing.aliases || []), ...(mem.aliases || [])], existing.characterName);
       existing.keywords = [...new Set([...(existing.keywords || []), ...(mem.keywords || [])])];
       const coreSeen = new Set((existing.coreMemories || []).map((c: any) => typeof c === 'string' ? c : c?.text || ''));
@@ -3862,7 +3992,7 @@ export const useMainStore = defineStore('main', () => {
       }
       (existing as any).orderedNewMemories = ordered;
     }
-    return [...byNorm.values()];
+    return [...byKey.values()];
   }
 
   function normalizeIncomingCharacterTable(table: CharacterEntry[] = []): CharacterEntry[] {
@@ -4128,6 +4258,61 @@ export const useMainStore = defineStore('main', () => {
     else touchAssembled();
     _fusedCache.clear();
     forcePersist();
+    return true;
+  }
+
+  /**
+   * 手动新建角色：写入空 CharacterMemory 到顶层 characterMemories（最权威的"角色存在"标记），
+   * 可选写入所在地（复用 setCharacterLocation，同步 characterLocations 字典 + graph.characters[].location 两层）。
+   * 名称/别名命中已有角色则拒绝（避免重复）。
+   */
+  function addCharacter(name: string, aliases: string[] = [], locationName?: string): boolean {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return false;
+    const canonical = resolveKnownCharacterName(trimmed, true);
+    const normName = normalizeMemoryCharacterName(canonical || trimmed);
+    if (!normName) return false;
+
+    // 查重：主名或别名命中已有角色则拒绝
+    const existingByNorm = findCharacterMemoryByName(chatData.value.characterMemories, canonical || trimmed)
+      || findCharacterMemoryByName(chatData.value.characterMemories, normName);
+    if (existingByNorm) {
+      pushCodeLog({
+        id: _codeLogIdCounter++,
+        timestamp: new Date().toISOString(),
+        module: '存储',
+        level: 'warn',
+        message: `新建角色失败：已存在同名角色「${existingByNorm.characterName}」`,
+      });
+      return false;
+    }
+
+    const cleanedAliases = cleanCharacterAliases(aliases, canonical || trimmed);
+    const mem = normalizeCharacterMemoryArrays({
+      characterName: canonical || trimmed,
+      aliases: cleanedAliases,
+      attitude: 'neutral',
+      coreMemories: [],
+      recentMemories: [],
+      keywords: [],
+      orderedNewMemories: [],
+    });
+    (mem as any)._manuallyEdited = true;
+    chatData.value.characterMemories.push(mem);
+
+    if (locationName && String(locationName).trim()) {
+      setCharacterLocation(canonical || trimmed, String(locationName).trim());
+    }
+
+    rebuildAssembled();
+    forcePersist({ settings: false });
+    pushCodeLog({
+      id: _codeLogIdCounter++,
+      timestamp: new Date().toISOString(),
+      module: '存储',
+      level: 'info',
+      message: `已手动新建角色: ${canonical || trimmed}${cleanedAliases.length ? `（别名: ${cleanedAliases.join('、')}）` : ''}${locationName ? ` @ ${locationName}` : ''}`,
+    });
     return true;
   }
 
@@ -4478,17 +4663,6 @@ export const useMainStore = defineStore('main', () => {
     for (const summary of chatData.value.smallSummaries || []) {
       summary.presentCharacters = rewriteNameList(summary.presentCharacters);
     }
-    chatData.value.ignoredCharacters = rewriteNameList(chatData.value.ignoredCharacters);
-    for (const backup of chatData.value._ignoredBackup || []) {
-      if (matchesSource(backup.name)) backup.name = targetName;
-      for (const mem of backup.memories || []) {
-        if (matchesSource(mem.characterName)) mem.characterName = targetName;
-        mem.aliases = cleanCharacterAliases([...(mem.aliases || []), sourceName], targetName);
-      }
-      if (backup.profile?.characterName && matchesSource(backup.profile.characterName)) {
-        backup.profile.characterName = targetName;
-      }
-    }
 
     const rewriteCharacterTable = (table: CharacterEntry[] = []) =>
       table
@@ -4586,6 +4760,13 @@ export const useMainStore = defineStore('main', () => {
         seenBelongsTo.add(key);
         return true;
       });
+      // 6c-3 物品新字段同步：item.owner / item.location 指向副角色名的，改写为主角色名
+      ng.items = (ng.items || []).map(it => {
+        const newOwner = matchesSource(it.owner) || it.owner === sourceId ? targetName : it.owner;
+        const newLocation = matchesSource(it.location) || it.location === sourceId ? targetName : it.location;
+        if (newOwner === it.owner && newLocation === it.location) return it;
+        return { ...it, owner: newOwner, location: newLocation };
+      });
       return ng;
     };
     chatData.value.knowledgeGraph = rewriteGraph(chatData.value.knowledgeGraph);
@@ -4599,6 +4780,26 @@ export const useMainStore = defineStore('main', () => {
 
     // 强制触发 Vue 响应式更新：替换所有 delta 引用，确保 assembledSummary 重算
     chatData.value.summaries = chatData.value.summaries.map(d => ({ ...d }));
+
+    // P4: 同步 registry 成真相源（13 处字符串替换完成后，registry 与快照双轨一致）
+    // rename 模式：source(旧主名) 的 record 改 primaryName 为 target(新名)，旧名自动进 aliases
+    // merge 模式：source(副角色) 标记 mergedInto target，source 主名+别名并入 target aliases
+    // —— 从 registry 层面保证"改名旧名进别名""合并副角色名进主角色别名"必定生效
+    const _registry = chatData.value.characterRegistry;
+    if (_registry && _registry.records) {
+      if (mode === 'rename') {
+        const sourceId = resolveKnownCharacterId(sourceName);
+        if (sourceId) {
+          renameInRegistry(_registry, sourceId, targetName);
+        }
+      } else {
+        const targetId = resolveKnownCharacterId(targetName);
+        const sourceId = resolveKnownCharacterId(sourceName);
+        if (targetId && sourceId) {
+          mergeInRegistry(_registry, targetId, sourceId);
+        }
+      }
+    }
 
     // 持久化
     doPersist();
@@ -4631,91 +4832,168 @@ export const useMainStore = defineStore('main', () => {
     const newNorm = normalizeMemoryCharacterName(newNormed);
     if (!oldNorm || !newNorm || oldNorm === newNorm) return false;
     // 撞名校验：判断"新名"是否被角色库里【除了本角色以外】的其它角色占用了主名或别名。
-    //   resolveKnownCharacterName 会把新名归一成某个已有角色的主名；这里区分两种"命中本角色"：
-    //     (a) 命中 oldCanonical 的主名本身 — 新名归一后就是本角色主名（unlikely，前面已挡 oldNorm===newNorm）；
-    //     (b) 命中 oldCanonical 的某条别名 — 即"把别名提升为主名"，这是合法改名，允许。
-    //   上面两种都应放行；命中别的角色才拒绝、引导用户用合并功能。
-    //   注意：此处必须用 fallback=false（默认）。fallback=true 在未命中时会回退返回新名自身的归一化值，
-    //   永远非空，导致永远被判为"撞别人"——改名改成任何字都失败。
+    //   resolveKnownCharacterName(newNormed) 默认 fallback=false，未命中时返回 newNormed 原文（非空），
+    //   不能直接据其非空判为"撞别人"。正确判法：解析结果若等于新名自身归一化 → 未命中既有角色 → 放行；
+    //   若命中某既有角色且其主名归一化≠本角色 oldNorm → 撞别人 → 拒绝。
     const resolvedNew = resolveKnownCharacterName(newNormed);
-    if (resolvedNew && normalizeMemoryCharacterName(resolvedNew) !== oldNorm) return false;
+    const resolvedIsSelf = normalizeMemoryCharacterName(resolvedNew) === newNorm;
+    if (resolvedNew && !resolvedIsSelf && normalizeMemoryCharacterName(resolvedNew) !== oldNorm) return false;
     // 复用 mergeCharacters 全源重写：target 为空位（或本角色别名）时走纯改名分支，
     // mergeCharacters 内 mode==='rename' 时不再对 target 归一化，旧名自动进 aliases。
     return mergeCharacters(newNormed, oldCanonical, 'rename');
   }
 
-  // ========== 角色忽略管理 ==========
+  // ========== 角色删除管理 ==========
 
-  function ignoreCharacter(name: string) {
-    name = resolveKnownCharacterName(name, true);
-    const normName = normalizeMemoryCharacterName(name);
-    if (!name || !normName) return;
-    if (!chatData.value.ignoredCharacters.some(n => normalizeMemoryCharacterName(n) === normName)) {
-      chatData.value.ignoredCharacters.push(name);
+  /**
+   * 彻底删除角色：从所有 13+ 数据源清除该角色的全部信息。
+   * 物品保留，但归属（owner/location）命中该角色名时置空。
+   * 此操作不可撤销，不再走「忽略+备份」机制。
+   */
+  function deleteCharacter(name: string) {
+    const resolved = resolveKnownCharacterName(name, true);
+    const normName = normalizeMemoryCharacterName(resolved || name);
+    if (!resolved || !normName) return;
+    // 名字匹配器：归一化后相等，或原名直接相等
+    const matches = (n?: string) => {
+      if (!n) return false;
+      if (n === resolved || n === name) return true;
+      return normalizeMemoryCharacterName(n) === normName;
+    };
+
+    // 1. 顶层 characterMemories
+    chatData.value.characterMemories = (chatData.value.characterMemories || []).filter(m => !matches(m.characterName));
+
+    // 2. summaries 各 delta：characterMemories + characterTable
+    for (const summary of chatData.value.summaries || []) {
+      summary.characterMemories = (summary.characterMemories || []).filter(m => !matches(m.characterName));
+      if (summary.characterTable) {
+        summary.characterTable = summary.characterTable.filter((e: any) => !matches(e.name));
+      }
     }
-    // 备份角色数据（从组装视图备份完整信息），恢复时还原
-    const assembled = getLatestSummary();
-    const memBackup = assembled
-      ? assembled.characterMemories.filter(m => normalizeMemoryCharacterName(m.characterName) === normName)
-      : [];
-    const profileBackup = chatData.value.dynamicProfiles.find(p => normalizeMemoryCharacterName(p.characterName) === normName) || null;
-    chatData.value._ignoredBackup.push({
-      name,
-      memories: JSON.parse(JSON.stringify(memBackup)),
-      profile: profileBackup ? JSON.parse(JSON.stringify(profileBackup)) : null,
-    });
-    // 从最新 delta 中移除（下次组装时该角色不会再出现）
-    const latestDelta = getLatestDelta();
-    if (latestDelta) {
-      latestDelta.characterMemories = latestDelta.characterMemories.filter(m => normalizeMemoryCharacterName(m.characterName) !== normName);
+
+    // 3. 动态人设 V1 + V2
+    chatData.value.dynamicProfiles = (chatData.value.dynamicProfiles || []).filter(p => !matches(p.characterName));
+    chatData.value.dynamicProfilesV2 = (chatData.value.dynamicProfilesV2 || []).filter(p => !matches(p.characterName));
+
+    // 4. 人设档案 + 已保存人设档案
+    if (chatData.value.characterProfiles) {
+      for (const key of Object.keys(chatData.value.characterProfiles)) {
+        if (matches(key)) delete chatData.value.characterProfiles[key];
+      }
     }
-    // 清空对应的动态人设
-    chatData.value.dynamicProfiles = chatData.value.dynamicProfiles.filter(p => normalizeMemoryCharacterName(p.characterName) !== normName);
+    chatData.value.savedCharacterProfiles = (chatData.value.savedCharacterProfiles || []).filter(p => !matches(p.name));
+
+    // 5. 关系档案：移除 from/to 命中该角色的条目
+    chatData.value.relationshipProfiles = (chatData.value.relationshipProfiles || []).filter(p =>
+      !matches(p.fromName) && !matches(p.from) && !matches(p.toName) && !matches(p.to),
+    );
+
+    // 6. 角色位置
+    if (chatData.value.characterLocations) {
+      for (const key of Object.keys(chatData.value.characterLocations)) {
+        if (matches(key)) delete chatData.value.characterLocations[key];
+      }
+    }
+
+    // 7. NSFW
+    chatData.value.nsfwMemories = (chatData.value.nsfwMemories || []).filter(m => !matches(m.characterName));
+    chatData.value.nsfwDynamicProfiles = (chatData.value.nsfwDynamicProfiles || []).filter(p => !matches(p.characterName));
+
+    // 8. 梦呓
+    if (chatData.value.dreamtalk?.characterInteractions) {
+      chatData.value.dreamtalk.characterInteractions = chatData.value.dreamtalk.characterInteractions.filter(
+        i => !matches(i.characterName),
+      );
+    }
+
+    // 9. 世界推进
+    chatData.value.worldProgressMemories = (chatData.value.worldProgressMemories || []).filter(m => !matches(m.characterName));
+    for (const record of chatData.value.worldProgressRecords || []) {
+      if (record.advancedCharacters) {
+        record.advancedCharacters = record.advancedCharacters.filter((c: any) => !matches(c.characterName));
+      }
+      if (record.presentCharacters) {
+        record.presentCharacters = record.presentCharacters.filter((n: string) => !matches(n));
+      }
+      if (record.entryHint && matches(record.entryHint.characterName)) {
+        record.entryHint.characterName = '';
+      }
+      for (const hook of record.resolvedHooks || []) {
+        if (hook.characterNames) {
+          hook.characterNames = hook.characterNames.filter((n: string) => !matches(n));
+        }
+      }
+    }
+
+    // 10. 知识图谱：移除角色节点 + 物品 owner/location 命中则置空（不删物品）
+    const cleanGraph = (g: KnowledgeGraph | null): KnowledgeGraph | null => {
+      if (!g) return g;
+      const ng: KnowledgeGraph = JSON.parse(JSON.stringify(g));
+      ng.characters = (ng.characters || []).filter(c => !matches(c.name) && !(c.aliases || []).some(a => matches(a)));
+      ng.items = (ng.items || []).map(it => {
+        let changed = false;
+        let owner = it.owner;
+        let location = it.location;
+        if (matches(it.owner)) { owner = ''; changed = true; }
+        if (matches(it.location)) { location = ''; changed = true; }
+        return changed ? { ...it, owner, location } : it;
+      });
+      // edges：移除涉及该角色的 belongs_to/关系边（to 或 from 命中）
+      ng.edges = (ng.edges || []).filter(e =>
+        !matches(e.from) && !matches(e.to) && !matches(e.fromName) && !matches(e.toName),
+      );
+      return ng;
+    };
+    chatData.value.knowledgeGraph = cleanGraph(chatData.value.knowledgeGraph);
+    chatData.value.knowledgeGraphVersions = (chatData.value.knowledgeGraphVersions || []).map(v => ({
+      ...v,
+      graph: cleanGraph(v.graph || null),
+    }));
+    if (chatData.value.knowledgeGraphHistory) {
+      chatData.value.knowledgeGraphHistory = chatData.value.knowledgeGraphHistory.map(v => ({
+        ...v,
+        graph: cleanGraph(v.graph || null),
+      }));
+    }
+    if (chatData.value.knowledgeGraphUndoHistory) {
+      chatData.value.knowledgeGraphUndoHistory = chatData.value.knowledgeGraphUndoHistory.map(v => ({
+        ...v,
+        graph: cleanGraph(v.graph || null),
+      }));
+    }
+
+    // 11. 物品记忆库：currentOwner/currentLocation 命中则置空（保留物品条目）
+    for (const item of chatData.value.itemMemories || []) {
+      if (matches(item.currentOwner)) item.currentOwner = '';
+      if (matches(item.currentLocation)) item.currentLocation = '';
+      if (item.relatedCharacters) {
+        item.relatedCharacters = item.relatedCharacters.filter(n => !matches(n));
+      }
+      for (const h of item.history || []) {
+        if (matches(h.owner)) h.owner = '';
+      }
+    }
+
+    // 12. 角色注册表：移除该角色 record（含别名命中）
+    const _registry = chatData.value.characterRegistry;
+    if (_registry && _registry.records) {
+      for (const id of Object.keys(_registry.records)) {
+        const rec = _registry.records[id];
+        if (matches(rec.primaryName) || (rec.aliases || []).some(a => matches(a))) {
+          delete _registry.records[id];
+        }
+      }
+    }
+
     rebuildAssembled();
     pushCodeLog({
       id: _codeLogIdCounter++,
       timestamp: new Date().toISOString(),
       module: '存储',
       level: 'info',
-      message: `已忽略角色: ${name}`,
+      message: `已删除角色: ${resolved}（全部关联数据已清除，物品归属置空）`,
     });
-  }
-
-  function unignoreCharacter(name: string) {
-    name = resolveKnownCharacterName(name, true);
-    const normName = normalizeMemoryCharacterName(name);
-    if (!name || !normName) return;
-    chatData.value.ignoredCharacters = chatData.value.ignoredCharacters.filter(n => normalizeMemoryCharacterName(n) !== normName);
-    // 还原备份的角色数据
-    const backup = chatData.value._ignoredBackup.find(b => normalizeMemoryCharacterName(b.name) === normName);
-    if (backup) {
-      const latestDelta = getLatestDelta();
-      if (latestDelta && backup.memories.length > 0) {
-        // 还原时放在末尾
-        latestDelta.characterMemories.push(...backup.memories);
-      }
-      if (backup.profile) {
-        chatData.value.dynamicProfiles.push(backup.profile);
-      }
-      // 清理备份
-      chatData.value._ignoredBackup = chatData.value._ignoredBackup.filter(b => normalizeMemoryCharacterName(b.name) !== normName);
-      rebuildAssembled();
-      pushCodeLog({
-        id: _codeLogIdCounter++,
-        timestamp: new Date().toISOString(),
-        module: '存储',
-        level: 'info',
-        message: `已取消忽略角色: ${name}`,
-      });
-    } else {
-      pushCodeLog({
-        id: _codeLogIdCounter++,
-        timestamp: new Date().toISOString(),
-        module: '存储',
-        level: 'info',
-        message: `已取消忽略角色: ${name}`,
-      });
-    }
   }
 
   // ========== 梦呓相关 ==========
@@ -4839,15 +5117,6 @@ export const useMainStore = defineStore('main', () => {
     }
   }
 
-  // ========== 倒果为因相关 ==========
-
-  const plotFate = computed(() => chatData.value.plotFate);
-
-  function updatePlotFate(state: any) {
-    chatData.value.plotFate = state;
-    doPersist();
-  }
-
   // ========== 世界推进相关 ==========
 
   const worldProgressManualChars = computed(() => chatData.value.worldProgressManualChars);
@@ -4966,6 +5235,25 @@ export const useMainStore = defineStore('main', () => {
 	      }
 	      return normalized;
 	    }
+	    // 物品归属字段迁移：旧 belongs_to 边 → item.owner/location/status/statusDetail
+	    // 检测条件：图谱里还有 belongs_to 边，且物品尚未挂上新字段（典型旧数据）
+	    const hasLegacyBelongEdges = (raw.edges || []).some(e => e.type === 'belongs_to');
+	    const anyItemMissingNewFields = (raw.items || []).some(
+	      it => it.owner === undefined && it.location === undefined && it.status === undefined && it.statusDetail === undefined,
+	    );
+	    if (hasLegacyBelongEdges && anyItemMissingNewFields) {
+	      const migrated = migrateItemPlacement(raw);
+	      if (migrated) {
+	        chatData.value.knowledgeGraph = migrated;
+	        // 同步更新版本数组中最新的图谱
+	        const versions = chatData.value.knowledgeGraphVersions;
+	        if (versions && versions.length > 0) {
+	          versions[versions.length - 1].graph = stripEmbeddingsFromGraph(migrated);
+	        }
+	        forcePersist();
+	      }
+	      return migrated;
+	    }
 	    return raw;
 	  });
   /** 角色位置映射（只读 computed） */
@@ -5043,18 +5331,47 @@ export const useMainStore = defineStore('main', () => {
         || lookup.get(normalizeMemoryCharacterName(edge.to));
       if (canonical) edge.to = canonical;
     }
+    // 物品 owner / location 同步重写为规范化角色名
+    for (const item of graph.items || []) {
+      for (const field of ['owner', 'location'] as const) {
+        const raw = (item as any)[field];
+        if (typeof raw !== 'string' || !raw) continue;
+        const canonical = lookup.get(raw)
+          || lookup.get(buildStableId(raw))
+          || lookup.get(normalizeMemoryCharacterName(raw));
+        if (canonical && canonical !== raw) (item as any)[field] = canonical;
+      }
+    }
   }
 
 	  /**
 	   * 提交新版本图谱：按楼层截断版本数组（重roll/回退场景自动作废旧版），
 	   * 旧版进撤回栈（≤6），清空恢复栈，赋值新版，立即落盘。
 	   */
-			  function commitKnowledgeGraph(
-			    nextGraph: KnowledgeGraph,
-			    floor?: number,
-			    characterLocationsSnapshot?: Record<string, string>,
-			  ): void {
+function commitKnowledgeGraph(
+				    nextGraph: KnowledgeGraph,
+				    floor?: number,
+				    characterLocationsSnapshot?: Record<string, string>,
+				    presentCharacterNames?: ReadonlySet<string> | string[] | null,
+				  ): void {
           normalizeKnowledgeGraphCharacterNames(nextGraph);
+          // 离场降级（A 方案兜底）：不在本轮在场集合中的角色身上的瞬时持有态
+          // （held/worn/carried）→ 清 status / statusDetail，location 回填为 owner
+          // （东西还在该角色那儿，但当下持有方式不明）。必须在 hydrateKnowledgeGraphEmbeddingsFromCache
+          // 之前执行：向量缓存按降级后的新 textHash 查询，命中即用、未命中走 lazy 重算。
+          // 空集合/null → 跳过（回滚分支不降级，避免回退时再"清理"在场历史）。
+          if (presentCharacterNames) {
+            const names: string[] = Array.isArray(presentCharacterNames)
+              ? [...presentCharacterNames]
+              : Array.from(presentCharacterNames);
+            try {
+              const userName = getUserName();
+              if (userName) names.push(userName);
+            } catch {
+              /* getUserName 访问 store 依赖，理论不抛，此处兜底 */
+            }
+            demoteAbsentItems(nextGraph, names);
+          }
 			    const cache = ensureKnowledgeGraphEmbeddingCache(chatData.value.knowledgeGraphEmbeddingCache);
 			    chatData.value.knowledgeGraphEmbeddingCache = cache;
 			    const cur = chatData.value.knowledgeGraph;
@@ -5465,6 +5782,10 @@ const versions = chatData.value.knowledgeGraphVersions || [];
   }
 
   function clearApiRetry() {
+    // 连同中止信号一起清干净，避免用户点过一次"取消重试"后，
+    // aborted 永久停在 true，导致后续每次调用在 attempt=0 顶部直接被卡、
+    // 秒抛"用户已取消重试"（showApiRetry 只在重试时才重置，救不回首次调用）。
+    apiRetryAborted = false;
     apiRetryStatus.value = null;
   }
 
@@ -5507,6 +5828,8 @@ const versions = chatData.value.knowledgeGraphVersions || [];
   }
 
   function clearSummaryRetry() {
+    // 同 clearApiRetry：清掉中止信号，避免下次大总结 attempt=1 顶部直接被卡死
+    summaryRetryAborted = false;
     summaryRetryStatus.value = null;
   }
 
@@ -5565,31 +5888,226 @@ const versions = chatData.value.knowledgeGraphVersions || [];
   // ========== 数据管理 ==========
 
   function exportAllData(): string {
-    return JSON.stringify({ scriptData: klona(scriptData.value), chatData: slimChatDataForPersist(chatData.value) }, null, 2);
+    return JSON.stringify({ _exportVersion: 'A5.0.5', scriptData: klona(scriptData.value), chatData: slimChatDataForPersist(chatData.value) }, null, 2);
+  }
+
+  /** 导入前预检：对比当前数据与导入数据，返回警告列表（空数组=无风险） */
+  function checkImportData(jsonStr: string): string[] {
+    const warnings: string[] = [];
+    try {
+      const parsed = JSON.parse(jsonStr);
+      // personas 空数据风险
+      if (parsed.scriptData) {
+        const importedScript = ScriptSettingsSchema.parse(parsed.scriptData);
+        const currentCount = (scriptData.value.personas || []).length;
+        const importedCount = (importedScript.personas || []).length;
+        if (currentCount > 0 && importedCount === 0) {
+          warnings.push(`导入文件没有用户人格数据（当前有 ${currentCount} 个），导入后将被清空。`);
+        }
+      }
+      // 角色数据空数据风险
+      if (parsed.chatData) {
+        const importedChat = ChatDataSchema.parse(parsed.chatData);
+        const currentCharCount = getAllCharacterNames().length;
+        // 临时替换 chatData 以计算导入文件的角色数
+        const savedChat = chatData.value;
+        chatData.value = importedChat;
+        const importedCharCount = getAllCharacterNames().length;
+        chatData.value = savedChat;
+        if (currentCharCount > 0 && importedCharCount === 0) {
+          warnings.push(`导入文件没有角色数据（当前有 ${currentCharCount} 个角色），导入后角色库将被清空。`);
+        } else if (importedCharCount > 0 && importedCharCount < currentCharCount) {
+          warnings.push(`导入文件包含 ${importedCharCount} 个角色（当前有 ${currentCharCount} 个），部分角色可能不在导入文件中。`);
+        }
+      }
+    } catch {
+      // JSON 解析失败由 importAllData 抛出，这里不处理
+    }
+    return warnings;
   }
 
   function importAllData(jsonStr: string) {
     try {
       const parsed = JSON.parse(jsonStr);
+
+      // ===== DEBUG: 导入前快照 =====
+      const preImportCharCount = getAllCharacterNames().length;
+      const preImportPersonasCount = (scriptData.value.personas || []).length;
+      pushCodeLog({
+        id: _codeLogIdCounter++,
+        timestamp: new Date().toISOString(),
+        module: '导入调试',
+        level: 'info',
+        message: `导入前快照: 角色数=${preImportCharCount}, personas=${preImportPersonasCount}, 当前chatId=${currentChatId}`,
+      });
+
       if (parsed.scriptData) {
-        scriptData.value = ScriptSettingsSchema.parse(parsed.scriptData);
+        const importedScript = ScriptSettingsSchema.parse(parsed.scriptData);
+        pushCodeLog({
+          id: _codeLogIdCounter++,
+          timestamp: new Date().toISOString(),
+          module: '导入调试',
+          level: 'info',
+          message: `scriptData解析: personas=${(importedScript.personas || []).length}, personaNames=[${(importedScript.personas || []).map((p: any) => p.name).join(',')}]`,
+        });
+        scriptData.value = importedScript;
       }
       if (parsed.chatData) {
-        chatData.value = ChatDataSchema.parse(parsed.chatData);
-        // 旧版备份没有 chatId，补填当前聊天ID
-        if (!chatData.value.chatId) {
-          chatData.value.chatId = currentChatId;
+        const importedChat = ChatDataSchema.parse(parsed.chatData);
+
+        // ===== DEBUG: 导入数据结构详情 =====
+        const sumCount = (importedChat.summaries || []).length;
+        const topMems = (importedChat.characterMemories || []).length;
+        const dpV2 = (importedChat.dynamicProfilesV2 || []).length;
+        const nsfwMems = (importedChat.nsfwMemories || []).length;
+        const worldProgMems = (importedChat.worldProgressMemories || []).length;
+        const wpRecords = (importedChat.worldProgressRecords || []).length;
+        const charProfiles = Object.keys(importedChat.characterProfiles || {}).length;
+        const charLocs = Object.keys(importedChat.characterLocations || {}).length;
+        const relProfiles = (importedChat.relationshipProfiles || []).length;
+        const kgChars = (importedChat.knowledgeGraph?.characters || []).length;
+        const savedCP = (importedChat.savedCharacterProfiles || []).length;
+
+        // 每个 summary 的角色表详情
+        const sumDetails = (importedChat.summaries || []).map((s: any, i: number) => {
+          const tbl = (s.characterTable || []).map((e: any) => e.name);
+          const mems = (s.characterMemories || []).map((m: any) => m.characterName);
+          return `s${i}(tbl:[${tbl}],mems:[${mems}])`;
+        });
+
+        pushCodeLog({
+          id: _codeLogIdCounter++,
+          timestamp: new Date().toISOString(),
+          module: '导入调试',
+          level: 'info',
+          message: `chatData解析: summaries=${sumCount}, characterMemories(顶层)=${topMems}, dynamicProfilesV2=${dpV2}, nsfwMemories=${nsfwMems}, worldProgressMemories=${worldProgMems}, wpRecords=${wpRecords}, characterProfiles=${charProfiles}, characterLocations=${charLocs}, relationshipProfiles=${relProfiles}, kgChars=${kgChars}, savedCharProfiles=${savedCP}`,
+        });
+
+        // 每条 summary 的角色信息
+        for (const detail of sumDetails) {
+          pushCodeLog({
+            id: _codeLogIdCounter++,
+            timestamp: new Date().toISOString(),
+            module: '导入调试',
+            level: 'info',
+            message: detail,
+          });
         }
+
+        // ===== DEBUG: 设置 chatData 后的角色数 =====
+        chatData.value = importedChat;
+        chatData.value.chatId = currentChatId;
+
+        const afterSetCount = getAllCharacterNames().length;
+        const afterSetNames = getAllCharacterNames();
+        pushCodeLog({
+          id: _codeLogIdCounter++,
+          timestamp: new Date().toISOString(),
+          module: '导入调试',
+          level: 'info',
+          message: `设置chatData后: 角色数=${afterSetCount}, 角色名=[${afterSetNames.join(',')}]`,
+        });
+
+        // 逐源追踪角色来源
+        const sourceTrace: Record<string, string[]> = {};
+        const traceSource = (name: string, source: string) => {
+          if (!sourceTrace[name]) sourceTrace[name] = [];
+          sourceTrace[name].push(source);
+        };
+
+        for (const m of importedChat.characterMemories || []) {
+          if (m.characterName) traceSource(m.characterName, 'top-characterMemories');
+        }
+        for (const s of importedChat.summaries || []) {
+          for (const m of s.characterMemories || []) {
+            if (m.characterName) traceSource(m.characterName, `sum-mems`);
+          }
+          for (const e of s.characterTable || []) {
+            if (e.name) traceSource(e.name, `sum-table`);
+          }
+        }
+        for (const p of importedChat.dynamicProfilesV2 || []) {
+          if (p.characterName) traceSource(p.characterName, 'dynamicProfilesV2');
+        }
+        for (const m of importedChat.nsfwMemories || []) {
+          if (m.characterName) traceSource(m.characterName, 'nsfwMemories');
+        }
+
+        for (const [name, sources] of Object.entries(sourceTrace)) {
+          pushCodeLog({
+            id: _codeLogIdCounter++,
+            timestamp: new Date().toISOString(),
+            module: '导入调试',
+            level: 'info',
+            message: `角色来源 [${name}]: ${[...new Set(sources)].join(', ')}`,
+          });
+        }
+
         // 同步当前聊天变量，STABLE_ID 只保留全局设置
         allChatsData.value[currentChatId] = klona(chatData.value);
         writeChatScopeCurrent(currentChatId, chatData.value);
         writeStableSettings(scriptData.value);
+
+        // ===== DEBUG: 写入存储后再查一次 =====
+        const afterWriteCount = getAllCharacterNames().length;
+        pushCodeLog({
+          id: _codeLogIdCounter++,
+          timestamp: new Date().toISOString(),
+          module: '导入调试',
+          level: 'info',
+          message: `写入存储后: 角色数=${afterWriteCount}, allChatsData key=${currentChatId}, chatData.chatId=${chatData.value.chatId}`,
+        });
+
+        // ===== DEBUG: 延迟1秒检查，捕获导入后被覆盖的情况 =====
+        setTimeout(() => {
+          const delayedCount = getAllCharacterNames().length;
+          const delayedNames = getAllCharacterNames();
+          const delayedSumCount = (chatData.value.summaries || []).length;
+          const delayedTopMems = (chatData.value.characterMemories || []).length;
+          const delayedDpV2 = (chatData.value.dynamicProfilesV2 || []).length;
+          pushCodeLog({
+            id: _codeLogIdCounter++,
+            timestamp: new Date().toISOString(),
+            module: '导入调试',
+            level: 'warn',
+            message: `[延迟1s检查] 角色数=${delayedCount}, 角色名=[${delayedNames.join(',')}], summaries=${delayedSumCount}, characterMemories=${delayedTopMems}, dynamicProfilesV2=${delayedDpV2}`,
+          });
+          // 进一步：检查 allChatsData 中的数据
+          const stored = allChatsData.value[currentChatId];
+          if (stored) {
+            const storedCount = (() => {
+              try {
+                const tmp = chatData.value;
+                chatData.value = stored;
+                const c = getAllCharacterNames().length;
+                chatData.value = tmp;
+                return c;
+              } catch { return -1; }
+            })();
+            pushCodeLog({
+              id: _codeLogIdCounter++,
+              timestamp: new Date().toISOString(),
+              module: '导入调试',
+              level: 'warn',
+              message: `[延迟1s] allChatsData中的角色数=${storedCount}`,
+            });
+          } else {
+            pushCodeLog({
+              id: _codeLogIdCounter++,
+              timestamp: new Date().toISOString(),
+              module: '导入调试',
+              level: 'error',
+              message: `[延迟1s] allChatsData中没有当前聊天的数据! key=${currentChatId}`,
+            });
+          }
+        }, 1000);
+
         pushCodeLog({
           id: _codeLogIdCounter++,
           timestamp: new Date().toISOString(),
           module: '存储',
           level: 'info',
-          message: `数据导入成功 (总结: ${chatData.value.summaries.length}, 梦呓: ${chatData.value.dreamtalk ? '有' : '无'}, 捕获: ${chatData.value.capturedContents.length})`,
+          message: `数据导入成功 (总结: ${importedChat.summaries.length}, 梦呓: ${importedChat.dreamtalk ? '有' : '无'}, 捕获: ${importedChat.capturedContents.length})`,
         });
         return;
       }
@@ -5598,7 +6116,7 @@ const versions = chatData.value.knowledgeGraphVersions || [];
         timestamp: new Date().toISOString(),
         module: '存储',
         level: 'info',
-        message: '数据导入成功',
+        message: '数据导入成功（无 chatData）',
       });
     } catch (e) {
       pushCodeLog({
@@ -5786,6 +6304,7 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     resolveKnownCharacterName,
     resolveKnownCharacterNames,
     updateCharacterAliases,
+    addCharacter,
     // 角色设定档案
     setCharacterProfile,
     removeCharacterProfile,
@@ -5797,9 +6316,16 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     mergeCharacters,
     // 角色改名
     renameCharacter,
-    // 角色忽略管理
-    ignoreCharacter,
-    unignoreCharacter,
+    // 角色删除管理
+    deleteCharacter,
+    // 角色名字系统重构：稳定 ID 注册表（P1/P3/P5）
+    characterRegistry,
+    pendingUnresolved,
+    ensureCharacterRegistry,
+    buildRegistryFromExistingData,
+    resolveKnownCharacterId,
+    resolvePendingCharacter,
+    clearAllPendingUnresolved,
     // 梦呓
     updateDreamtalk,
     rollbackDreamtalk,
@@ -5812,9 +6338,6 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     updateNsfwMemories,
     updateNsfwDreamtalk,
     updateNsfwDynamicProfile,
-    // 倒果为因
-    plotFate,
-    updatePlotFate,
     // 后台行动推演
     worldProgressManualChars,
     updateWorldProgressManualChars,
@@ -5885,6 +6408,7 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     isSummaryRetryAborted,
     // 数据管理
     exportAllData,
+    checkImportData,
     importAllData,
     importChatData,
     clearChatData,

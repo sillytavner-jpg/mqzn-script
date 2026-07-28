@@ -253,6 +253,16 @@ function setSchedulerMode(mode: 'concurrent' | 'serial') {
 
 // 数据管理
 function exportData() {
+  const warnings: string[] = [];
+  if ((store.scriptData.personas || []).length === 0) {
+    warnings.push('当前没有用户人格数据（personas 为空）。');
+  }
+  if (store.getAllCharacterNames().length === 0) {
+    warnings.push('当前没有角色数据（角色库为空）。');
+  }
+  if (warnings.length > 0) {
+    if (!confirm('⚠️ 导出提醒：\n\n' + warnings.join('\n') + '\n\n导出文件可能不完整，是否继续？')) return;
+  }
   const data = store.exportAllData();
   const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -273,6 +283,14 @@ function handleFileImport(event: Event) {
     const content = e.target?.result as string;
     if (!content) return;
     try {
+      // 先预检，有警告让用户确认
+      const warnings = store.checkImportData(content);
+      if (warnings.length > 0) {
+        if (!confirm('⚠️ 数据兼容性警告：\n\n' + warnings.join('\n\n') + '\n\n是否继续导入？')) {
+          input.value = '';
+          return;
+        }
+      }
       store.importAllData(content);
       logInfo('存储', '数据导入成功');
       try { window.toastr?.success('数据导入成功', '✅ 导入成功', { timeOut: 3000 }); } catch(_) {}
@@ -284,11 +302,6 @@ function handleFileImport(event: Event) {
   };
   reader.readAsText(file);
   input.value = '';
-}
-
-function restoreCharacter(name: string) {
-  store.unignoreCharacter(name);
-  store.forcePersist();
 }
 
 // ─── 世界书存档（多存档） ───
@@ -470,7 +483,7 @@ const deleteBlocks = [
   {
     key: 'grandSummary' as const,
     label: '大总结',
-    desc: '时间线 · 角色记忆 · 正文捕获 · 动态人设 · NSFW · 已忽略角色',
+    desc: '时间线 · 角色记忆 · 正文捕获 · 动态人设 · NSFW',
     count(): number {
       const cd = store.chatData;
       const summaries = (cd.summaries || []).length + (cd.summaryHistory || []).length;
@@ -478,8 +491,7 @@ const deleteBlocks = [
       const dp2 = (cd.dynamicProfilesV2 || []).length;
       const dp1 = (cd.dynamicProfiles || []).length;
       const nsfw = (cd.nsfwMemories || []).length;
-      const ignored = (cd.ignoredCharacters || []).length;
-      return summaries + caps + dp2 + dp1 + nsfw + ignored;
+      return summaries + caps + dp2 + dp1 + nsfw;
     },
   },
   {
@@ -562,8 +574,6 @@ function executeSelectiveDelete() {
           cd.nsfwMemories = [];
           cd.nsfwDreamtalk = null;
           cd.nsfwDynamicProfiles = [];
-          cd.ignoredCharacters = [];
-          (cd as any)._ignoredBackup = [];
           cd.timelineOverrides = {};
           break;
         case 'relationships':
@@ -1166,18 +1176,6 @@ function executeSelectiveDelete() {
               </div>
             </div>
           </div>
-        </div>
-
-        <!-- 已忽略角色 -->
-        <div class="zhino-section" v-if="store.chatData.ignoredCharacters.length > 0">
-          <div class="zhino-section-title">已忽略角色 ({{ store.chatData.ignoredCharacters.length }})</div>
-          <div class="zhino-ignored-list">
-            <span v-for="name in store.chatData.ignoredCharacters" :key="name" class="zhino-ignored-tag">
-              {{ name }}
-              <button class="zhino-ignored-restore" title="恢复此角色" @click="restoreCharacter(name)">↩</button>
-            </span>
-          </div>
-          <div class="zhino-ignored-hint">恢复后下次大总结将重新分析该角色</div>
         </div>
       </div>
     </div>
@@ -1888,40 +1886,6 @@ function executeSelectiveDelete() {
   font-size: 11px;
   color: rgba(var(--zn-warn-rgb), 0.85);
   line-height: 1.5;
-}
-
-.zhino-ignored-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.zhino-ignored-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  background: rgba(var(--zn-danger-rgb), 0.08);
-  border: 1px solid rgba(var(--zn-danger-rgb), 0.15);
-  color: var(--zn-text-regular);
-  font-size: 11px;
-}
-.zhino-ignored-restore {
-  background: none;
-  border: none;
-  color: rgba(52, 211, 153, 0.6);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 0 2px;
-  transition: color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.zhino-ignored-restore:hover {
-  color: rgba(52, 211, 153, 0.9);
-}
-.zhino-ignored-hint {
-  font-size: 10px;
-  color: var(--zn-text-muted);
 }
 
 /* ===== API 监听器 ===== */

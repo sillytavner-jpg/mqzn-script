@@ -223,9 +223,15 @@ export function buildGraphViewData(input: BuildGraphInput): BuildGraphResult {
   // belongs_to.to 可能是地点 id、角色名、或玩家名。玩家名字符串不是节点 id
   //（玩家节点 id 是 USER_NODE_ID），不归一会让边找不到端点 → 物品飘着不连线。
   // 角色 NPC 名当 id 是 graphBuilder 的一贯口径，无需改；只把玩家名映射到 USER_NODE_ID。
+  // 物品归属对象可能是地点名/地点id/角色名；地点名→用地点 id 作端点；地点 id 直用；否则原样（角色名当 id）。
   const resolveEdgeEndpoint = (rawTo: string, isBelongTo: boolean): string => {
     if (!rawTo) return rawTo;
     if (isBelongTo && rawTo === (userName || '{{user}}')) return USER_NODE_ID;
+    // 地点名 → 转地点 id 作端点
+    const byName = (graph.locations || []).find(l => l.name === rawTo || l.aliases?.includes(rawTo));
+    if (byName) return byName.id;
+    // 地点 id 直配
+    if (nodeMap.has(rawTo) && nodeMap.get(rawTo)!.type === 'loc') return rawTo;
     return rawTo;
   };
   const pushEdge = (e: VEdge) => {
@@ -240,9 +246,33 @@ export function buildGraphViewData(input: BuildGraphInput): BuildGraphResult {
     } else if (e.type === 'connected') {
       pushEdge({ id: `e_connected_${e.from}_${e.to}`, from: e.from, to: e.to, type: 'connected', detail: e.detail });
     } else if (e.type === 'belongs_to' && showItems) {
-      // belongs_to：from=物品id, to=角色名或地点id（玩家名→USER_NODE_ID）
+      // 旧结构 fallback：from=物品id, to=角色名或地点id（玩家名→USER_NODE_ID）
       const toResolved = resolveEdgeEndpoint(e.to, true);
       pushEdge({ id: `e_bto_${e.from}_${toResolved}`, from: e.from, to: toResolved, type: 'belongs_to', detail: e.detail });
+    }
+  }
+
+  // 物品归属边（新结构）：item.owner / item.location 命中节点即建边
+  // owner 与 location 都画一条边（owner 静态所有权、location 当前持有/存放点）；
+  // 相同则只画一条。pushEdge 自动去重（同 from + 同 to 同 id 会被 Map/数组跳过，但 edges 是数组，
+  // 这里靠 id 字符串重复也会重复 push——下面用临时集合做去重）。
+  if (showItems) {
+    const addedBelongIds = new Set<string>(edges.filter(e => e.type === 'belongs_to').map(e => e.id));
+    for (const it of graph.items || []) {
+      const targets = new Set<string>();
+      if (it.owner) targets.add(it.owner);
+      if (it.location) targets.add(it.location);
+      for (const rawTo of targets) {
+        const toResolved = resolveEdgeEndpoint(rawTo, true);
+        if (toResolved === it.id) continue; // 防自环
+        const eid = `e_bto_${it.id}_${toResolved}`;
+        if (addedBelongIds.has(eid)) continue;
+        addedBelongIds.add(eid);
+        pushEdge({
+          id: eid, from: it.id, to: toResolved, type: 'belongs_to',
+          detail: it.statusDetail,
+        });
+      }
     }
   }
 

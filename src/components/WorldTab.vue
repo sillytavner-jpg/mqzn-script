@@ -390,13 +390,6 @@ function saveWPWBKeys() {
   // 草稿 key 反查运行时 raw cache 正文，录入 savedWPWB（点保存才入库，未勾的不存）
   const cache = store.worldBookRawCache || [];
   store.chatData.savedWPWB = hydrateSelectedWorldBookEntries(cleaned, store.chatData.savedWPWB, cache);
-  console.log('[世界推进] 保存世界书选择:', JSON.stringify({
-    cleaned,
-    cacheKeys: cache.map(e => e.key),
-    draftSet: cleaned,
-    matchedCount: store.chatData.savedWPWB.length,
-    savedWPWB: store.chatData.savedWPWB.map(e => ({ key: e.key, hasContent: !!e.content })),
-  }));
   store.forcePersist();
   closeWPWorldBook();
 }

@@ -175,6 +175,7 @@ function buildCharacterMemoryInstruction(
     '- 无独立剧情线/无实质对话的背景角色不创建记忆',
     '- 正常记忆只记录"发生了亲密关系"事实，细节全放NSFW',
     '- 角色命名必须用正式名称',
+    '- 角色（character）必须是有意识的人或拟人存在；衣物、配饰、武器、道具、器物等一律不算角色，不为其生成 characterMemories',
   ].join('\n');
 }
 

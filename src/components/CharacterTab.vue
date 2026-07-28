@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useMainStore } from '../stores/mainStore';
-import type { CharacterMemory, DynamicProfile } from '../stores/mainStore';
+import type { CharacterMemory } from '../stores/mainStore';
 import type { NsfwCharacterMemory } from '../core/nsfwIsolation';
 import type { DynamicProfileV2 } from '../core/dynamicProfileV2';
 import { executeDynamicProfileV2 } from '../core/dynamicProfileV2';
@@ -59,6 +59,19 @@ function onAddItem() {
   itemModalMode.value = 'add';
   modalDefaultOwner.value = selectedCharacter.value;
   showItemModal.value = true;
+}
+
+// 从知识图谱中删除指定物品（深拷贝 → splice → 清旧边 → 提交）
+function onDeleteItem(item: OwnedItem) {
+  const g = graph.value;
+  const next: KnowledgeGraph = JSON.parse(JSON.stringify(g));
+  const idx = next.items.findIndex(i => i.id === item.item.id);
+  if (idx < 0) return;
+  next.items.splice(idx, 1);
+  const itemId = item.item.id;
+  next.edges = (next.edges || []).filter(e => !(e.type === 'belongs_to' && e.from === itemId));
+  next.updatedAt = new Date().toISOString();
+  store.setKnowledgeGraphWithoutHistory(next);
 }
 function onUpdateLocation(locationName: string) {
   if (!selectedCharacter.value || !locationName.trim()) return;
@@ -411,11 +424,6 @@ const selectedMemory = computed((): CharacterMemory | undefined => {
   return store.getCharacterMemories(selectedCharacter.value);
 });
 
-// 当前选中角色的动态人设
-const selectedProfile = computed((): DynamicProfile | undefined => {
-  if (!selectedCharacter.value) return undefined;
-  return undefined; // V1 已废弃
-});
 
 // 当前选中角色的动态人设V2
 const selectedProfileV2 = computed((): DynamicProfileV2 | undefined => {
@@ -511,12 +519,12 @@ function selectCharacter(name: string) {
 }
 
 function removeCharacter(name: string) {
-  if (confirm(`确定要忽略角色「${name}」吗？\n\n忽略后：\n- 从角色库中移除\n- 后续大总结不再生成该角色的记忆和动态人设\n- 可在设置页恢复`)) {
+  if (confirm(`确定要删除角色「${name}」吗？\n\n删除后：\n- 该角色的所有信息（记忆/人设/关系/位置等）将被彻底清除\n- 物品保留，但归属该角色的物品 owner/位置 会置空\n- 此操作不可撤销`)) {
     // 移除角色后，如果当前选中的就是这个角色，清除选中
     if (selectedCharacter.value === name) {
       selectedCharacter.value = '';
     }
-    store.ignoreCharacter(name);
+    store.deleteCharacter(name);
     store.forcePersist();
   }
 }
@@ -549,6 +557,14 @@ const showRenamePopup = ref(false);
 const renameOldName = ref('');
 const renameNewName = ref('');
 
+// 新建角色弹窗状态
+const showAddPopup = ref(false);
+const newCharName = ref('');
+const newCharAliases = ref('');
+const newCharLocation = ref('');
+const newCharCustomLoc = ref('');
+const newCharError = ref('');
+
 function openRenamePopup(name: string) {
   renameOldName.value = name;
   renameNewName.value = '';
@@ -571,6 +587,43 @@ function confirmRename() {
   } else {
     try { (window as any).toastr?.error('改名失败：新名已存在或非法。\n若新名已是角色库里的其它角色，请改用「合并角色」功能。',
       '❌ 改名失败', { timeOut: 4000, extendedTimeOut: 2000, escapeHtml: false }); } catch (_) {}
+  }
+}
+
+function openAddPopup() {
+  newCharName.value = '';
+  newCharAliases.value = '';
+  newCharLocation.value = '';
+  newCharCustomLoc.value = '';
+  newCharError.value = '';
+  showAddPopup.value = true;
+}
+
+function confirmAddCharacter() {
+  const name = newCharName.value.trim();
+  if (!name) {
+    newCharError.value = '名称不能为空';
+    return;
+  }
+  const aliases = newCharAliases.value
+    .split('\n')
+    .map(a => a.trim())
+    .filter(Boolean);
+  let locationName = '';
+  if (newCharLocation.value === '__custom__') {
+    locationName = newCharCustomLoc.value.trim();
+  } else if (newCharLocation.value) {
+    locationName = newCharLocation.value;
+  }
+  const ok = store.addCharacter(name, aliases, locationName || undefined);
+  if (ok) {
+    selectedCharacter.value = name;
+    editingItemIdx.value = -1;
+    isEditingNsfw.value = false;
+    showAddPopup.value = false;
+    try { (window as any).toastr?.success(`已新建角色「${name}」`, '✅ 新建成功', { timeOut: 3000 }); } catch (_) {}
+  } else {
+    newCharError.value = '新建失败：该名称或别名已存在角色';
   }
 }
 
@@ -601,9 +654,36 @@ function confirmRename() {
         >
           {{ isDeleting ? '结束编辑' : '编辑角色' }}
         </button>
+        <button
+          class="zhino-btn-sm zhino-edit-role-btn"
+          @click="openAddPopup"
+          title="手动新建一个角色（名称+别名+所在地）"
+        >
+          ＋ 新建角色
+        </button>
       </div>
 
       <!-- 角色列表 -->
+      <!-- P5: 待仲裁角色名提示（AI 输出的歧义/未知名字，P2 未自动入库，等用户裁决） -->
+      <div v-if="store.pendingUnresolved && store.pendingUnresolved.length > 0" class="zhino-section zhino-pending-section">
+        <div class="zhino-section-header">
+          <div class="zhino-section-title">待仲裁角色名 ({{ store.pendingUnresolved.length }})</div>
+          <button class="zhino-btn-sm zhino-btn-save" @click="store.clearAllPendingUnresolved()" title="清空全部（标记为已处理）">全部清空</button>
+        </div>
+        <div class="zhino-pending-list">
+          <div v-for="item in store.pendingUnresolved" :key="item.rawName" class="zhino-pending-item">
+            <span class="zhino-pending-name">{{ item.rawName }}</span>
+            <span class="zhino-pending-count" :title="`出现 ${item.count} 次`">×{{ item.count }}</span>
+            <span v-if="item.candidateNames && item.candidateNames.length > 0" class="zhino-pending-candidates">
+              候选: {{ item.candidateNames.join('、') }}
+            </span>
+            <span v-else class="zhino-pending-candidates zhino-pending-unknown">未识别角色</span>
+            <span v-if="item.snippet" class="zhino-pending-snippet">{{ item.snippet }}…</span>
+            <button class="zhino-btn-sm" @click="store.resolvePendingCharacter(item.rawName)" title="标记已处理">✓</button>
+          </div>
+        </div>
+      </div>
+
       <div class="zhino-section">
         <div class="zhino-section-header">
           <div class="zhino-section-title">角色列表 ({{ allCharacters.length }})</div>
@@ -661,7 +741,7 @@ function confirmRename() {
             @update:model-value="activeTab = $event as CharTab"
           />
 
-          <div v-if="activeTab === 'profile'" class="zhino-profile-body">
+          <div v-show="activeTab === 'profile'" class="zhino-profile-body">
 
           <div class="zhino-detail-block">
             <div class="zhino-detail-label">记忆条目：</div>
@@ -738,11 +818,6 @@ function confirmRename() {
                 <button class="zhino-btn-sm" @click="cancelEditV2" style="margin-left:4px">取消</button>
               </div>
             </template>
-            <!-- V1 兜底 -->
-            <template v-else>
-              <div v-if="selectedProfile" class="zhino-profile-text">{{ selectedProfile.dynamicContent }}</div>
-              <div v-else class="zhino-empty-hint">无动态人设</div>
-            </template>
           </div>
 
         <!-- NSFW 记忆 -->
@@ -812,7 +887,7 @@ function confirmRename() {
         </div>
 
         <!-- 背包 tab -->
-        <div v-else class="zhino-inventory-body">
+        <div v-show="activeTab === 'inventory'" class="zhino-inventory-body">
           <InventoryGrid
             :items="characterOwnedItems"
             @edit="onEditItem"
@@ -935,6 +1010,50 @@ function confirmRename() {
       </template>
     </Modal>
 
+    <!-- 新建角色弹窗 -->
+    <Modal :visible="showAddPopup" :is-mobile="isMobile" title="新建角色" @close="showAddPopup = false">
+      <div class="zhino-merge-desc">
+        手动新建一个角色并加入角色库。新建后该角色的记忆/人设将由后续大总结自动生成。
+      </div>
+      <div class="zhino-merge-field">
+        <span class="zhino-detail-label">名称：</span>
+        <input class="zhino-input" v-model="newCharName" placeholder="输入角色主名（必填）" style="flex:1"
+               @keydown.enter="confirmAddCharacter" @keydown.escape="showAddPopup = false" autofocus />
+      </div>
+      <div class="zhino-merge-field" style="align-items: flex-start;">
+        <span class="zhino-detail-label">别名：</span>
+        <textarea class="zhino-input" v-model="newCharAliases" placeholder="每行一个别名，可留空" rows="3" style="flex:1; resize: vertical;"></textarea>
+      </div>
+      <div class="zhino-merge-field">
+        <span class="zhino-detail-label">所在地：</span>
+        <select v-model="newCharLocation" class="zhino-merge-select" style="flex:1">
+          <option value="">不指定</option>
+          <option v-for="loc in graph.locations" :key="loc.id" :value="loc.name">{{ loc.name }}</option>
+          <option value="__custom__">＋ 输入新地点</option>
+        </select>
+      </div>
+      <div v-if="newCharLocation === '__custom__'" class="zhino-merge-field">
+        <span class="zhino-detail-label">新地点：</span>
+        <input class="zhino-input" v-model="newCharCustomLoc" placeholder="输入地点名" style="flex:1" />
+      </div>
+      <div v-if="newCharError" class="zhino-merge-hint" style="color: var(--zn-danger-rgb, #e06c75);">
+        {{ newCharError }}
+      </div>
+      <div v-if="newCharName.trim()" class="zhino-merge-preview">
+        新建「{{ newCharName.trim() }}」
+        <span v-if="newCharAliases.trim()">（别名: {{ newCharAliases.split('\n').map(s=>s.trim()).filter(Boolean).join('、') }}）</span>
+        <span v-if="(newCharLocation === '__custom__' ? newCharCustomLoc.trim() : newCharLocation)"> @ {{ newCharLocation === '__custom__' ? newCharCustomLoc.trim() : newCharLocation }}</span>
+      </div>
+      <template #footer>
+        <button class="zhino-btn-sm" @click="showAddPopup = false">取消</button>
+        <button
+          class="zhino-btn-sm zhino-btn-save"
+          :disabled="!newCharName.trim()"
+          @click="confirmAddCharacter"
+        >确认新建</button>
+      </template>
+    </Modal>
+
     <!-- 记忆控制弹窗 -->
     <Modal :visible="showMemoryControl" :is-mobile="isMobile" title="记忆控制" @close="showMemoryControl = false">
       <div class="zhino-memory-ctrl-desc">控制每次大总结时每个角色生成的记忆条目数量</div>
@@ -974,8 +1093,8 @@ function confirmRename() {
       :mode="itemModalMode"
       :item="editingItem"
       :default-owner="modalDefaultOwner"
-      :is-mobile="isMobile"
       @close="showItemModal = false"
+      @delete="onDeleteItem"
     />
   </div>
 </template>
@@ -1840,5 +1959,37 @@ function confirmRename() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.zhino-pending-section {
+  border: 1px solid #EF9F27;
+  background: rgba(250, 238, 218, 0.08);
+}
+.zhino-pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 6px;
+}
+.zhino-pending-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.zhino-pending-name { font-weight: 500; }
+.zhino-pending-count { color: #888780; font-size: 11px; }
+.zhino-pending-candidates { color: #B4B2A9; }
+.zhino-pending-unknown { color: #E24B4A; }
+.zhino-pending-snippet {
+  color: #888780;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

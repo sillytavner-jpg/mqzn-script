@@ -179,7 +179,6 @@ export function measureStorageUsage(
   mod('characterMemory', '角色记忆', [
     measureArray(cd.characterMemories, 'characterMemories'),
     measureArray(cd.nsfwMemories, 'nsfwMemories'),
-    measureArray(cd._ignoredBackup, '_ignoredBackup'),
   ]);
 
   // 5. 动态人设
