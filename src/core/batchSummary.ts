@@ -8,15 +8,27 @@
  */
 
 import { logInfo, logWarn, logError } from '../utils/logger';
+import { checksumText, stableTextId } from './memoryWarehouseCodec';
+import {
+  activateBatchRebuild,
+  discardBatchRebuild,
+  finalizeBatchRebuild,
+  loadBatchRebuildState,
+  saveBatchRebuildCheckpoint,
+} from './memoryWarehouseRuntime';
+import { stageBatchMemoryTransaction } from './memoryCommitCoordinator';
 
 import { executeGrandSummaryV2 } from './grandSummaryV2';
 import { executeCharacterMemoryUpdate } from './characterMemoryUpdate';
 import { embedTimelineEvents, embedCharacterMemories } from './embedding';
 import { buildMemorySectionText } from './summary';
 import type { CapturedContent, GrandSummary, TimelineEvent, CharacterMemory } from '../stores/mainStore';
+import type { MemoryCheckpointRecord } from './memoryWarehouseTypes';
 
 export interface BatchProgress {
   status: 'idle' | 'running' | 'done' | 'cancelled' | 'paused';
+  /** 暂停原因：用户主动暂停可继续；error 表示重试耗尽或致命错误。 */
+  pauseReason?: 'user' | 'error';
   currentBatch: number;
   totalBatches: number;
   totalMessages: number;
@@ -166,6 +178,7 @@ export async function executeBatchSummary(
   onProgress: (progress: BatchProgress) => void,
   /** 外部可设置此 ref 为 true 来中止批量（停止按钮） */
   abortSignal?: { value: boolean },
+  options?: { resumeFromFloor?: number },
 ): Promise<void> {
   const progress: BatchProgress = {
     status: 'running',
@@ -175,6 +188,7 @@ export async function executeBatchSummary(
     startFloor,
     endFloor,
     batchSize,
+    pauseReason: undefined,
     errors: [],
   };
 
@@ -204,15 +218,103 @@ export async function executeBatchSummary(
     const totalBatches = Math.ceil(totalFloors / batchSize);
     progress.totalBatches = totalBatches;
     const batchContentsByFloor = computeBatchMap(rangeContents, startFloor, endFloor, batchSize);
+    const chatId = SillyTavern.getCurrentChatId()?.trim() ?? '';
+    if (!chatId) throw new Error('当前没有已打开的酒馆聊天');
+    const sourceChatRevision = checksumText(rangeContents
+      .map(content => `${content.messageId}:${checksumText(content.content)}`)
+      .join('|'));
+    const now = new Date().toISOString();
+    const existingState = await loadBatchRebuildState(chatId);
+    const existingCheckpoint = existingState.checkpoint;
+    const checkpointMatches = !!(
+      existingCheckpoint?.transactionId
+      && ['running', 'paused', 'ready'].includes(existingCheckpoint.status)
+      && existingCheckpoint.rangeStart === startFloor
+      && existingCheckpoint.rangeEnd === endFloor
+      && existingCheckpoint.batchSize === batchSize
+      && existingCheckpoint.sourceChatRevision === sourceChatRevision
+    );
+    if (existingCheckpoint?.transactionId && !checkpointMatches) {
+      await discardBatchRebuild(chatId, existingCheckpoint.transactionId, '批量范围或来源正文已变化');
+    }
+    const transactionId = checkpointMatches
+      ? existingCheckpoint!.transactionId!
+      : stableTextId('batch-rebuild', `${chatId}|${startFloor}|${endFloor}|${batchSize}|${Date.now()}`);
+    let stagedSummaries = checkpointMatches
+      ? existingState.summaries as GrandSummary[]
+      : [];
+    let activeCheckpoint: MemoryCheckpointRecord = checkpointMatches
+      ? existingCheckpoint!
+      : {
+          id: 'checkpoint-full-rebuild',
+          kind: 'checkpoint',
+          taskType: 'full_rebuild',
+          status: 'running',
+          createdAt: now,
+          updatedAt: now,
+          rangeStart: startFloor,
+          rangeEnd: endFloor,
+          batchSize,
+          nextFloor: startFloor,
+          lastCommittedFloor: startFloor - 1,
+          sourceChatRevision,
+          transactionId,
+          statistics: {
+            processedBatches: 0,
+            failedBatches: 0,
+            summaryRecords: 0,
+            characterMemoryRecords: 0,
+            vectorRecords: 0,
+          },
+        };
+
+    if (activeCheckpoint.status === 'ready') {
+      store.replaceSummaryRangeAtomically(startFloor, endFloor, stagedSummaries);
+      for (const summary of stagedSummaries) {
+        const nsfw = (summary as any)._batchNsfwMemories;
+        if (Array.isArray(nsfw) && nsfw.length > 0) store.updateNsfwMemories(nsfw);
+      }
+      store.forcePersist();
+      await finalizeBatchRebuild(chatId, transactionId);
+      progress.currentBatch = totalBatches;
+      progress.status = 'done';
+      progress.pauseReason = undefined;
+      onProgress({ ...progress });
+      logInfo('批量总结', `已从 ready Checkpoint 恢复并完成投影: ${transactionId}`);
+      return;
+    }
+    activeCheckpoint = { ...activeCheckpoint, status: 'running', error: undefined, updatedAt: new Date().toISOString() };
+    await saveBatchRebuildCheckpoint(chatId, activeCheckpoint);
+    progress.pauseReason = undefined;
+    const pauseForUser = async (): Promise<void> => {
+      activeCheckpoint = {
+        ...activeCheckpoint,
+        status: 'paused',
+        error: '用户暂停批量总结',
+        updatedAt: new Date().toISOString(),
+      };
+      await saveBatchRebuildCheckpoint(chatId, activeCheckpoint);
+      progress.status = 'paused';
+      progress.pauseReason = 'user';
+      onProgress({ ...progress });
+    };
+    const resumeFloor = Math.max(
+      startFloor,
+      activeCheckpoint.nextFloor,
+      Math.floor(options?.resumeFromFloor ?? startFloor),
+    );
+    const firstBatch = Math.max(0, Math.floor((resumeFloor - startFloor) / batchSize));
     onProgress({ ...progress });
-    logInfo('批量总结', `开始: 楼层 ${startFloor}-${endFloor}, ${rangeContents.length}条, ${totalBatches}批`);
+    logInfo(
+      '批量总结',
+      `${stagedSummaries.length > 0 ? '断点续跑' : '开始'}: 楼层 ${startFloor}-${endFloor}, ${rangeContents.length}条, ${totalBatches}批, tx=${transactionId}`,
+    );
 
     // 2. 逐批处理（按楼层范围）
-    for (let b = 0; b < totalBatches; b++) {
+    for (let b = firstBatch; b < totalBatches; b++) {
       // 外部中止检查
       if (abortSignal?.value) {
-        progress.status = 'cancelled';
-        onProgress({ ...progress });
+        await pauseForUser();
         return;
       }
       const batchStartFloor = startFloor + b * batchSize;
@@ -226,6 +328,14 @@ export async function executeBatchSummary(
       onProgress({ ...progress });
 
       if (batchContents.length === 0) {
+        activeCheckpoint = {
+          ...activeCheckpoint,
+          status: 'running',
+          nextFloor: batchEndFloor + 1,
+          lastCommittedFloor: batchEndFloor,
+          updatedAt: new Date().toISOString(),
+        };
+        await saveBatchRebuildCheckpoint(chatId, activeCheckpoint);
         continue;
       }
 
@@ -236,8 +346,7 @@ export async function executeBatchSummary(
       for (let retry = 0; retry <= MAX_RETRIES; retry++) {
         // 每次重试前检查中止信号
         if (abortSignal?.value) {
-          progress.status = 'cancelled';
-          onProgress({ ...progress });
+          await pauseForUser();
           return;
         }
 
@@ -249,8 +358,7 @@ export async function executeBatchSummary(
             await interruptibleSleep(delay, abortSignal);
           } catch (e: any) {
             if (e?.name === 'AbortError') {
-              progress.status = 'cancelled';
-              onProgress({ ...progress });
+              await pauseForUser();
               return;
             }
             throw e;
@@ -259,7 +367,7 @@ export async function executeBatchSummary(
 
         try {
           // 获取上次总结作为上下文（每批自动续接）
-          const previousSummary = store.getLatestSummary();
+          const previousSummary = store.previewSummarySequence(stagedSummaries) || store.getLatestSummary();
           const existingMemories: CharacterMemory[] = previousSummary?.characterMemories || [];
           const summaryVersion = (previousSummary?.version || 0) + 1;
 
@@ -275,8 +383,7 @@ export async function executeBatchSummary(
 
           // AI 调用完成后立即检查中止
           if (abortSignal?.value) {
-            progress.status = 'cancelled';
-            onProgress({ ...progress });
+            await pauseForUser();
             return;
           }
 
@@ -291,8 +398,7 @@ export async function executeBatchSummary(
           );
 
           if (abortSignal?.value) {
-            progress.status = 'cancelled';
-            onProgress({ ...progress });
+            await pauseForUser();
             return;
           }
 
@@ -303,60 +409,113 @@ export async function executeBatchSummary(
             summaryVersion,
             previousSummary,
           );
+          summary.upToMessageId = lastMsgId;
+          summary.coveredMessageIds = batchCoveredIds;
+          summary.rebuildTransactionId = transactionId;
+          (summary as any)._batchNsfwMemories = memResult.nsfwMemories;
+          store.prepareSummaryForCommit(summary);
 
-          store.addSummary(summary, lastMsgId, batchCoveredIds);
-
-          // NSFW 记忆存储
-          if (memResult.nsfwMemories.length > 0) {
-            store.updateNsfwMemories(memResult.nsfwMemories);
-            store.forcePersist();
-            logInfo('批量总结', `NSFW记忆已更新 (${memResult.nsfwMemories.length} 角色)`);
+          // === 向量先写入 staged bundle；失败时保留可重建的文本记录 ===
+          if (store.settings.embeddingEnabled && store.settings.embeddingApiKey) {
+            try {
+              if (summary.timeline.length > 0) {
+                await embedTimelineEvents(
+                  summary.timeline,
+                  store.settings.embeddingApiUrl,
+                  store.settings.embeddingApiKey,
+                  store.settings.embeddingModel,
+                  store.settings.embeddingDimensions,
+                  undefined,
+                  store.settings.embeddingManualMatryoshka,
+                );
+              }
+              const totalCores = memResult.characterMemories.reduce(
+                (sum: number, memory: any) => sum + (memory.coreMemories?.length || 0),
+                0,
+              );
+              if (totalCores > 0) {
+                await embedCharacterMemories(
+                  memResult.characterMemories,
+                  store.settings.embeddingApiUrl,
+                  store.settings.embeddingApiKey,
+                  store.settings.embeddingModel,
+                  store.settings.embeddingDimensions,
+                  store.settings.embeddingManualMatryoshka,
+                );
+              }
+            } catch (embeddingError) {
+              logWarn('批量总结', 'Embedding 失败，保留文本并允许后续 vector_rebuild', String(embeddingError));
+            }
           }
 
-          // === 后台生成向量（不阻塞批量流程） ===
-          if (store.settings.embeddingEnabled && store.settings.embeddingApiKey) {
-            // 时间线事件向量
-            if (summary.timeline.length > 0) {
-              embedTimelineEvents(
-                summary.timeline,
-                store.settings.embeddingApiUrl,
-                store.settings.embeddingApiKey,
-                store.settings.embeddingModel,
-                store.settings.embeddingDimensions,
-                undefined,
-                store.settings.embeddingManualMatryoshka,
-              ).then(() => {
-                store.syncCharacterMemoryBatchEmbeddings(summary.version, memResult.characterMemories);
-                store.forcePersist();
-              }).catch(() => {});
-            }
-
-            // 核心记忆向量
-            const totalCores = memResult.characterMemories.reduce(
-              (s: number, m: any) => s + (m.coreMemories?.length || 0),
+          const characterRecordCount = memResult.characterMemories.reduce(
+            (sum: number, memory: any) => sum + (
+              memory.orderedNewMemories?.length
+              || (memory.coreMemories?.length || 0) + (memory.recentMemories?.length || 0)
+            ),
+            0,
+          );
+          const vectorRecordCount = summary.timeline.filter(event => event.embedding?.length).length
+            + memResult.characterMemories.reduce(
+              (sum: number, memory: any) => sum + (memory.coreMemories || []).filter((item: any) => (
+                typeof item !== 'string' && item.embedding?.length
+              )).length,
               0,
             );
-            if (totalCores > 0) {
-              embedCharacterMemories(
-                memResult.characterMemories,
-                store.settings.embeddingApiUrl,
-                store.settings.embeddingApiKey,
-                store.settings.embeddingModel,
-                store.settings.embeddingDimensions,
-                store.settings.embeddingManualMatryoshka,
-              ).then(() => store.forcePersist()).catch(() => {});
-            }
+          const checkpoint: MemoryCheckpointRecord = {
+            ...activeCheckpoint,
+            status: 'running',
+            nextFloor: batchEndFloor + 1,
+            lastCommittedFloor: batchEndFloor,
+            updatedAt: new Date().toISOString(),
+            error: undefined,
+            statistics: {
+              processedBatches: activeCheckpoint.statistics.processedBatches + 1,
+              failedBatches: activeCheckpoint.statistics.failedBatches,
+              summaryRecords: activeCheckpoint.statistics.summaryRecords + 1 + summary.timeline.length,
+              characterMemoryRecords: activeCheckpoint.statistics.characterMemoryRecords + characterRecordCount,
+              vectorRecords: activeCheckpoint.statistics.vectorRecords + vectorRecordCount,
+            },
+          };
+          const staged = await stageBatchMemoryTransaction({
+            chatId,
+            smallSummaries: [],
+            grandSummary: summary,
+            assistantContents: batchContents,
+            settings: {
+              embeddingApiUrl: store.settings.embeddingApiUrl,
+              embeddingModel: store.settings.embeddingModel,
+              embeddingDimensions: store.settings.embeddingDimensions,
+            },
+            transactionId,
+            checkpoint,
+          });
+          summary.memoryBundleId = staged.bundleId;
+          stagedSummaries = [...stagedSummaries, summary];
+          activeCheckpoint = {
+            ...checkpoint,
+            lastCommittedBundleId: staged.bundleId,
+          };
 
-          }
-
-          if (retry > 0) {
-          }
+          logInfo('批量总结', `第${b + 1}/${totalBatches}批已进入 staging，尚未对召回生效`);
           break;
         } catch (err: any) {
           // AbortError = 用户中止请求，直接退出
           if (err?.name === 'AbortError') {
+            await pauseForUser();
+            clearInterval(abortPollTimer);
+            return;
+          }
+          if (err?.name === 'MemorySourceChangedError') {
             progress.status = 'cancelled';
+            progress.pauseReason = undefined;
+            progress.errors.push({
+              batch: b + 1,
+              message: String(err?.message || '来源聊天已经变化，本次批量重建已取消'),
+              retries: retry,
+            });
             onProgress({ ...progress });
+            logWarn('批量总结', '来源聊天已经变化，本次事务已取消且不会续写旧 Checkpoint');
             clearInterval(abortPollTimer);
             return;
           }
@@ -375,6 +534,18 @@ export async function executeBatchSummary(
               retries: MAX_RETRIES + 1,
             });
             progress.status = 'paused';
+            progress.pauseReason = 'error';
+            activeCheckpoint = {
+              ...activeCheckpoint,
+              status: 'paused',
+              error: String(err?.message || err),
+              updatedAt: new Date().toISOString(),
+              statistics: {
+                ...activeCheckpoint.statistics,
+                failedBatches: activeCheckpoint.statistics.failedBatches + 1,
+              },
+            };
+            await saveBatchRebuildCheckpoint(chatId, activeCheckpoint);
             onProgress({ ...progress });
             return;  // 停止整个批量，等待用户决定继续或放弃
           }
@@ -382,16 +553,31 @@ export async function executeBatchSummary(
       }
     }
 
+    await activateBatchRebuild(chatId, transactionId);
+    const activatedState = await loadBatchRebuildState(chatId);
+    const activatedSummaries = activatedState.summaries as GrandSummary[];
+    store.replaceSummaryRangeAtomically(startFloor, endFloor, activatedSummaries);
+    for (const summary of activatedSummaries) {
+      const nsfw = (summary as any)._batchNsfwMemories;
+      if (Array.isArray(nsfw) && nsfw.length > 0) store.updateNsfwMemories(nsfw);
+    }
+    store.forcePersist();
+    await finalizeBatchRebuild(chatId, transactionId);
+
+    progress.currentBatch = totalBatches;
     progress.status = 'done';
+    progress.pauseReason = undefined;
     onProgress({ ...progress });
     const okCount = totalBatches - progress.errors.filter((e) => e.retries > MAX_RETRIES).length;
-    logInfo('批量总结', `完成: ${okCount}/${totalBatches}批成功, ${progress.errors.length}次错误`);
+    logInfo('批量总结', `原子激活完成: ${okCount}/${totalBatches}批成功, tx=${transactionId}`);
   } catch (err: any) {
     clearInterval(abortPollTimer);
     if (err?.name === 'AbortError') {
-      progress.status = 'cancelled';
+      progress.status = 'paused';
+      progress.pauseReason = 'user';
     } else {
-      progress.status = 'done';
+      progress.status = 'paused';
+      progress.pauseReason = 'error';
       progress.errors.push({
         batch: 0,
         message: `致命错误: ${err?.message || err}`,
