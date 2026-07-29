@@ -31,7 +31,7 @@ import {
   hideSummaryFloors,
 } from './core/floorVisibility';
 import { enqueueAnalysis, clearSchedulerQueue } from './core/backgroundQueue';
-import { embedTimelineEvents, embedCharacterMemories, getEmbedding, cosineSimilarity } from './core/embedding';
+import { embedTimelineEvents, embedCharacterMemories, getEmbedding, rerankCandidates } from './core/embedding';
 import { executeSmallSummary, type SmallSummaryKgOptions, type PreviousRoundContext } from './core/smallSummary';
 import { applyKnowledgeGraphDiff, createEmptyKnowledgeGraph, embedKnowledgeGraphNodes, hasMissingEmbedding, buildStableId } from './core/knowledgeGraph';
 import type { KnowledgeGraph } from './core/knowledgeGraph';
@@ -47,6 +47,17 @@ import { cleanCharacterAliases, normalizeCharacterName } from './utils/character
 import { logInfo, logWarn, logError } from './utils/logger';
 import { isMvuExtraAnalysis, stripZhinoInjectionsFromCompletion } from './utils/mvuGuard';
 import { useMainStore, type CapturedContent, type CharacterMemory, type GrandSummary, type TimelineEvent } from './stores/mainStore';
+import {
+  fingerprintMemorySourceContents,
+  installMemoryWarehouseDebugApi,
+  reconcileMemoryWarehouseSourceChange,
+  recallCharacterMemoriesFromWarehouse,
+  recallTimelineEventsFromWarehouse,
+} from './core/memoryWarehouseRuntime';
+import { commitRealtimeMemoryTransaction } from './core/memoryCommitCoordinator';
+import { rawChatReader } from './core/rawChatReader';
+import { SourceChangeTracker } from './core/sourceChangeTracker';
+import { deleteMemoryWarehouseForChat } from './core/memoryWarehouse';
 
 // ========== 新模块导入 ==========
 import { executeGrandSummaryV2 } from './core/grandSummaryV2';
@@ -79,7 +90,7 @@ import {
   readRecentAssistantContents,
 } from './utils/chatContent';
 
-const MQZN_BUILD_MARK = 'chat-vars-persist-20260707-smooth-ingest';
+const MQZN_BUILD_MARK = 'context-fold-final-a-20260717';
 
 try {
   (window as any).__MQZN_BUILD_MARK = MQZN_BUILD_MARK;
@@ -106,7 +117,16 @@ function getLatestValidCapturedFloorBefore(store: ReturnType<typeof useMainStore
 function truncateMainResponseArtifactsFromFloor(
   store: ReturnType<typeof useMainStore>,
   aiFloor: number,
-): { captured: number; userRecords: number; smallSummaries: number; kgVersions: number; worldProgress: number; cursors: number } {
+): {
+  captured: number;
+  userRecords: number;
+  smallSummaries: number;
+  kgVersions: number;
+  worldProgress: number;
+  dynamicProfiles: number;
+  dreamtalk: number;
+  cursors: number;
+} {
   const captured = 0;
 
   const userFloor = aiFloor - 1;
@@ -135,6 +155,8 @@ function truncateMainResponseArtifactsFromFloor(
   }
 
   const worldProgress = store.truncateWorldProgressRecords(aiFloor);
+  let dynamicProfiles = 0;
+  let dreamtalk = 0;
   let cursors = 0;
   if (store.chatData.lastWorldProgressFloor >= aiFloor) {
     const records = store.chatData.worldProgressRecords || [];
@@ -145,6 +167,9 @@ function truncateMainResponseArtifactsFromFloor(
   }
   if (store.chatData.lastDreamtalkFloor >= aiFloor) {
     store.chatData.lastDreamtalkFloor = getLatestValidCapturedFloorBefore(store, aiFloor);
+    dreamtalk = (store.chatData.dreamtalk ? 1 : 0) + (store.chatData.dreamtalkHistory?.length || 0);
+    store.chatData.dreamtalk = null;
+    store.chatData.dreamtalkHistory = [];
     cursors++;
   }
   if (store.chatData.lastPlotCheckFloor >= aiFloor) {
@@ -168,13 +193,20 @@ function truncateMainResponseArtifactsFromFloor(
       cursors++;
     }
   }
+  if (store.chatData.lastDynamicProfileFloor >= aiFloor) {
+    dynamicProfiles = store.chatData.dynamicProfilesV2?.length || 0;
+    store.chatData.dynamicProfilesV2 = [];
+    store.chatData.lastDynamicProfileFloor = getLatestValidCapturedFloorBefore(store, aiFloor);
+    store.chatData.pendingDynamicProfile = store.settings.dynamicProfileEnabled;
+    cursors++;
+  }
   if (store.chatData.pendingWorldProgress && (store.chatData.pendingWorldProgressFloor ?? -1) >= aiFloor) {
     store.chatData.pendingWorldProgress = false;
     store.chatData.pendingWorldProgressFloor = -1;
     cursors++;
   }
 
-  if (captured || userRecords || obsoleteSmallSummaries.length || worldProgress || cursors) {
+  if (captured || userRecords || obsoleteSmallSummaries.length || worldProgress || dynamicProfiles || dreamtalk || cursors) {
     store.forcePersist({ settings: false });
   }
 
@@ -184,6 +216,8 @@ function truncateMainResponseArtifactsFromFloor(
     smallSummaries: obsoleteSmallSummaries.length,
     kgVersions: obsoleteKgVersions.length,
     worldProgress,
+    dynamicProfiles,
+    dreamtalk,
     cursors,
   };
 }
@@ -278,31 +312,11 @@ function fuzzyMatchKeyword(keyword: string, text: string): boolean {
   return false;
 }
 
-/**
- * 用户侧模糊匹配 — 比通用版更宽松，支持反向子串
- *
- * 动机：用户在对话中只说"蛊"或"剑"，应该匹配到触发词"月光蛊""十全剑"。
- * 在标准正向子串匹配（关键词片段 ⊆ 用户文本）之后，
- * 追加反向检测：用户文本中的完整词条是否被关键词包含。
- *
- * 反向匹配仅对 ≥1 字的词语生效，且仅用于用户侧（AI回复侧保持原有精度）。
- */
-function fuzzyMatchKeywordUser(keyword: string, userText: string): boolean {
-  // 标准正向匹配
-  if (fuzzyMatchKeyword(keyword, userText)) return true;
-  // 反向匹配：用户文本中的词 ⊆ 关键词
-  const kwLower = keyword.toLowerCase();
-  const ut = userText.toLowerCase();
-  // 提取用户输入中的连续词块（中文/英文/数字）
-  const userWords = ut.match(/[\u4e00-\u9fff\w]+/g) || [];
-  for (const word of userWords) {
-    if (word.length >= 1 && kwLower.includes(word)) return true;
-  }
-  return false;
-}
-
 $(() => {
   const pinia = createPinia();
+  const sourceChangeTracker = new SourceChangeTracker();
+  let sourceChangeQueue: Promise<void> = Promise.resolve();
+  let unresolvedSourceChangeFloor: number | null = null;
 
   // ========== 前端面板挂载（div模式，挂载到酒馆网页body） ==========
 
@@ -317,9 +331,21 @@ $(() => {
     styleHandle = teleportStyle();
     app.mount($app[0]);
     const store = useMainStore(pinia);
+    sourceChangeTracker.reset(rawChatReader.readAllSourceContents());
     if (options.captureFloorZero !== false && getCurrentChatIdSafe()) {
       store.captureFloorZero();
     }
+    installMemoryWarehouseDebugApi(() => ({
+      chatId: store.chatData.chatId || getCurrentChatIdSafe(),
+      smallSummaries: store.chatData.smallSummaries,
+      grandSummaries: store.chatData.summaries,
+      settings: {
+        embeddingApiUrl: store.settings.embeddingApiUrl,
+        embeddingModel: store.settings.embeddingModel,
+        embeddingDimensions: store.settings.embeddingDimensions,
+      },
+    }));
+    setTimeout(() => void auditCommittedMemorySources(store), 0);
   };
 
   // 捕获开场白（第0层不会触发 MESSAGE_RECEIVED 事件）
@@ -684,6 +710,10 @@ $(() => {
       let { record, graphDiff, characterLocations: parsedCharLocs } = await executeSmallSummary(
         userText, aiText, userFloor, aiFloor, allNames, store.getUserName(), kgOptions, characterEntries, previousContext,
       );
+      if (!isCapturedContentCurrent(store, aiFloor, aiText)) {
+        logWarn('小总结', `分析完成时来源已变化，丢弃过期结果: 楼层 ${aiFloor}`);
+        return;
+      }
       record.presentCharacters = store.resolveKnownCharacterNames(record.presentCharacters, true);
       if (record.interactingCharacters && record.interactingCharacters.length > 0) {
         record.interactingCharacters = store.resolveKnownCharacterNames(record.interactingCharacters, true);
@@ -819,6 +849,99 @@ $(() => {
     }, String(aiFloor));
   }
 
+  function invalidateHotMemoryProjections(
+    store: ReturnType<typeof useMainStore>,
+    floor: number,
+  ): { summaries: number; artifacts: ReturnType<typeof truncateMainResponseArtifactsFromFloor> } {
+    clearSchedulerQueue();
+    const summaries = store.invalidateSummaryProjectionsFromFloor(floor);
+    const artifacts = truncateMainResponseArtifactsFromFloor(store, floor);
+    store.touchChatContent();
+    return { summaries, artifacts };
+  }
+
+  async function auditCommittedMemorySources(store: ReturnType<typeof useMainStore>): Promise<void> {
+    const chatId = store.chatData.chatId || getCurrentChatIdSafe();
+    if (!chatId) return;
+    try {
+      const result = await reconcileMemoryWarehouseSourceChange({
+        chatId,
+        floor: 0,
+        reason: 'source_changed',
+        currentSourceContents: rawChatReader.readAllSourceContents(),
+      });
+      if (!result.sourceChanged) return;
+      const hot = invalidateHotMemoryProjections(store, 0);
+      logWarn(
+        '记忆来源',
+        `启动核对发现过期来源，已作废 ${result.invalidatedBundleCount} 个 Bundle`,
+        `hot=${JSON.stringify(hot)}`,
+      );
+    } catch (error) {
+      unresolvedSourceChangeFloor = 0;
+      logError('记忆来源', '启动来源核对失败，已暂停记忆注入', String(error));
+    }
+  }
+
+  function enqueueSourceChangeReconcile(
+    store: ReturnType<typeof useMainStore>,
+    eventFloor: number,
+    reason: Parameters<typeof reconcileMemoryWarehouseSourceChange>[0]['reason'],
+    force = false,
+    retryCount = 0,
+  ): Promise<void> {
+    const requestedFloor = Math.max(0, Math.floor(Number(eventFloor) || 0));
+    const task = sourceChangeQueue.catch(() => undefined).then(async () => {
+      const currentSources = rawChatReader.readSourceContentsInRange(
+        requestedFloor,
+        rawChatReader.getLastMessageId(),
+      );
+      const diff = sourceChangeTracker.diffAndReset(currentSources, requestedFloor);
+      if (!force && !diff.changed) return;
+      const floor = Math.max(0, Math.min(requestedFloor, diff.earliestChangedFloor ?? requestedFloor));
+      unresolvedSourceChangeFloor = unresolvedSourceChangeFloor === null
+        ? floor
+        : Math.min(unresolvedSourceChangeFloor, floor);
+      const chatId = store.chatData.chatId || getCurrentChatIdSafe();
+      if (!chatId) return;
+      try {
+        const result = await reconcileMemoryWarehouseSourceChange({
+          chatId,
+          floor,
+          reason,
+          currentSourceContents: currentSources,
+          cancelStaged: diff.changed || force,
+        });
+        const hot = invalidateHotMemoryProjections(store, floor);
+        unresolvedSourceChangeFloor = null;
+        logInfo(
+          '记忆来源',
+          `来源变化已处理: floor=${floor}, Bundle=${result.invalidatedBundleCount}, staged=${result.invalidatedStagedBundleCount}`,
+          `changed=${diff.changedMessageIds.join(',') || 'forced'}; hot=${JSON.stringify(hot)}`,
+        );
+      } catch (error) {
+        invalidateHotMemoryProjections(store, floor);
+        sourceChangeTracker.reset([]);
+        logError('记忆来源', `楼层 ${floor} 作废失败，已暂停记忆注入`, String(error));
+        try {
+          window.toastr?.error(
+            `楼层 ${floor} 的旧记忆作废失败，智脑已暂停记忆注入以避免召回过期内容。请检查世界书保存状态。`,
+            '记忆来源事务失败',
+            { timeOut: 8000, extendedTimeOut: 4000 },
+          );
+        } catch { /* ignore */ }
+        if (retryCount < 2) {
+          setTimeout(() => {
+            void enqueueSourceChangeReconcile(store, floor, reason, true, retryCount + 1);
+          }, 1500 * (retryCount + 1));
+        }
+        throw error;
+      }
+    });
+    sourceChangeQueue = task.catch(() => undefined);
+    return task;
+  }
+
   // 监听AI回复完成 → 捕获正文 + 记录用户输入 + 检查是否触发大总结 + 后台推演
   eventOn(tavern_events.MESSAGE_RECEIVED, (messageId, type) => {
     try {
@@ -936,6 +1059,14 @@ $(() => {
         }
       }
     } catch (err) {
+    } finally {
+      setTimeout(() => {
+        const floor = Math.max(0, Math.floor(Number(messageId) || 0) - 1);
+        sourceChangeTracker.updateFromFloor(
+          rawChatReader.readSourceContentsInRange(floor, rawChatReader.getLastMessageId()),
+          floor,
+        );
+      }, 0);
     }
   });
 
@@ -943,6 +1074,13 @@ $(() => {
 
   eventOn(tavern_events.MESSAGE_SENT, () => {
     const store = useMainStore(pinia);
+    setTimeout(() => {
+      const floor = Math.max(0, rawChatReader.getLastMessageId());
+      sourceChangeTracker.updateFromFloor(
+        rawChatReader.readSourceContentsInRange(floor, rawChatReader.getLastMessageId()),
+        floor,
+      );
+    }, 0);
     const lastId = (() => {
       try { return getLastMessageId(); } catch { return -1; }
     })();
@@ -1018,7 +1156,12 @@ $(() => {
     const store = useMainStore(pinia);
     if (!store.settings.captureEnabled) return;
 
-    setTimeout(() => {
+    setTimeout(async () => {
+      try {
+        await enqueueSourceChangeReconcile(store, messageId, 'swipe');
+      } catch {
+        // 已进入 fail-closed；仍允许当前合法正文重建热场景数据。
+      }
       const extractedContent = readAssistantExtractedContentAtFloor(messageId);
       if (extractedContent === null) return;
 
@@ -1051,10 +1194,62 @@ $(() => {
     }, 500);
   });
 
+  const handleEditedOrUpdatedMessage = (
+    messageId: number,
+    reason: 'source_changed' | 'message_deleted',
+    rerunCurrentScene: boolean,
+  ) => {
+    const floor = Math.max(0, Math.floor(Number(messageId) || 0));
+    setTimeout(async () => {
+      const store = useMainStore(pinia);
+      try {
+        await enqueueSourceChangeReconcile(store, floor, reason);
+      } catch {
+        return;
+      }
+      if (!rerunCurrentScene) return;
+      const assistant = rawChatReader.readRange(floor, rawChatReader.getLastMessageId(), 'assistant')
+        .find(message => !message.ignored && isValidMainContent(message.content));
+      if (!assistant) return;
+      const user = rawChatReader.readLatestUserBefore(assistant.messageId);
+      runSmallSummaryForAiMessage(
+        store,
+        user?.messageId ?? assistant.messageId - 1,
+        assistant.messageId,
+        user?.rawContent ?? '',
+        assistant.content,
+      );
+    }, 250);
+  };
+
+  eventOn(tavern_events.MESSAGE_EDITED, messageId => {
+    handleEditedOrUpdatedMessage(messageId, 'source_changed', true);
+  });
+  eventOn(tavern_events.MESSAGE_UPDATED, messageId => {
+    handleEditedOrUpdatedMessage(messageId, 'source_changed', false);
+  });
+  eventOn(tavern_events.MESSAGE_DELETED, messageId => {
+    handleEditedOrUpdatedMessage(messageId, 'message_deleted', false);
+  });
+
+
   // ========== 提示词注入系统 ==========
 
   eventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY, async completion => {
     const store = useMainStore(pinia);
+
+    if (unresolvedSourceChangeFloor !== null) {
+      removeDynamicProfileV2Injection();
+      removeWorldGraphInjection();
+      removeWorldProgressInjection();
+      removeNeuralChainInjection();
+      removeNsfwInjection();
+      removeRelationshipInjection();
+      removeWorldBookTagIndexInjection();
+      removePlotInjection();
+      logWarn('记忆来源', `楼层 ${unresolvedSourceChangeFloor} 的来源事务未完成，本次跳过智脑注入`);
+      return;
+    }
 
     // ═══ 后台分析守护 ═══
     // callGenerateRaw 在原生 API 模式下会在 prompt 头部注入 <!--ZHINO_BG--> 标记。
@@ -1175,190 +1370,209 @@ $(() => {
         ])];
         const userName = store.getUserName();
 
-        // 重排增强召回（可选，异步执行）
-        let preReranked: Map<string, Array<{ text: string; isCore: boolean; time?: string }>> | undefined;
-        if (store.settings.rerankEnabled && sharedQueryText) {
-          const currentChars = scanCharacterNamesFromContent(scanText, allNames, characterEntries);
-          if (currentChars.length > 0) {
-            try {
-              preReranked = await store.rerankEnhancedRecall(currentChars, sharedQueryText);
-            } catch (e) {
-              logWarn('语义召回', '重排失败，降级粗筛', String(e));
+        type NeuralRecallItem = { text: string; isCore: boolean; time?: string; source?: string; id?: string; floor?: number };
+        const currentChars = scanCharacterNamesFromContent(scanText, allNames, characterEntries);
+        let preReranked: Map<string, NeuralRecallItem[]> | undefined;
+        let warehouseRecallAttempted = false;
+
+        // 新记忆仓只负责提供候选记忆；神经链标签、说明文字和插入位置保持原样。
+        if (currentChars.length > 0) {
+          warehouseRecallAttempted = true;
+          try {
+            const recalledByCharacter = await Promise.all(currentChars.map(async characterName => {
+              const characterMemory = latestMemory.find(memory => memory.characterName === characterName);
+              const recallLimit = Number((characterMemory as any)?.recallLimit ?? store.settings.memoryRecallLimit ?? 10);
+              const result = await recallCharacterMemoriesFromWarehouse(
+                {
+                  chatId: store.chatData.chatId || getCurrentChatIdSafe(),
+                  settings: {
+                    embeddingApiUrl: store.settings.embeddingApiUrl,
+                    embeddingModel: store.settings.embeddingModel,
+                    embeddingDimensions: store.settings.embeddingDimensions,
+                  },
+                },
+                {
+                  characterName,
+                  queryText: sharedQueryText || scanText,
+                  queryVector: sharedQueryEmb ?? undefined,
+                  recentBundleCount: store.settings.recentMemoryVersions ?? 1,
+                  recallLimit,
+                  candidateMultiplier: store.settings.rerankEnabled
+                    ? (store.settings.rerankCandidateMultiplier ?? 3)
+                    : 1,
+                  hybridWeight: 0.7,
+                  minScore: 0,
+                },
+              );
+              const recent: NeuralRecallItem[] = result.recent.map(record => ({
+                text: record.text,
+                isCore: record.memoryType === 'core',
+                time: record.storyTime,
+                source: 'memory_warehouse_recent',
+                id: record.id,
+                floor: record.floorEnd,
+              }));
+              const recalled: NeuralRecallItem[] = result.recalled
+                .filter(item => item.record.kind === 'character_memory')
+                .map(item => ({
+                  text: item.record.kind === 'character_memory' ? item.record.text : '',
+                  isCore: item.record.kind === 'character_memory' && item.record.memoryType === 'core',
+                  time: item.record.storyTime,
+                  source: 'memory_warehouse_recall',
+                  id: item.record.id,
+                  floor: item.record.floorEnd,
+                }))
+                .filter(item => item.text);
+              return { characterName, recallLimit, recent, recalled };
+            }));
+
+            const warehouseMap = new Map<string, NeuralRecallItem[]>();
+            for (const result of recalledByCharacter) {
+              const seen = new Set<string>();
+              const combined = [...result.recalled, ...result.recent].filter(item => {
+                const text = item.text.trim();
+                if (!text || seen.has(text)) return false;
+                seen.add(text);
+                return true;
+              });
+              if (combined.length > 0) warehouseMap.set(result.characterName, combined);
             }
+
+            if (warehouseMap.size > 0 && store.settings.rerankEnabled && sharedQueryText) {
+              try {
+                const candidates = recalledByCharacter.flatMap(result =>
+                  result.recalled.map((item, index) => ({
+                    characterName: result.characterName,
+                    recallLimit: result.recallLimit,
+                    index,
+                    item,
+                    document: `${result.characterName}: ${item.text}`,
+                  })),
+                );
+                if (candidates.length > 0) {
+                  const reranked = await rerankCandidates(
+                    sharedQueryText,
+                    candidates.map(candidate => candidate.document),
+                    candidates.length,
+                    store.settings.embeddingApiUrl,
+                    store.settings.embeddingApiKey,
+                    store.settings.rerankModel,
+                  );
+                  const scoreByDocument = new Map(reranked.map(result => [result.text, result.score]));
+                  for (const result of recalledByCharacter) {
+                    const ranked = candidates
+                      .filter(candidate => candidate.characterName === result.characterName)
+                      .sort((left, right) => (
+                        (scoreByDocument.get(right.document) ?? -1) - (scoreByDocument.get(left.document) ?? -1)
+                        || left.index - right.index
+                      ))
+                      .slice(0, result.recallLimit)
+                      .map(candidate => candidate.item);
+                    const seen = new Set<string>();
+                    const combined = [...ranked, ...result.recent].filter(item => {
+                      const text = item.text.trim();
+                      if (!text || seen.has(text)) return false;
+                      seen.add(text);
+                      return true;
+                    });
+                    if (combined.length > 0) warehouseMap.set(result.characterName, combined);
+                  }
+                }
+              } catch (e) {
+                logWarn('记忆仓召回', '仓库候选重排失败，保留混合粗排结果', String(e));
+              }
+            }
+            if (warehouseMap.size > 0) {
+              preReranked = warehouseMap;
+              logInfo('记忆仓召回', `角色记忆命中 ${warehouseMap.size}/${currentChars.length} 个角色`);
+            }
+          } catch (e) {
+            logWarn('记忆仓召回', '读取失败，本轮跳过角色记忆注入', String(e));
           }
         }
 
-        injectNeuralChain(store, latestMemory, scanText, allNames, characterEntries, userName, sharedQueryEmb ?? undefined, sharedQueryText || undefined, preReranked);
-
-        // B4: 事件回忆注入 — 近期全注入 + 远期触发召回
-        const timeline = store.getLatestSummary()?.timeline || [];
-        if (timeline.length > 0) {
-          // 扩展扫描范围：AI回复 + 用户上条输入
-          const lastUserInput = latestUserInputText;
-          const scanTextFull = (lastUserInput + '\n' + scanText).toLowerCase();
-
-          const currentVersion = store.getLatestSummary()?.version || 0;
-          const recentCount = store.settings.eventRecallRecent || 2;
-          const recentThreshold = currentVersion - recentCount + 1;
-          const recallLimit = store.settings.eventRecallLimit || 8;
-
-          // 分流：近期 vs 远期
-          const recentAll = timeline.filter(e => (e.summaryVersion || 0) >= recentThreshold);
-          const olderAll = timeline.filter(e => (e.summaryVersion || 0) < recentThreshold);
-
-          const toInject: Array<{ event: string; detail?: string }> = [];
-
-          // 1. 近期所有事件 → 无条件注入
-          for (const evt of recentAll) {
-            toInject.push({ event: evt.event, detail: evt.detail });
-          }
-
-          // 2. 远期事件召回
-          const versionRange = Math.max(currentVersion - recentThreshold + 2, 1);
-          const useSemantic = store.settings.embeddingEnabled && store.settings.embeddingApiKey;
-          const lastUserInputLower = lastUserInput.toLowerCase();
-          const scanTextLower = scanText.toLowerCase();
-
-          if (sharedQueryEmb) {
-            // ═══ 语义路径：复用统一查询向量 → 余弦相似度 → 打分排序 ═══
-            const withEmb = olderAll.filter(e => e.embedding);
-            if (withEmb.length > 0) {
-              try {
-                const threshold = store.settings.embeddingSimilarityThreshold;
-                type ScoredEmb = { event: string; detail: string; version: number; score: number;
-                  sim: number; recency: number; importance: number };
-                const scored: ScoredEmb[] = [];
-                const belowThreshold: { event: string; sim: number }[] = [];
-
-                for (const evt of withEmb) {
-                  const sim = cosineSimilarity(sharedQueryEmb, evt.embedding!);
-                  if (sim < threshold) {
-                    belowThreshold.push({ event: evt.event, sim });
-                    continue;
-                  }
-
-                  const impScore = (evt.importance || 3) / 5;
-                  const rawRecency = ((evt.summaryVersion || 0) - recentThreshold + 1);
-                  const recency = Math.max(0, Math.min(rawRecency / versionRange, 1));
-                  const score = 0.60 * sim + 0.25 * recency + 0.15 * impScore;
-
-                  scored.push({ event: evt.event, detail: evt.detail || '', version: evt.summaryVersion || 0, score, sim, recency, importance: impScore });
-                }
-
-                scored.sort((a, b) => b.score - a.score || b.version - a.version);
-                const topN = scored.slice(0, recallLimit);
-                for (const s of topN) toInject.push({ event: s.event, detail: s.detail });
-
-                logInfo('语义召回', `召回: 命中${scored.length}条, 注入${topN.length}条`);
-              } catch (err) {
-                logWarn('语义召回', '检索失败，降级关键词', String(err));
-                // 降级：语义失败时回退到关键词匹配
-                keywordRecall(olderAll.filter(e => e.triggers));
-              }
-              }
-          } else {
-            // ═══ 关键词路径（embedding 未开启） ═══
-            keywordRecall(olderAll.filter(e => e.triggers));
-          }
-
-          // ── 关键词匹配（局部函数，语义/降级/关闭时复用）──
-          function keywordRecall(olderWithTriggers: typeof olderAll) {
-            if (olderWithTriggers.length === 0) return;
-
-            type ScoredEvent = { event: string; detail: string; version: number; score: number;
-              userHit: boolean;
-              _dbg: { matchQ: number; recency: number; kwDens: number; charOvlp: number; importance: number } };
-            const matched: ScoredEvent[] = [];
-
-            for (const evt of olderWithTriggers) {
-              const trigChars = evt.triggers!.characters;
-              const trigKeywords = evt.triggers!.keywords;
-
-              let anyUserHit = false;
-              let weightedCharSum = 0;
-              const hitChars: string[] = [];
-              for (const c of trigChars) {
-                const cLower = c.toLowerCase();
-                const hitU = lastUserInputLower.includes(cLower);
-                const hitA = scanTextLower.includes(cLower);
-                if (hitU) anyUserHit = true;
-                if (hitU || hitA) hitChars.push(c);
-                if (hitU && hitA) weightedCharSum += 1.0;
-                else if (hitU) weightedCharSum += 0.8;
-                else if (hitA) weightedCharSum += 0.5;
-              }
-              const charHit = hitChars.length > 0;
-
-              let weightedKwSum = 0;
-              for (const k of trigKeywords) {
-                const parenMatch = k.match(/^(.+?)\((.+?)\)$/);
-                const variants = parenMatch ? [parenMatch[1], parenMatch[2]] : [k];
-                const hitU = variants.some((v: string) => fuzzyMatchKeywordUser(v, lastUserInputLower));
-                const hitA = variants.some((v: string) => fuzzyMatchKeyword(v, scanTextLower));
-                if (hitU) anyUserHit = true;
-                if (hitU && hitA) weightedKwSum += 1.0;
-                else if (hitU) weightedKwSum += 1.0;
-                else if (hitA) weightedKwSum += 0.6;
-              }
-              const kwCount = trigKeywords.filter(k => {
-                const parenMatch = k.match(/^(.+?)\((.+?)\)$/);
-                const variants = parenMatch ? [parenMatch[1], parenMatch[2]] : [k];
-                return variants.some((v: string) => fuzzyMatchKeywordUser(v, lastUserInputLower) || fuzzyMatchKeyword(v, scanTextLower));
-              }).length;
-
-              const shouldInject = (charHit && kwCount >= 1) || (!charHit && kwCount >= 2);
-              if (!shouldInject) continue;
-
-              const evtText = ((evt.event || '') + ' ' + (evt.detail || '')).toLowerCase();
-
-              const kwRatio = trigKeywords.length > 0 ? weightedKwSum / trigKeywords.length : 0;
-              const charRatio = trigChars.length > 0 ? weightedCharSum / trigChars.length : 0;
-              const matchQ = 0.7 * kwRatio + 0.3 * charRatio;
-
-              const rawRecency = ((evt.summaryVersion || 0) - recentThreshold + 1);
-              const recency = Math.max(0, Math.min(rawRecency / versionRange, 1));
-
-              let kwDens = 0;
-              if (trigKeywords.length > 0 && evtText.length > 50) {
-                let totalHits = 0;
-                for (const k of trigKeywords) {
-                  const kw = k.toLowerCase();
-                  let pos = evtText.indexOf(kw);
-                  while (pos !== -1) { totalHits++; pos = evtText.indexOf(kw, pos + 1); }
-                }
-                kwDens = Math.min(totalHits / (evtText.length / 100), 5) / 5;
-              }
-
-              const charOvlp = trigChars.length > 0 ? hitChars.length / trigChars.length : 0;
-              const importance = (evt.importance || 3) / 5;
-              const score = 0.50 * matchQ + 0.10 * recency + 0.15 * kwDens + 0.15 * charOvlp + 0.10 * importance;
-
-              matched.push({
-                event: evt.event,
-                detail: evt.detail || '',
-                version: evt.summaryVersion || 0,
-                score,
-                userHit: anyUserHit,
-                _dbg: { matchQ, recency, kwDens, charOvlp, importance },
-              });
+        // 正式链只从记忆仓读取角色历史；mainStore 仅保留当前热投影，不再承担旧历史召回。
+        const neuralMemoryStore = warehouseRecallAttempted
+          ? {
+              getFusedMemories: (characterName: string) => preReranked?.get(characterName) ?? [],
+              getActiveWorldProgressMemories: (characterName: string) => store.getActiveWorldProgressMemories(characterName),
             }
+          : store;
+        injectNeuralChain(neuralMemoryStore, latestMemory, scanText, allNames, characterEntries, userName, sharedQueryEmb ?? undefined, sharedQueryText || undefined, preReranked);
 
-            if (matched.length === 0) return;
+        // B4: 事件回忆注入 — 仓库近期全取 + 远期混合召回；手工覆盖最后应用
+        const eventRecallChatId = SillyTavern.getCurrentChatId()?.trim() ?? '';
+        if (eventRecallChatId) {
+          try {
+            const eventRecall = await recallTimelineEventsFromWarehouse(
+              {
+                chatId: eventRecallChatId,
+                settings: {
+                  embeddingApiUrl: store.settings.embeddingApiUrl,
+                  embeddingModel: store.settings.embeddingModel,
+                  embeddingDimensions: store.settings.embeddingDimensions,
+                },
+              },
+              {
+                queryText: sharedQueryText || `${latestUserInputText}\n${scanText}`,
+                queryVector: sharedQueryEmb ?? undefined,
+                recentBundleCount: store.settings.eventRecallRecent || 2,
+                recallLimit: store.settings.eventRecallLimit || 8,
+                hybridWeight: 0.7,
+                minScore: sharedQueryEmb
+                  ? Math.max(0.1, (store.settings.embeddingSimilarityThreshold || 0) * 0.7)
+                  : 0.1,
+              },
+            );
+            const overrides = store.timelineOverrides || {};
+            const seenStorageKeys = new Set<string>();
+            const applyOverride = (record: any): TimelineEvent | null => {
+              const base: TimelineEvent = {
+                time: record.storyTime || '',
+                event: record.overview || '',
+                detail: record.detail,
+                summaryVersion: record.summaryVersion,
+                importance: Number(record.payload?.importance ?? 3),
+                triggers: record.payload?.triggers || undefined,
+              };
+              const storageKey = store.getTimelineEventKey(base);
+              seenStorageKeys.add(storageKey);
+              const override = overrides[storageKey];
+              if (override?._deleted) return null;
+              return override ? { ...base, ...override } : base;
+            };
+            const recalledEvents = [
+              ...eventRecall.recent.map(record => applyOverride(record)),
+              ...eventRecall.recalled.map(item => applyOverride(item.record)),
+            ].filter((event): event is TimelineEvent => !!event?.event?.trim());
+            const activated = new Set<string>();
+            for (const event of recalledEvents) activated.add(event.event);
 
-            // 用户匹配优先
-            const userMatched = matched.filter(e => e.userHit).sort((a, b) => b.score - a.score || b.version - a.version);
-            const aiOnlyMatched = matched.filter(e => !e.userHit).sort((a, b) => b.score - a.score || b.version - a.version);
-            const userCount = Math.min(userMatched.length, recallLimit);
-            const aiCount = Math.min(aiOnlyMatched.length, recallLimit - userCount);
-            const toInjectKw = [...userMatched.slice(0, userCount), ...aiOnlyMatched.slice(0, aiCount)];
-
-            for (const s of toInjectKw) {
-              toInject.push({ event: s.event, detail: s.detail });
+            // 用户新增事件没有仓库原始记录；保持旧语义：近期无条件，远期按触发词命中。
+            const currentVersion = store.getLatestSummary()?.version || 0;
+            const recentThreshold = currentVersion - (store.settings.eventRecallRecent || 2) + 1;
+            const scanTextFull = `${latestUserInputText}\n${scanText}`.toLowerCase();
+            for (const [storageKey, override] of Object.entries(overrides) as Array<[string, TimelineEvent & { _deleted?: boolean }]>) {
+              if (seenStorageKeys.has(storageKey) || override._deleted || !override.event?.trim()) continue;
+              const isRecent = (override.summaryVersion || 0) >= recentThreshold;
+              const characters = override.triggers?.characters || [];
+              const keywords = override.triggers?.keywords || [];
+              const characterHit = characters.some(name => scanTextFull.includes(name.toLowerCase()));
+              const keywordHits = keywords.filter(keyword => fuzzyMatchKeyword(keyword, scanTextFull)).length;
+              if (isRecent || (characterHit && keywordHits >= 1) || (!characterHit && keywordHits >= 2)) {
+                activated.add(override.event);
+              }
             }
+            for (const eventName of activated) activatedEventNames.add(eventName);
+            if (recalledEvents.length > 0 || activated.size > 0) {
+              logInfo(
+                '记忆仓召回',
+                `事件命中 近期${eventRecall.recent.length} + 远期${eventRecall.recalled.length}，手工覆盖已应用`,
+              );
+            }
+          } catch (error) {
+            logWarn('记忆仓召回', '事件读取失败，本轮跳过时间线记忆注入', String(error));
           }
-
-          // 收集所有激活事件名（供大总结注入判断是否用详情）
-          for (const t of toInject) activatedEventNames.add(t.event);
         }
       }
     }
@@ -2025,11 +2239,6 @@ $(() => {
         },
       );
       memCharMemories = wpMergeResult.memories;
-      for (const m of store.chatData.worldProgressMemories || []) {
-        if (wpMergeResult.archivedIds.has(m.id)) {
-          (m as any).archivedInSummaryVersion = summaryVersion;
-        }
-      }
 
       const section2 = buildMemorySectionText(memCharMemories);
 
@@ -2060,6 +2269,8 @@ $(() => {
       const summary: GrandSummary = {
         version: summaryVersion,
         generatedAt: new Date().toISOString(),
+        upToMessageId: summarizedUpTo,
+        coveredMessageIds: summarizedMessageIds,
         characterMemories: memCharMemories,
         timeline,
         characterTable: memCharMemories.map(m => ({
@@ -2071,9 +2282,51 @@ $(() => {
         })),
         rawText,
       };
+      store.prepareSummaryForCommit(summary);
 
-      // 同步角色记忆到独立存储（保持 chatData.characterMemories 与 summary 一致）
-      store.chatData.characterMemories = memCharMemories;
+      // 新记忆仓是正式提交边界：先把同一批楼层的场景投影、时间线和角色记忆
+      // 作为一个 MemoryBundle 原子落盘，成功后才允许 mainStore 推进总结游标。
+      const summarizedIdSet = new Set(summarizedMessageIds);
+      const bundleSmallSummaries = (store.chatData.smallSummaries || []).filter((record: any) => {
+        const endFloor = record?.floorRange?.end ?? record?.floorRange?.start;
+        return Number.isFinite(endFloor) && summarizedIdSet.has(endFloor);
+      });
+      await commitRealtimeMemoryTransaction({
+        chatId: store.chatData.chatId || getCurrentChatIdSafe(),
+        smallSummaries: bundleSmallSummaries,
+        grandSummary: summary,
+        assistantContents: pendingContents,
+        settings: {
+          embeddingApiUrl: store.settings.embeddingApiUrl,
+          embeddingModel: store.settings.embeddingModel,
+          embeddingDimensions: store.settings.embeddingDimensions,
+        },
+        bundleType: 'realtime',
+        onCommitted: () => {
+          for (const memory of store.chatData.worldProgressMemories || []) {
+            if (wpMergeResult.archivedIds.has(memory.id)) {
+              (memory as any).archivedInSummaryVersion = summaryVersion;
+            }
+          }
+          store.chatData.characterMemories = summary.characterMemories;
+          store.addSummary(summary, summarizedUpTo, summarizedMessageIds);
+        },
+      });
+      const syncCommittedMemoryBundle = async () => {
+        await commitRealtimeMemoryTransaction({
+          chatId: store.chatData.chatId || getCurrentChatIdSafe(),
+          smallSummaries: bundleSmallSummaries,
+          grandSummary: summary,
+          assistantContents: pendingContents,
+          settings: {
+            embeddingApiUrl: store.settings.embeddingApiUrl,
+            embeddingModel: store.settings.embeddingModel,
+            embeddingDimensions: store.settings.embeddingDimensions,
+          },
+          bundleType: 'realtime',
+          expectedBundleId: summary.memoryBundleId,
+        });
+      };
 
       // Toastr 弹窗警告：AI 输出的角色记忆为空
       const totalNewMemories = summary.characterMemories.reduce(
@@ -2091,7 +2344,6 @@ $(() => {
         } catch(e) { /* ignore */ }
       }
 
-      store.addSummary(summary, summarizedUpTo, summarizedMessageIds);
       // 增量模式：rawText Section 2 的合并由 assembledSummary 在读取时自动完成
 
       // 语义向量：大总结后批量生成事件 embedding（后台任务，不阻塞主流程）
@@ -2105,6 +2357,7 @@ $(() => {
             store.settings.embeddingDimensions,
           );
           store.forcePersist({ settings: false });
+          await syncCommittedMemoryBundle();
         });
       }
 
@@ -2122,6 +2375,7 @@ $(() => {
             );
             store.syncCharacterMemoryBatchEmbeddings(summary.version, summary.characterMemories);
             store.forcePersist({ settings: false });
+            await syncCommittedMemoryBundle();
           });
         }
       }
@@ -2384,6 +2638,8 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
   // 聊天切换时清理：释放所有注入句柄 + 清空调度队列
   eventOn(tavern_events.CHAT_CHANGED, () => {
     clearSchedulerQueue();
+    unresolvedSourceChangeFloor = null;
+    setTimeout(() => sourceChangeTracker.reset(rawChatReader.readAllSourceContents()), 0);
     removeDynamicProfileV2Injection();
     removeWorldGraphInjection();
     removeWorldProgressInjection();
@@ -2397,10 +2653,11 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
 
   // 删除聊天时清理智脑全量汇总(STABLE_ID)里对应的条目，避免残留堆积
   // （删除后酒馆会切到其它聊天触发 CHAT_CHANGED→reload，此处同步清完再走reload）
-  eventOn(tavern_events.CHAT_DELETED, (chatFileName: string) => {
+  eventOn(tavern_events.CHAT_DELETED, async (chatFileName: string) => {
     try {
       const store = useMainStore(pinia);
       store.removeDeletedChatData(chatFileName);
+      await deleteMemoryWarehouseForChat(chatFileName);
     } catch (e) {
       logWarn('系统', 'CHAT_DELETED清理失败', String(e));
     }

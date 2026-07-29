@@ -24,12 +24,21 @@ import { executeSmallSummary, type SmallSummaryKgOptions } from '../core/smallSu
 import { createEmptyKnowledgeGraph, applyKnowledgeGraphDiff } from '../core/knowledgeGraph';
 import { cleanCharacterAliases } from '../utils/characterNames';
 import { isValidMainContent } from '../utils/messageParser';
+import { commitRealtimeMemoryTransaction } from '../core/memoryCommitCoordinator';
 import BatchSummaryPanel from './BatchSummaryPanel.vue';
 import SchedulerPanel from './SchedulerPanel.vue';
 import { useIsMobile } from '../composables/useIsMobile';
 
 const store = useMainStore();
 const isMobile = useIsMobile();
+
+function getCurrentChatIdSafe(): string {
+  try {
+    return SillyTavern.getCurrentChatId()?.trim() || store.chatData.chatId || '';
+  } catch {
+    return store.chatData.chatId || '';
+  }
+}
 
 // 当前角色卡名（读 SillyTavern 上下文，跨域/打包环境失败时回退 '—'）
 const charCardName = computed(() => {
@@ -147,6 +156,7 @@ async function runGrandSummaryAndHide(
   contents: CapturedContent[],
   logPrefix: string,
   userGuidance?: string,
+  replaceBundleIds: string[] = [],
 ) {
   const previousSummary = store.getLatestSummary();
   const existingMemories = previousSummary?.characterMemories || [];
@@ -231,6 +241,8 @@ async function runGrandSummaryAndHide(
   const summary: GrandSummary = {
     version: summaryVersion,
     generatedAt: new Date().toISOString(),
+    upToMessageId: summarizedUpTo,
+    coveredMessageIds: summarizedMessageIds,
     characterMemories: memResult.characterMemories,
     timeline,
     characterTable: memResult.characterMemories.map(m => ({
@@ -244,8 +256,41 @@ async function runGrandSummaryAndHide(
   };
 
   const nsfwMemories = memResult.nsfwMemories;
-
-  store.addSummary(summary, summarizedUpTo, summarizedMessageIds);
+  store.prepareSummaryForCommit(summary);
+  const summarizedIdSet = new Set(summarizedMessageIds);
+  const bundleSmallSummaries = (store.chatData.smallSummaries || []).filter((record: any) => {
+    const endFloor = record?.floorRange?.end ?? record?.floorRange?.start;
+    return Number.isFinite(endFloor) && summarizedIdSet.has(endFloor);
+  });
+  await commitRealtimeMemoryTransaction({
+    chatId: getCurrentChatIdSafe(),
+    smallSummaries: bundleSmallSummaries,
+    grandSummary: summary,
+    assistantContents: contents,
+    settings: {
+      embeddingApiUrl: store.settings.embeddingApiUrl,
+      embeddingModel: store.settings.embeddingModel,
+      embeddingDimensions: store.settings.embeddingDimensions,
+    },
+    bundleType: 'realtime',
+    replaceBundleIds,
+    onCommitted: () => store.addSummary(summary, summarizedUpTo, summarizedMessageIds),
+  });
+  const syncCommittedMemoryBundle = async () => {
+    await commitRealtimeMemoryTransaction({
+      chatId: getCurrentChatIdSafe(),
+      smallSummaries: bundleSmallSummaries,
+      grandSummary: summary,
+      assistantContents: contents,
+      settings: {
+        embeddingApiUrl: store.settings.embeddingApiUrl,
+        embeddingModel: store.settings.embeddingModel,
+        embeddingDimensions: store.settings.embeddingDimensions,
+      },
+      bundleType: 'realtime',
+      expectedBundleId: summary.memoryBundleId,
+    });
+  };
 
   // 存储 NSFW 记忆
   if (nsfwMemories.length > 0) {
@@ -266,9 +311,10 @@ async function runGrandSummaryAndHide(
         store.settings.embeddingDimensions,
         undefined,
         store.settings.embeddingManualMatryoshka,
-      ).then(() => {
+      ).then(async () => {
         store.syncCharacterMemoryBatchEmbeddings(summary.version, memResult.characterMemories);
         store.forcePersist();
+        await syncCommittedMemoryBundle();
       }).catch(() => {});
     }
 
@@ -285,15 +331,24 @@ async function runGrandSummaryAndHide(
         store.settings.embeddingModel,
         store.settings.embeddingDimensions,
         store.settings.embeddingManualMatryoshka,
-      ).then(() => store.forcePersist()).catch(() => {});
+      ).then(async () => {
+        store.forcePersist();
+        await syncCommittedMemoryBundle();
+      }).catch(() => {});
     }
 
   }
 
-  const hiddenIds = await hideSummaryFloors(summarizedUpTo, 0, 'affected');
-  refreshHiddenFloors();
-  // ★ 立刻同步小总结状态（隐藏的 → hidden-active），不等下次发消息
-  syncSmallSummaryStatus(store.chatData.smallSummaries, new Set(hiddenIds));
+  let hiddenIds: number[] = [];
+  try {
+    hiddenIds = await hideSummaryFloors(summarizedUpTo, 0, 'affected');
+    refreshHiddenFloors();
+    // ★ 立刻同步小总结状态（隐藏的 → hidden-active），不等下次发消息
+    syncSmallSummaryStatus(store.chatData.smallSummaries, new Set(hiddenIds));
+  } catch (error) {
+    // 记忆与热投影已经提交成功；隐藏失败不能伪装成“总结失败”再写失败占位。
+    logWarn('大总结', '总结已提交，但自动隐藏楼层失败', String(error));
+  }
   logInfo('大总结', `v${summary.version} 完成，已隐藏 ${hiddenIds.length} 个楼层`);
   return { summary, hiddenIds };
 }
@@ -398,7 +453,12 @@ function triggerRedoSummary() {
         return;
       }
 
-      const { summary } = await runGrandSummaryAndHide(contents, '重新', guidance || undefined);
+      const { summary } = await runGrandSummaryAndHide(
+        contents,
+        '重新',
+        guidance || undefined,
+        removedSummary.memoryBundleId ? [removedSummary.memoryBundleId] : [],
+      );
 
       // 清除基于旧 V4 产生的后续总结（version > 被替换版本的全部失效）
       store.chatData.summaryHistory = store.chatData.summaryHistory.filter(

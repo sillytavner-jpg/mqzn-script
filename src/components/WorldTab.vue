@@ -8,6 +8,7 @@ import { hydrateSelectedWorldBookEntries } from '../core/worldBookSelection';
 import WorldBookTagsTab from './WorldBookTagsTab.vue';
 import { SubTabNav, ConfirmButton, EmptyHint } from './ui';
 import { logInfo, logError } from '../utils/logger';
+import { readAssistantContentsInRange } from '../utils/chatContent';
 
 const store = useMainStore();
 
@@ -43,13 +44,8 @@ const currentKnownFloor = computed(() => {
   let liveFloor = 0;
   try { liveFloor = getLastMessageId(); } catch { liveFloor = 0; }
   if (!Number.isFinite(liveFloor) || liveFloor < 0) liveFloor = 0;
-  const captured = store.chatData.capturedContents || [];
-  const lastCaptured = captured.length > 0
-    ? Math.max(...captured.map((c: any) => Number(c.messageId ?? -1)))
-    : -1;
   return Math.max(
     liveFloor,
-    lastCaptured,
     store.chatData.lastWorldProgressFloor ?? -1,
     store.chatData.lastSmallSummaryFloor ?? -1,
     store.chatData.lastSummaryAtMessageId ?? -1,
@@ -277,9 +273,11 @@ function retryWorldProgress(r: WorldProgressRecord) {
       );
       store.chatData.savedWPWB = wpWorldBook;
       const candidates = store.selectWorldProgressCandidates(currentFloor, store.worldProgressManualChars || '', 2);
-      const retryContents = (store.chatData.capturedContents || [])
-        .filter(c => c.messageId >= Math.max(0, currentFloor - 6) && c.messageId <= currentFloor)
-        .sort((a, b) => a.messageId - b.messageId);
+      const retryContents = readAssistantContentsInRange(
+        Math.max(0, currentFloor - 6),
+        currentFloor,
+        store.chatData.capturedContents,
+      );
       const record = await executeWorldProgress(
         latestSummary,
         store.chatData.smallSummaries,

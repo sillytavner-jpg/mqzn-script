@@ -81,6 +81,8 @@ import {
   type NpcWorldbookWriteResult,
 } from '../core/npcWorldbook';
 import { logError } from '../utils/logger';
+import { readAssistantContentsInRange } from '../utils/chatContent';
+import { rawChatReader } from '../core/rawChatReader';
 
 const store = useMainStore();
 
@@ -123,8 +125,7 @@ const targetBooks = computed(() => {
 
 const maxFloor = computed(() => {
   void store.chatContentRevision;
-  const ids = (store.chatData.capturedContents || []).map(item => item.messageId);
-  return ids.length > 0 ? Math.max(...ids) : 0;
+  return Math.max(0, rawChatReader.getLastMessageId());
 });
 
 const currentProfile = computed<CharacterProfile | undefined>(() => {
@@ -173,7 +174,11 @@ async function generateAndWrite(): Promise<void> {
       startFloor: startFloor.value,
       endFloor: endFloor.value,
       fullMode: fullMode.value,
-      capturedContents: store.chatData.capturedContents,
+      capturedContents: readAssistantContentsInRange(
+        startFloor.value,
+        endFloor.value,
+        store.chatData.capturedContents,
+      ),
       userName: store.getUserName(),
     });
     store.setCharacterProfile(selectedNpc.value, profile);

@@ -1,5 +1,6 @@
 import type { CapturedContent } from '../stores/mainStore';
 import { extractContentFromMessage, isValidMainContent } from './messageParser';
+import { rawChatReader } from '../core/rawChatReader';
 
 export interface ChatUserInput {
   messageId: number;
@@ -18,61 +19,15 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function getLastMessageIdSafe(): number {
-  try {
-    return typeof getLastMessageId === 'function' ? getLastMessageId() : -1;
-  } catch {
-    return -1;
-  }
-}
-
-function getChatMessagesSafe(
-  range: string | number,
-  options?: GetChatMessagesOption,
-): Array<ChatMessage | ChatMessageSwiped> | null {
-  try {
-    if (typeof getChatMessages !== 'function') return null;
-    return getChatMessages(range, options) as Array<ChatMessage | ChatMessageSwiped>;
-  } catch {
-    return null;
-  }
-}
-
-function getMessageText(message: any): string {
-  if (!message) return '';
-  if (typeof message.message === 'string') return message.message;
-  if (Array.isArray(message.swipes)) {
-    const swipeId = Number.isFinite(message.swipe_id) ? Number(message.swipe_id) : 0;
-    return String(message.swipes[swipeId] ?? message.swipes[0] ?? '');
-  }
-  return '';
-}
-
-function isIgnoredMessageKind(message: any): boolean {
-  const candidates = [
-    message?.type,
-    message?.kind,
-    message?.data?.type,
-    message?.data?.kind,
-    message?.extra?.type,
-    message?.extra?.kind,
-    message?.extra?.event_type,
-  ];
-  return candidates.some(value => {
-    const normalized = typeof value === 'string' ? value.toLowerCase() : '';
-    return normalized === 'quiet' || normalized === 'command' || normalized === 'extension';
-  });
-}
-
-function toContentRecord(message: any): CapturedContent | null {
-  if (!message || message.role !== 'assistant' || isIgnoredMessageKind(message)) return null;
-  const content = extractContentFromMessage(getMessageText(message));
+function toContentRecord(message: ReturnType<typeof rawChatReader.readMessage>): CapturedContent | null {
+  if (!message || message.role !== 'assistant' || message.ignored) return null;
+  const content = message.content;
   if (!isValidMainContent(content)) return null;
   return {
-    messageId: Number(message.message_id),
+    messageId: message.messageId,
     content,
     capturedAt: nowIso(),
-    swipeCount: Number.isFinite(message.swipe_id) ? Number(message.swipe_id) : 0,
+    swipeCount: message.selectedSwipeId,
   };
 }
 
@@ -93,18 +48,18 @@ export function readAssistantContentAtFloor(
   fallback?: CapturedContent[],
 ): CapturedContent | null {
   if (!Number.isFinite(aiFloor) || aiFloor < 0) return null;
-  const messages = getChatMessagesSafe(aiFloor, { role: 'assistant' });
-  if (messages && messages.length > 0) {
-    return toContentRecord(messages[0]);
+  const message = rawChatReader.readMessage(aiFloor, 'assistant');
+  if (message) {
+    return toContentRecord(message);
   }
   return fallbackContentsInRange(fallback, aiFloor, aiFloor)[0] ?? null;
 }
 
 export function readAssistantExtractedContentAtFloor(aiFloor: number): string | null {
   if (!Number.isFinite(aiFloor) || aiFloor < 0) return null;
-  const messages = getChatMessagesSafe(aiFloor, { role: 'assistant' });
-  if (!messages || messages.length === 0 || isIgnoredMessageKind(messages[0])) return null;
-  return extractContentFromMessage(getMessageText(messages[0]));
+  const message = rawChatReader.readMessage(aiFloor, 'assistant');
+  if (!message || message.ignored) return null;
+  return message.content;
 }
 
 export function readAssistantContentsInRange(
@@ -112,13 +67,13 @@ export function readAssistantContentsInRange(
   endFloor: number,
   fallback?: CapturedContent[],
 ): CapturedContent[] {
-  const lastId = getLastMessageIdSafe();
+  const lastId = rawChatReader.getLastMessageId();
   const start = Math.max(0, Math.floor(startFloor));
   const end = Math.floor(Math.min(endFloor, lastId >= 0 ? lastId : endFloor));
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
 
-  const messages = getChatMessagesSafe(`${start}-${end}`, { role: 'assistant' });
-  if (messages && messages.length > 0) {
+  const messages = rawChatReader.readRange(start, end, 'assistant');
+  if (messages.length > 0) {
     return messages
       .map(toContentRecord)
       .filter((item): item is CapturedContent => !!item)
@@ -132,7 +87,7 @@ export function readPendingSummaryContents(
   preserveRecentFloors: number,
   fallback?: CapturedContent[],
 ): CapturedContent[] {
-  const lastId = getLastMessageIdSafe();
+  const lastId = rawChatReader.getLastMessageId();
   if (lastId < 0) {
     const fallbackPending = fallbackContentsInRange(fallback, lastSummaryAtMessageId + 1, Number.MAX_SAFE_INTEGER);
     return preserveRecentFloors > 0 ? fallbackPending.slice(0, -preserveRecentFloors) : fallbackPending;
@@ -158,7 +113,7 @@ export function readRecentAssistantContents(
   const limit = Math.max(0, Math.floor(count || 0));
   if (limit === 0) return [];
 
-  const lastId = getLastMessageIdSafe();
+  const lastId = rawChatReader.getLastMessageId();
   const end = Math.floor(Math.min(
     beforeOrAtFloor ?? lastId,
     lastId >= 0 ? lastId : (beforeOrAtFloor ?? -1),
@@ -178,44 +133,29 @@ export function readLatestAssistantContent(fallback?: CapturedContent[]): Captur
 }
 
 export function readLatestUserInputBefore(aiFloor: number): ChatUserInput | null {
-  const directFloor = Math.floor(aiFloor - 1);
-  if (directFloor >= 0) {
-    const direct = getChatMessagesSafe(directFloor, { role: 'user' });
-    if (direct && direct.length > 0) {
-      return { messageId: Number(direct[0].message_id), content: getMessageText(direct[0]) };
-    }
-  }
-
-  for (let floor = directFloor - 1; floor >= 0; floor--) {
-    const messages = getChatMessagesSafe(floor, { role: 'user' });
-    if (messages && messages.length > 0) {
-      return { messageId: Number(messages[0].message_id), content: getMessageText(messages[0]) };
-    }
-  }
-  return null;
+  const message = rawChatReader.readLatestUserBefore(aiFloor);
+  return message ? { messageId: message.messageId, content: message.rawContent } : null;
 }
 
 export function readDreamtalkPair(
   aiFloor: number,
   includeSwipes = false,
 ): DreamtalkPair | null {
-  const messages = getChatMessagesSafe(aiFloor, { role: 'assistant', include_swipes: includeSwipes });
-  if (!messages || messages.length === 0) return null;
-
-  const aiMessage = messages[0] as any;
-  const aiResponse = extractContentFromMessage(getMessageText(aiMessage));
+  const aiMessage = rawChatReader.readMessage(aiFloor, 'assistant');
+  if (!aiMessage || aiMessage.ignored) return null;
+  const aiResponse = aiMessage.content;
   if (!isValidMainContent(aiResponse)) return null;
 
   const user = readLatestUserInputBefore(aiFloor);
   if (!user) return null;
 
   const rolledResponses: string[] = [];
-  if (includeSwipes && Array.isArray(aiMessage.swipes)) {
-    const selected = Number.isFinite(aiMessage.swipe_id) ? Number(aiMessage.swipe_id) : 0;
+  if (includeSwipes && aiMessage.swipeContents.length > 0) {
+    const selected = aiMessage.selectedSwipeId;
     const seen = new Set<string>([aiResponse]);
-    for (let i = 0; i < aiMessage.swipes.length; i++) {
+    for (let i = 0; i < aiMessage.swipeContents.length; i++) {
       if (i === selected) continue;
-      const text = extractContentFromMessage(String(aiMessage.swipes[i] ?? ''));
+      const text = extractContentFromMessage(aiMessage.swipeContents[i]);
       if (!isValidMainContent(text) || seen.has(text)) continue;
       seen.add(text);
       rolledResponses.push(text);
