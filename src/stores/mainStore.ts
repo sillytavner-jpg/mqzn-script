@@ -78,7 +78,6 @@ import {
   type CharacterRegistry,
   type CharacterRecord,
   type PendingResolution,
-  type ResolveResult,
 } from '../core/characterRegistry';
 
 const KNOWLEDGE_GRAPH_VERSION_LIMIT = 6;
@@ -1861,7 +1860,6 @@ export const useMainStore = defineStore('main', () => {
   const summaries = computed(() => chatData.value.summaries);
   const dynamicProfiles = computed(() => chatData.value.dynamicProfiles || []);
   const characterRegistry = computed(() => chatData.value.characterRegistry);
-  const pendingUnresolved = computed(() => chatData.value.pendingUnresolved || []);
   const dreamtalk = computed(() => chatData.value.dreamtalk);
   const userInputRecords = computed(() => chatData.value.userInputRecords);
   const lastSummaryAtMessageId = computed(() => chatData.value.lastSummaryAtMessageId);
@@ -3809,32 +3807,6 @@ export const useMainStore = defineStore('main', () => {
     return chatData.value.characterRegistry;
   }
 
-  /**
-   * P5: 把 pendingUnresolved 中的某 rawName 归到指定角色（或新建）。
-   * 仲裁后该项从队列移除。characterId 留空=忽略该 rawName（不再提示）。
-   */
-  function resolvePendingCharacter(rawName: string, characterId?: string): void {
-    if (!chatData.value.pendingUnresolved) return;
-    const normRaw = normalizeMemoryCharacterName(rawName);
-    chatData.value.pendingUnresolved = chatData.value.pendingUnresolved.filter(
-      p => normalizeMemoryCharacterName(p.rawName) !== normRaw,
-    );
-    if (characterId) {
-      // 标记该 rawName 已归入 characterId（下次 AI 写入时 resolveOrPending 应能命中）
-      // 这里不主动改 registry aliases（resolveKnownCharacterName 已能通过 primaryName 仲裁），
-      // 仅清队列让用户裁决生效。如需把 rawName 加到该角色 aliases，用现有改名/合并 UI。
-    }
-    doPersist();
-  }
-
-  /** P5: 清空全部 pendingUnresolved（用户已批量处理或想忽略提示） */
-  function clearAllPendingUnresolved(): void {
-    if (chatData.value.pendingUnresolved?.length) {
-      chatData.value.pendingUnresolved = [];
-      doPersist();
-    }
-  }
-
   function resolveKnownCharacterName(rawName: string, fallbackToNormalized = false): string {
     const raw = String(rawName || '').trim();
     if (!raw) return '';
@@ -3847,7 +3819,7 @@ export const useMainStore = defineStore('main', () => {
       if (result.status === 'resolved' && result.record) {
         return result.record.primaryName;
       }
-      // ambiguous/unknown → 回退原逻辑兜底（仍走"先注册先占"，但 P2 已记录到 pendingUnresolved）
+      // ambiguous/unknown → 回退原逻辑兜底（仍走"先注册先占"）
     }
     return resolveCharacterNameFromEntries(
       raw,
@@ -3886,47 +3858,9 @@ export const useMainStore = defineStore('main', () => {
   }
 
   /**
-   * P2 写入收口：把 AI 输出的歧义/未知角色名挂入 pendingUnresolved 队列。
-   * 同 rawName 多次出现只累加 count，候选随 registry 更新刷新。
-   */
-  function pushPendingUnresolved(
-    rawName: string,
-    result: ResolveResult,
-    mem: CharacterMemory,
-  ) {
-    if (!chatData.value.pendingUnresolved) chatData.value.pendingUnresolved = [];
-    const queue = chatData.value.pendingUnresolved;
-    const normRaw = normalizeMemoryCharacterName(rawName);
-    const existing = queue.find(p => normalizeMemoryCharacterName(p.rawName) === normRaw);
-    const nowIso = new Date().toISOString();
-    const snippet = String(
-      (mem.recentMemories?.[0])
-        || (typeof (mem.coreMemories?.[0] as any) === 'object' ? (mem.coreMemories?.[0] as any)?.text : (mem.coreMemories?.[0] as any))
-        || '',
-    ).slice(0, 60);
-    if (existing) {
-      existing.count++;
-      existing.lastSeenAt = nowIso;
-      if (snippet) existing.snippet = snippet;
-      existing.candidateIds = result.candidateIds;
-      existing.candidateNames = result.candidateNames;
-    } else {
-      queue.push({
-        rawName,
-        candidateIds: result.candidateIds,
-        candidateNames: result.candidateNames,
-        firstSeenAt: nowIso,
-        lastSeenAt: nowIso,
-        count: 1,
-        snippet,
-      });
-    }
-  }
-
-  /**
    * P2 写入收口：AI 输出的角色记忆归并入库。
    * - resolved（命中唯一角色）→ 按 characterId 归并，mem 标记 _characterId
-   * - ambiguous/unknown → 旧 fallback 逻辑入库（不丢数据）+ 挂入 pendingUnresolved 队列
+   * - ambiguous/unknown → 旧 fallback 逻辑入库（不丢数据，不再挂待仲裁队列）
    * 双轨期：resolved 的同时保留 characterName（兼容旧读取）+ 加 _characterId（P3/P4 用）。
    */
   function normalizeIncomingCharacterMemories(memories: CharacterMemory[] = []): CharacterMemory[] {
@@ -3952,7 +3886,6 @@ export const useMainStore = defineStore('main', () => {
         mergeKey = `name:${normalizeMemoryCharacterName(canonical)}`;
         mem.characterName = canonical;
         mem.aliases = cleanCharacterAliases([...(mem.aliases || []), rawName], canonical);
-        pushPendingUnresolved(rawName, result, mem);
       }
 
       const existing = byKey.get(mergeKey);
@@ -6320,12 +6253,9 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     deleteCharacter,
     // 角色名字系统重构：稳定 ID 注册表（P1/P3/P5）
     characterRegistry,
-    pendingUnresolved,
     ensureCharacterRegistry,
     buildRegistryFromExistingData,
     resolveKnownCharacterId,
-    resolvePendingCharacter,
-    clearAllPendingUnresolved,
     // 梦呓
     updateDreamtalk,
     rollbackDreamtalk,

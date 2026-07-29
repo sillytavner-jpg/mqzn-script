@@ -298,8 +298,8 @@ export interface ResolveResult {
 /**
  * 用名字解析到角色 record，三态结果：
  *   resolved   — 命中唯一 record（沿 mergedInto 找过真身）
- *   ambiguous  — 命中多个候选（需 P5 人工/规则仲裁）
- *   unknown    — 未命中任何已知角色（旧逻辑会 fallback 新建，P2 改为挂入 pendingUnresolved）
+ *   ambiguous  — 命中多个候选（交上层回退原逻辑兜底）
+ *   unknown    — 未命中任何已知角色（交上层回退原逻辑兜底）
  *
  * 这是 P2 止血核心：AI 输出的名字稍有差异时不再无脑新建角色，
  * 而是明确区分"已知/歧义/未知"，交给上层决定怎么处理。

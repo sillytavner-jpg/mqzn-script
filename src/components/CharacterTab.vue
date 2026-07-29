@@ -664,26 +664,6 @@ function confirmAddCharacter() {
       </div>
 
       <!-- 角色列表 -->
-      <!-- P5: 待仲裁角色名提示（AI 输出的歧义/未知名字，P2 未自动入库，等用户裁决） -->
-      <div v-if="store.pendingUnresolved && store.pendingUnresolved.length > 0" class="zhino-section zhino-pending-section">
-        <div class="zhino-section-header">
-          <div class="zhino-section-title">待仲裁角色名 ({{ store.pendingUnresolved.length }})</div>
-          <button class="zhino-btn-sm zhino-btn-save" @click="store.clearAllPendingUnresolved()" title="清空全部（标记为已处理）">全部清空</button>
-        </div>
-        <div class="zhino-pending-list">
-          <div v-for="item in store.pendingUnresolved" :key="item.rawName" class="zhino-pending-item">
-            <span class="zhino-pending-name">{{ item.rawName }}</span>
-            <span class="zhino-pending-count" :title="`出现 ${item.count} 次`">×{{ item.count }}</span>
-            <span v-if="item.candidateNames && item.candidateNames.length > 0" class="zhino-pending-candidates">
-              候选: {{ item.candidateNames.join('、') }}
-            </span>
-            <span v-else class="zhino-pending-candidates zhino-pending-unknown">未识别角色</span>
-            <span v-if="item.snippet" class="zhino-pending-snippet">{{ item.snippet }}…</span>
-            <button class="zhino-btn-sm" @click="store.resolvePendingCharacter(item.rawName)" title="标记已处理">✓</button>
-          </div>
-        </div>
-      </div>
-
       <div class="zhino-section">
         <div class="zhino-section-header">
           <div class="zhino-section-title">角色列表 ({{ allCharacters.length }})</div>
