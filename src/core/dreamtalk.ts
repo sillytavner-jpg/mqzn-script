@@ -22,6 +22,7 @@ import { callGenerateRaw } from '../utils/apiCaller';
 import { replaceUserReferences } from '../utils/textCleanup';
 import { logInfo } from '../utils/logger';
 import { isValidMainContent } from '../utils/messageParser';
+import { buildBlacklistReminder } from '../utils/characterNames';
 
 // ========== 梦呓数据结构 v2 ==========
 
@@ -464,8 +465,16 @@ function buildDreamtalkMaterial(
   userInputs: UserInputRecord[],
   userPersonaRaw: string,
   oldDreamtalk?: DreamtalkData,
+  blacklistedNames?: string[],
 ): string {
   const parts: string[] = [];
+
+  // 黑名单提醒：本次不要输出黑名单角色的交互模式
+  const blacklistReminder = buildBlacklistReminder(
+    blacklistedNames,
+    '本次不要输出玩家与以下角色的交互模式，不要分析它们的互动行为',
+  );
+  if (blacklistReminder) parts.push(blacklistReminder);
 
   // 上次梦呓完整分析（增量更新基础）
   if (oldDreamtalk) {
@@ -791,6 +800,7 @@ export async function executeDreamtalkAnalysis(
   oldDreamtalk?: DreamtalkData,
   playStyle?: string,
   userName = '{{user}}',
+  blacklistedNames?: string[],
 ): Promise<{ dreamtalk: DreamtalkData; nsfwDreamtalk: NsfwDreamtalkData | null }> {
   const validUserInputs = sanitizeDreamtalkRecords(userInputs);
   if (validUserInputs.length === 0) {
@@ -798,7 +808,7 @@ export async function executeDreamtalkAnalysis(
   }
 
   const instruction = buildDreamtalkInstruction(userName, playStyle || undefined);
-  const inputMaterial = buildDreamtalkMaterial(validUserInputs, userPersonaRaw, oldDreamtalk);
+  const inputMaterial = buildDreamtalkMaterial(validUserInputs, userPersonaRaw, oldDreamtalk, blacklistedNames);
 
   const rawResult = await callGenerateRaw({
     user_input: inputMaterial,

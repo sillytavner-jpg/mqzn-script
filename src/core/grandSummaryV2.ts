@@ -299,6 +299,8 @@ export async function executeGrandSummaryV2(
   userName: string = '{{user}}',
   abortSignal?: AbortSignal,
   extraGenerateParams?: { _responseFormat?: 'json_object' | 'text' },
+  // 黑名单不用于时间线总结：时间线与单个角色无关，AI 按正文客观整理即可
+  _blacklistedNames?: string[],
 ): Promise<GrandSummaryV2Result> {
   // A5.x 起大总结与小总结解耦：直接按正文楼层组织输入材料，
   // 不再用 smallSummaries 的 floorRange 反查原文（小总结已不产剧情摘要，

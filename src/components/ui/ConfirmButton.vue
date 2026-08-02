@@ -42,8 +42,16 @@ const arm = () => {
       // 点击落在组件外部 → 取消确认
       if (rootEl.value && !rootEl.value.contains(e.target as Node)) disarm();
     };
+    const keyHandler = (e: KeyboardEvent) => {
+      // 键盘用户按 Esc 取消确认
+      if (e.key === 'Escape') disarm();
+    };
     document.addEventListener('pointerdown', handler);
-    cleanup = () => document.removeEventListener('pointerdown', handler);
+    document.addEventListener('keydown', keyHandler);
+    cleanup = () => {
+      document.removeEventListener('pointerdown', handler);
+      document.removeEventListener('keydown', keyHandler);
+    };
   });
 };
 const disarm = () => { armed.value = false; cleanup?.(); cleanup = null; };

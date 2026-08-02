@@ -5,25 +5,29 @@
       <span class="inv-count">{{ items.length }} 件</span>
     </div>
     <div class="inv-grid">
-      <div
+      <button
+        type="button"
         v-for="it in pagedItems"
         :key="it.item.id"
         class="inv-slot inv-item"
         :class="{ consumed: it.item.consumed }"
+        :aria-label="`编辑物品：${it.item.name}`"
         @click.stop.prevent="emit('edit', it)"
       >
         <span class="inv-name">{{ it.item.name }}</span>
         <span v-if="it.item.quantity" class="inv-qty">{{ formatQuantity(it.item.quantity) }}</span>
-      </div>
+      </button>
 
-      <div
+      <button
+        type="button"
         v-for="n in emptyCount"
         :key="'empty-' + n"
         class="inv-slot inv-empty"
+        :aria-label="`空槽位 ${n}`"
         @click.stop.prevent="emit('add')"
       />
 
-      <div class="inv-slot inv-add" title="新增物品" @click.stop.prevent="emit('add')">＋</div>
+      <button type="button" class="inv-slot inv-add" title="新增物品" :aria-label="'新增物品'" @click.stop.prevent="emit('add')">＋</button>
     </div>
 
     <div v-if="pageCount > 1" class="inv-pagination">
@@ -123,6 +127,13 @@ function tooltip(it: OwnedItem): string {
   user-select: none;
   -webkit-user-select: none;
   touch-action: manipulation;
+  /* button 复位（点击 div → button 无障碍） */
+  font: inherit;
+  color: inherit;
+  text-align: center;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
 }
 @media (hover: hover) {
   .inv-slot:hover {

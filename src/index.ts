@@ -45,6 +45,7 @@ import {
 } from './utils/messageParser';
 import { cleanCharacterAliases, normalizeCharacterName } from './utils/characterNames';
 import { logInfo, logWarn, logError } from './utils/logger';
+import { getLastApiFailureTime } from './utils/apiCaller';
 import { isMvuExtraAnalysis, stripZhinoInjectionsFromCompletion } from './utils/mvuGuard';
 import { useMainStore, type CapturedContent, type CharacterMemory, type GrandSummary, type TimelineEvent } from './stores/mainStore';
 import {
@@ -709,6 +710,7 @@ $(() => {
 
       let { record, graphDiff, characterLocations: parsedCharLocs } = await executeSmallSummary(
         userText, aiText, userFloor, aiFloor, allNames, store.getUserName(), kgOptions, characterEntries, previousContext,
+        store.getBlacklistedCharacters(),
       );
       if (!isCapturedContentCurrent(store, aiFloor, aiText)) {
         logWarn('小总结', `分析完成时来源已变化，丢弃过期结果: 楼层 ${aiFloor}`);
@@ -920,20 +922,36 @@ $(() => {
           `changed=${diff.changedMessageIds.join(',') || 'forced'}; hot=${JSON.stringify(hot)}`,
         );
       } catch (error) {
-        invalidateHotMemoryProjections(store, floor);
+        // 保守护栏：区分失败类型——数据不一致才清空 hot projection，网络/瞬时错误只标记暂不可用
+        // MemoryWarehouseError（name='MemoryWarehouseError'）= 数据不一致（commitBundle 失败、staging 残留、checksum 不匹配）
+        // 其他（TypeError: Failed to fetch、超时、CORS）= 网络/瞬时，不清空，保留旧快照等重试
+        const isDataInconsistency = error instanceof Error
+          && (error.name === 'MemoryWarehouseError'
+            || /rollback_failed|write_failed|manifest_invalid|shard_invalid|shard_missing|record_collection_mismatch|事务失败|分片校验|Manifest/i.test(error.message));
+
+        if (isDataInconsistency) {
+          invalidateHotMemoryProjections(store, floor);
+        }
+        // 网络/瞬时错误不清空，保留旧快照（characterMemories 由 invalidateSummaryProjectionsFromFloor 护栏保留）
+
         sourceChangeTracker.reset([]);
-        logError('记忆来源', `楼层 ${floor} 作废失败，已暂停记忆注入`, String(error));
+        logError('记忆来源', `楼层 ${floor} 作废失败（${isDataInconsistency ? '数据不一致' : '网络/瞬时'}），已暂停记忆注入`, String(error));
         try {
           window.toastr?.error(
-            `楼层 ${floor} 的旧记忆作废失败，智脑已暂停记忆注入以避免召回过期内容。请检查世界书保存状态。`,
+            `楼层 ${floor} 的旧记忆作废失败（${isDataInconsistency ? '数据不一致，已清空热投影' : '网络瞬时错误，保留旧快照'}），智脑已暂停记忆注入${isDataInconsistency ? '以避免召回过期内容' : '，将在重试后恢复'}。请检查世界书保存状态。`,
             '记忆来源事务失败',
             { timeOut: 8000, extendedTimeOut: 4000 },
           );
         } catch { /* ignore */ }
-        if (retryCount < 2) {
+        // 方案B：系统稳定性检查 + 退避增强
+        // 重试次数 2→4，退避更长；如果最近 5 秒内有 API 失败（系统不稳定），退避再加倍
+        if (retryCount < 4) {
+          const recentApiFailure = Date.now() - getLastApiFailureTime() < 5000;
+          const baseDelay = recentApiFailure ? 3000 : 1500;
+          const delay = baseDelay * Math.pow(2, retryCount);
           setTimeout(() => {
             void enqueueSourceChangeReconcile(store, floor, reason, true, retryCount + 1);
-          }, 1500 * (retryCount + 1));
+          }, delay);
         }
         throw error;
       }
@@ -1105,8 +1123,11 @@ $(() => {
               store.getUserName(),
               undefined,
               characterEntries,
+              store.getBlacklistedCharacters(),
             );
-            store.chatData.dynamicProfilesV2 = result.profiles;
+            store.chatData.dynamicProfilesV2 = result.profiles.filter(
+              p => !store.isBlacklisted(p.characterName),
+            );
             store.chatData.lastDynamicProfileFloor = Math.max(...latestRounds.map(c => c.messageId), store.chatData.lastDynamicProfileFloor);
             store.forcePersist({ settings: false });
             logInfo('动态人设', `更新完成: ${result.profiles.length} 角色, 截止楼层${store.chatData.lastDynamicProfileFloor}`);
@@ -2007,7 +2028,7 @@ $(() => {
     const style = (store.settings as any).preferredPlayStyle || undefined;
     try {
       logInfo('梦呓', '开始分析用户行为模式');
-      const { dreamtalk, nsfwDreamtalk } = await executeDreamtalkAnalysis(store.userInputRecords, store.persona.rawInput, store.dreamtalk ?? undefined, style, store.getUserName());
+      const { dreamtalk, nsfwDreamtalk } = await executeDreamtalkAnalysis(store.userInputRecords, store.persona.rawInput, store.dreamtalk ?? undefined, style, store.getUserName(), store.getBlacklistedCharacters());
       store.updateDreamtalk(dreamtalk);
       if (nsfwDreamtalk) {
         store.updateNsfwDreamtalk(nsfwDreamtalk);
@@ -2111,6 +2132,7 @@ $(() => {
                 store.getUserName(),
                 undefined,
                 { _responseFormat: 'json_object' },
+                store.getBlacklistedCharacters(),
               ),
             });
           }
@@ -2126,6 +2148,7 @@ $(() => {
                 store.getUserName(),
                 undefined,
                 { _responseFormat: 'json_object' },
+                store.getBlacklistedCharacters(),
               ),
             });
           }
@@ -2606,10 +2629,19 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
         store.settings.kgInjectTopK,
         candidates,
         thisAttempt,
+        store.getBlacklistedCharacters(),
       );
 
       // 截断（双保险：push 前过滤掉 >= currentFloor 的过期记录）
       store.truncateWorldProgressRecords(currentFloor);
+      // 世界推进输出未收口：push 前清理黑名单角色，防止复活
+      const isBl = (n?: string) => !!n && store.isBlacklisted(n);
+      record.advancedCharacters = record.advancedCharacters.filter((c: any) => !isBl(c.characterName));
+      record.presentCharacters = (record.presentCharacters || []).filter((n: string) => !isBl(n));
+      if (record.entryHint && isBl(record.entryHint.characterName)) record.entryHint.characterName = '';
+      for (const hook of record.resolvedHooks || []) {
+        hook.characterNames = (hook.characterNames || []).filter((n: string) => !isBl(n));
+      }
       store.chatData.worldProgressRecords.push(record);
       if (record.status === 'ready') {
         store.addWorldProgressMemories(record, currentFloor);

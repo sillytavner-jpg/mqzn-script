@@ -7,7 +7,7 @@
       </div>
 
       <div class="wb-toolbar">
-        <input v-model="searchText" class="zhino-input wb-search" placeholder="搜索条目或世界书" />
+        <input v-model="searchText" class="zhino-input wb-search" placeholder="搜索条目或世界书" aria-label="搜索条目或世界书" />
         <button class="zhino-btn-sm" :disabled="selectedIds.size === 0" @click="clearSelection">清空选择</button>
       </div>
 
@@ -50,12 +50,12 @@
 
         <label v-if="bindingKind === 'character'" class="wb-field">
           <span>角色名</span>
-          <input v-model="characterName" class="zhino-input" placeholder="例如：秋青" />
+          <input v-model="characterName" class="zhino-input" placeholder="例如：秋青" aria-label="例如：秋青" />
         </label>
 
         <label class="wb-field">
           <span>标签名</span>
-          <input v-model="tagLabel" class="zhino-input" :placeholder="bindingKind === 'world' ? '世界背景' : '基础人设'" />
+          <input v-model="tagLabel" class="zhino-input" :placeholder="bindingKind === 'world' ? '世界背景' : '基础人设'" aria-label="bindingKind === 'world' ? '世界背景' : '基础人设'" />
         </label>
       </div>
 
@@ -64,7 +64,7 @@
         <textarea
           v-model="meaning"
           class="zhino-input wb-textarea"
-          placeholder="写清这个 tag 代表什么，之后智脑会把它作为快速召回索引。"
+          placeholder="写清这个 tag 代表什么，之后智脑会把它作为快速召回索引。" aria-label="写清这个 tag 代表什么，之后智脑会把它作为快速召回索引。"
         />
       </label>
 

@@ -9,7 +9,7 @@
 import type { CapturedContent } from '../stores/mainStore';
 import { callGenerateRaw } from '../utils/apiCaller';
 import { scanCharacterNamesFromContent, type CharacterNameEntry } from './dreamtalk';
-import { resolveCharacterName } from '../utils/characterNames';
+import { resolveCharacterName, buildBlacklistReminder } from '../utils/characterNames';
 import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { DynamicProfileV2Schema } from '../utils/schemas';
 import { logInfo } from '../utils/logger';
@@ -46,22 +46,31 @@ const ASSISTANT_PREFILL = 'Qiuqingzi: <thinking>';
 
 // ======== 提示词 ==========
 
-function buildDynamicProfileV2Instruction(userName: string): string {
+function buildDynamicProfileV2Instruction(userName: string, blacklistedNames?: string[]): string {
+  // 黑名单提醒：本次不要为黑名单角色生成动态人设
+  const blacklistReminder = buildBlacklistReminder(
+    blacklistedNames,
+    '本次不要为以下角色生成或更新动态人设',
+  );
   return [
+    ...(blacklistReminder ? [blacklistReminder] : []),
     `秋青子，你需要以记者的专业素养，看下面的正文和上次的角色状态，告诉我每个角色现在是什么状态、她的行为应该怎么理解。`,
     '',
     '要求：',
-    '- 分析角色的现状，检查角色状态是否过于极端，如果是，允许暂时忽略角色的极端表现，在最新的输出中纠正角色状态，引导角色回归正常人类的状态，如果不是，则正常更新状态',
+    '- 极端化纠偏（最高优先级，先于一切更新）：若角色当前状态或上一轮记录已出现极端化迹象，本轮必须把状态拉回"正常、有边界、平等的人类状态"，禁止维持或加剧。纠偏不是"反转成敌视玩家"，而是回归中性——角色有自己的生活、尊严与独立判断，对玩家是平等互动，而非崇拜/臣服/恐惧/自贬。',
     '- 对比之前的状态',
     '- 然后输出两段：事实状态 + 动态人设',
     '- 变化必须有正文里的具体事件支撑，不能凭空改变',
     '- 没变的就原样输出',
     '',
-    '如何判断角色是否极端化：',
-    `- 角色出现极度小心翼翼的状态，不停观察${userName}`,
-    `- 角色将${userName}神化，认为${userName}无所不能，对${userName}绝对服从`,
-    `- 角色出现自残取悦${userName}的行为`,
-    `- 角色出现严重的被害妄想症，将${userName}的每个行为都理解成对自己不利`,
+    '如何判断角色是否极端化（命中任意一条即视为极端，必须按上方纠偏指令处理）：',
+    `  · 神化/崇拜玩家：将${userName}视为无所不能、至高存在，绝对服从，认为其言行皆是恩典或旨意`,
+    `  · 自我贬损到卑微：自称不配/污秽/贱/蝼蚁/奴仆，认为自身人格远低于${userName}`,
+    `  · 权力臣服过度：把正常礼仪或上下级关系翻译成"主宰—附属""Owner—所有物"式不对等臣服`,
+    `  · 阶级过敏：因身份/阶级差异而过度惶恐、谄媚，或把本有的恭敬/拘谨放大成卑微恐惧`,
+    `  · 自残取悦：以伤害自己来取悦${userName}或证明忠诚`,
+    `  · 被害妄想：将${userName}的每个行为都理解成对自己不利、在算计自己`,
+    `  · 程度极端化：用"绝对/极其/完全/彻底/深深/沉沦/沦陷/疯魔"等无保留程度词描述状态`,
     '',
     '在正式输出之前，你必须思考以下内容并用<thinking></thinking>标签包裹',
     '<thinking>',
@@ -72,7 +81,8 @@ function buildDynamicProfileV2Instruction(userName: string): string {
     '状态的事实依据是什么？',
     '和之前相比发生了哪些变化？',
     '变化的依据是什么？',
-    '是否使用了极端化、支配性的词语进行了描述？',
+    '对比上一轮 dynamic_profile：本轮输出是否比上一轮更极端？若上一轮已含神化/臣服/自贬表述，本轮必须降级为中性，严禁维持或加剧。',
+    '逐条检查本轮 dynamic_profile 的每条"含义"与"不要理解为"：是否含神化/崇拜/臣服/自贬/权力不对等语义？含则重写。',
     '</thinking>',
     '',
     '输出格式：',
@@ -106,7 +116,7 @@ function buildDynamicProfileV2Instruction(userName: string): string {
     `- 不要为 ${userName}（玩家/用户）生成人设，只分析NPC角色`,
     '- 事实层只写正文中可确认的客观状态，不确定的不写',
     '- 穿着：正文有明确描写时更新；正文未提则延续上次的穿着记录（角色不会凭空换装）',
-    '- 动态层每条强制格式：行为 = 含义 | 不要理解为xxx',
+    '- 动态层每条强制格式：行为 = 含义 | 不要理解为xxx。含义与"不要理解为"均不得含神化/崇拜/臣服/自贬/权力不对等语义；若某行为天然涉及对玩家的恭敬或服从，含义必须锚定到角色正常的动机（职责/习惯/情感/礼节），而非"对玩家的臣服"。阶级差异是行为风格（礼仪/分寸），不等于人格卑微。',
     '- "禁止假设"段列出AI最可能犯的错误推断',
     '- 变化必须有正文事件支撑，无中生有禁止',
     '- 至少思考五种解释——默认选最温和合理的解释：',
@@ -114,9 +124,13 @@ function buildDynamicProfileV2Instruction(userName: string): string {
     '  · "态度软化" = 放下了某个防御 | 不要理解为彻底接纳',
     '  · "沉默" = 在消化信息 | 不要理解为冷漠拒绝',
     '  · "主动靠近" = 感到安心 | 不要理解为依赖示弱',
+    '  · "恭敬/守礼" = 角色的身份习惯与分寸感 | 不要理解为卑微臣服或自认低贱',
+    '  · "听从安排" = 认可玩家判断或处于从属职责 | 不要理解为丧失自我或人格附属',
+    '  · "仰望/仰慕" = 对强者的欣赏或好感 | 不要理解为神化或宗教式崇拜',
     '- 如果正文确实发生了大转折（转天/冲突爆发/关系质变），大幅变化是合理的',
     '- 角色只知道她看到的信息——必须在"禁止假设"中标注',
-    '- 禁止使用极端化支配性的词汇描述角色状态，例如绝对、极其、沉沦',
+    '- 禁止用"神化/崇拜/臣服/自贬/权力不对等"语义描述角色状态。具体禁用类别：①神化类（神、神明、主宰、至高、圣旨、奉为、跪拜）；②自贬类（不配、污秽、贱、蝼蚁、奴仆、畜生）；③权力臣服类（主宰、Owner、绝对的支配、附属物）；④无保留程度副词（绝对、极其、完全、彻底、深深、沉沦、沦陷、疯魔）。遇到这些语义必须改写为中性客观描述。',
+    '- 尊重角色卡/世界书已明确设定的关系基调（含剧情需要的权力关系与 NSFW 语境）：纠偏只针对无文本依据凭空放大的极端化，不抹杀合理设定；若原文明确写了臣服/崇拜关系，则如实记录，不要反向"洗白"。',
   ].join('\n');
 }
 
@@ -125,8 +139,16 @@ function buildDynamicProfileV2Instruction(userName: string): string {
 function buildInputMaterial(
   capturedContents: CapturedContent[],
   previousProfiles: DynamicProfileV2[],
+  blacklistedNames?: string[],
 ): string {
   const parts: string[] = [];
+
+  // 黑名单提醒：材料中即使出现黑名单角色也不得分析其状态
+  const blacklistReminder = buildBlacklistReminder(
+    blacklistedNames,
+    '以下角色已从智脑中移除，本次不要分析它们的状态',
+  );
+  if (blacklistReminder) parts.push(blacklistReminder);
 
   parts.push('以下是正文和上次的角色状态，你必须仔细阅读');
   parts.push('');
@@ -269,6 +291,7 @@ export async function executeDynamicProfileV2(
   userName: string = '{{user}}',
   abortSignal?: AbortSignal,
   characterEntries?: CharacterNameEntry[],
+  blacklistedNames?: string[],
 ): Promise<DynamicProfileV2Result> {
   if (capturedContents.length === 0) {
     throw new Error('没有可用的正文');
@@ -280,8 +303,8 @@ export async function executeDynamicProfileV2(
   const currentChars = scanCharacterNamesFromContent(combinedText, profileNames, characterEntries);
   const relevantProfiles = previousProfiles.filter(p => currentChars.includes(p.characterName));
 
-  const instruction = buildDynamicProfileV2Instruction(userName);
-  const inputMaterial = buildInputMaterial(capturedContents, relevantProfiles);
+  const instruction = buildDynamicProfileV2Instruction(userName, blacklistedNames);
+  const inputMaterial = buildInputMaterial(capturedContents, relevantProfiles, blacklistedNames);
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [
     { role: 'system', content: buildJailbreakHead(userName) },

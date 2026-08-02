@@ -35,6 +35,12 @@ const mergeTargetName = ref('');  // 合并目标（主角色）
 const isDeleting = ref(false); // 编辑角色模式：显示删除按钮
 const isAnalyzingProfile = ref(false); // 手动分析动态人设中
 
+// 黑名单弹窗状态
+const showBlacklistPopup = ref(false);
+const blacklistedCharacters = ref<string[]>([]);
+// 黑名单数量（响应式，随 chatData 变化更新）
+const blacklistCount = computed(() => store.getBlacklistedCharacters().length);
+
 // RPG 角色卡/背包数据
 const graph = computed<KnowledgeGraph>(() => store.chatData.knowledgeGraph || createEmptyKnowledgeGraph());
 const characterOwnedItems = computed<OwnedItem[]>(() => {
@@ -499,8 +505,11 @@ async function triggerDynamicProfileV2() {
       store.getUserName(),
       undefined,
       characterEntries,
+      store.getBlacklistedCharacters(),
     );
-    store.chatData.dynamicProfilesV2 = result.profiles;
+    store.chatData.dynamicProfilesV2 = result.profiles.filter(
+      p => !store.isBlacklisted(p.characterName),
+    );
     store.chatData.lastDynamicProfileFloor = Math.max(...contents.map(c => c.messageId), store.chatData.lastDynamicProfileFloor ?? 0);
     store.forcePersist();
     try { (window as any).toastr?.success(`动态人设分析完成: ${result.profiles.length} 角色`, '✅', { timeOut: 3000 }); } catch (_) {}
@@ -518,15 +527,51 @@ function selectCharacter(name: string) {
   isEditingNsfw.value = false;
 }
 
+// 打开黑名单弹窗
+function openBlacklistPopup() {
+  blacklistedCharacters.value = store.getBlacklistedCharacters();
+  showBlacklistPopup.value = true;
+}
+
+// 加入黑名单二次确认弹窗
+const showBlacklistConfirm = ref(false);
+const blacklistConfirmName = ref('');
+
 function removeCharacter(name: string) {
-  if (confirm(`确定要删除角色「${name}」吗？\n\n删除后：\n- 该角色的所有信息（记忆/人设/关系/位置等）将被彻底清除\n- 物品保留，但归属该角色的物品 owner/位置 会置空\n- 此操作不可撤销`)) {
-    // 移除角色后，如果当前选中的就是这个角色，清除选中
-    if (selectedCharacter.value === name) {
-      selectedCharacter.value = '';
-    }
-    store.deleteCharacter(name);
-    store.forcePersist();
+  blacklistConfirmName.value = name;
+  showBlacklistConfirm.value = true;
+}
+
+function confirmBlacklistCharacter() {
+  const name = blacklistConfirmName.value;
+  if (!name) return;
+  showBlacklistConfirm.value = false;
+  // 移除角色后，如果当前选中的就是这个角色，清除选中
+  if (selectedCharacter.value === name) {
+    selectedCharacter.value = '';
   }
+  store.blacklistCharacter(name);
+  store.forcePersist();
+  try { (window as any).toastr?.success(`已加入黑名单「${name}」`, '✅', { timeOut: 2000 }); } catch (_) {}
+}
+
+// 放出二次确认弹窗
+const showUnblacklistConfirm = ref(false);
+const unblacklistConfirmName = ref('');
+
+function openUnblacklistConfirm(name: string) {
+  unblacklistConfirmName.value = name;
+  showUnblacklistConfirm.value = true;
+}
+
+function confirmUnblacklistCharacter() {
+  const name = unblacklistConfirmName.value;
+  if (!name) return;
+  showUnblacklistConfirm.value = false;
+  store.unblacklistCharacter(name);
+  store.forcePersist();
+  blacklistedCharacters.value = store.getBlacklistedCharacters();
+  try { (window as any).toastr?.success(`已放出「${name}」`, '✅', { timeOut: 2000 }); } catch (_) {}
 }
 
 // 合并角色
@@ -661,6 +706,13 @@ function confirmAddCharacter() {
         >
           ＋ 新建角色
         </button>
+        <button
+          class="zhino-btn-sm zhino-edit-role-btn"
+          @click="openBlacklistPopup"
+          title="查看黑名单角色，可放出"
+        >
+          黑名单<template v-if="blacklistCount > 0"> ({{ blacklistCount }})</template>
+        </button>
       </div>
 
       <!-- 角色列表 -->
@@ -687,7 +739,7 @@ function confirmAddCharacter() {
               {{ selectedMemory.attitude === 'like' ? '♥' : selectedMemory.attitude === 'dislike' ? '✗' : '—' }}
             </span>
             <span v-if="isDeleting" class="zhino-char-merge" title="合并到其他角色" @click.stop="openMergePopup(name)">⇄</span>
-            <span v-if="isDeleting" class="zhino-char-delete" title="忽略此角色" @click.stop="removeCharacter(name)">✕</span>
+            <span v-if="isDeleting" class="zhino-char-delete" title="加入黑名单（删除该角色全部信息，不再被分析）" @click.stop="removeCharacter(name)">✕</span>
           </button>
         </div>
       </div>
@@ -739,13 +791,13 @@ function confirmAddCharacter() {
                   <input
                     v-model="editingItemTime"
                     class="zhino-memory-edit-time"
-                    placeholder="日期"
+                    placeholder="日期" aria-label="日期"
                   />
                   <textarea
                     v-model="editingItemText"
                     class="zhino-memory-edit-text"
                     rows="1"
-                    placeholder="记忆内容（第一人称）"
+                    placeholder="记忆内容（第一人称）" aria-label="记忆内容（第一人称）"
                   />
                   <button class="zhino-memory-edit-save" @click="saveItemEdit" title="保存">✓</button>
                   <button class="zhino-memory-edit-del" @click="cancelItemEdit" title="取消">✕</button>
@@ -790,9 +842,9 @@ function confirmAddCharacter() {
             <!-- V2 编辑 -->
             <template v-else-if="selectedProfileV2 && isEditingV2">
               <div class="zhino-detail-label" style="font-size:10px;margin-top:2px">事实状态层</div>
-              <textarea v-model="editingFactualState" class="zhino-textarea" rows="4" placeholder="服装：白色长裙&#10;位置：庭院&#10;身体状态：轻微疲倦&#10;持有物品：无&#10;已知信息：..." />
+              <textarea v-model="editingFactualState" class="zhino-textarea" rows="4" placeholder="服装：白色长裙&#10;位置：庭院&#10;身体状态：轻微疲倦&#10;持有物品：无&#10;已知信息：..." aria-label="服装：白色长裙&#10;位置：庭院&#10;身体状态：轻微疲倦&#10;持有物品：无&#10;已知信息：..." />
               <div class="zhino-detail-label" style="font-size:10px;margin-top:8px">表现层</div>
-              <textarea v-model="editingDynamicProfileV2" class="zhino-textarea" rows="4" placeholder="行为倾向：会主动找话题 = 想延长相处时间 | 不要理解为黏人&#10;禁止假设：&#10;- 不要假设她已经..." />
+              <textarea v-model="editingDynamicProfileV2" class="zhino-textarea" rows="4" placeholder="行为倾向：会主动找话题 = 想延长相处时间 | 不要理解为黏人&#10;禁止假设：&#10;- 不要假设她已经..." aria-label="行为倾向：会主动找话题 = 想延长相处时间 | 不要理解为黏人&#10;禁止假设：&#10;- 不要假设她已经..." />
               <div style="margin-top:6px">
                 <button class="zhino-btn-sm zhino-btn-save" @click="saveEditV2">保存</button>
                 <button class="zhino-btn-sm" @click="cancelEditV2" style="margin-left:4px">取消</button>
@@ -810,19 +862,19 @@ function confirmAddCharacter() {
               <template v-if="isEditingNsfw">
                 <div class="zhino-nsfw-field">
                   <span class="zhino-detail-label">身体敏感点：</span>
-                  <textarea v-model="editingNsfwSensitivePoints" class="zhino-textarea" rows="2" placeholder="每行一个" />
+                  <textarea v-model="editingNsfwSensitivePoints" class="zhino-textarea" rows="2" placeholder="每行一个" aria-label="每行一个" />
                 </div>
                 <div class="zhino-nsfw-field">
                   <span class="zhino-detail-label">性爱偏好：</span>
-                  <textarea v-model="editingNsfwPreferences" class="zhino-textarea" rows="2" placeholder="每行一个" />
+                  <textarea v-model="editingNsfwPreferences" class="zhino-textarea" rows="2" placeholder="每行一个" aria-label="每行一个" />
                 </div>
                 <div class="zhino-nsfw-field">
                   <span class="zhino-detail-label">行为模式：</span>
-                  <textarea v-model="editingNsfwBehaviors" class="zhino-textarea" rows="2" placeholder="每行一个（主动/被动等）" />
+                  <textarea v-model="editingNsfwBehaviors" class="zhino-textarea" rows="2" placeholder="每行一个（主动/被动等）" aria-label="每行一个（主动/被动等）" />
                 </div>
                 <div class="zhino-nsfw-field">
                   <span class="zhino-detail-label">细节记忆：</span>
-                  <textarea v-model="editingNsfwMemories" class="zhino-textarea" rows="3" placeholder="每行一条（第一人称）" />
+                  <textarea v-model="editingNsfwMemories" class="zhino-textarea" rows="3" placeholder="每行一条（第一人称）" aria-label="每行一条（第一人称）" />
                 </div>
                 <div style="margin-top:6px">
                   <button class="zhino-btn-sm zhino-btn-save" @click="saveEditNsfw">保存</button>
@@ -973,7 +1025,7 @@ function confirmAddCharacter() {
       </div>
       <div class="zhino-merge-field">
         <span class="zhino-detail-label">新名：</span>
-        <input class="zhino-input" v-model="renameNewName" placeholder="输入新的主名" style="flex:1"
+        <input class="zhino-input" v-model="renameNewName" placeholder="输入新的主名" aria-label="输入新的主名" style="flex:1"
                @keydown.enter="confirmRename" @keydown.escape="showRenamePopup = false" autofocus />
       </div>
       <div v-if="renameNewName.trim()" class="zhino-merge-preview">
@@ -997,12 +1049,12 @@ function confirmAddCharacter() {
       </div>
       <div class="zhino-merge-field">
         <span class="zhino-detail-label">名称：</span>
-        <input class="zhino-input" v-model="newCharName" placeholder="输入角色主名（必填）" style="flex:1"
+        <input class="zhino-input" v-model="newCharName" placeholder="输入角色主名（必填）" aria-label="输入角色主名（必填）" style="flex:1"
                @keydown.enter="confirmAddCharacter" @keydown.escape="showAddPopup = false" autofocus />
       </div>
       <div class="zhino-merge-field" style="align-items: flex-start;">
         <span class="zhino-detail-label">别名：</span>
-        <textarea class="zhino-input" v-model="newCharAliases" placeholder="每行一个别名，可留空" rows="3" style="flex:1; resize: vertical;"></textarea>
+        <textarea class="zhino-input" v-model="newCharAliases" placeholder="每行一个别名，可留空" aria-label="每行一个别名，可留空" rows="3" style="flex:1; resize: vertical;"></textarea>
       </div>
       <div class="zhino-merge-field">
         <span class="zhino-detail-label">所在地：</span>
@@ -1014,7 +1066,7 @@ function confirmAddCharacter() {
       </div>
       <div v-if="newCharLocation === '__custom__'" class="zhino-merge-field">
         <span class="zhino-detail-label">新地点：</span>
-        <input class="zhino-input" v-model="newCharCustomLoc" placeholder="输入地点名" style="flex:1" />
+        <input class="zhino-input" v-model="newCharCustomLoc" placeholder="输入地点名" aria-label="输入地点名" style="flex:1" />
       </div>
       <div v-if="newCharError" class="zhino-merge-hint" style="color: var(--zn-danger-rgb, #e06c75);">
         {{ newCharError }}
@@ -1031,6 +1083,53 @@ function confirmAddCharacter() {
           :disabled="!newCharName.trim()"
           @click="confirmAddCharacter"
         >确认新建</button>
+      </template>
+    </Modal>
+
+    <!-- 黑名单弹窗 -->
+    <Modal :visible="showBlacklistPopup" :is-mobile="isMobile" title="角色黑名单" @close="showBlacklistPopup = false">
+      <div class="zhino-merge-desc">
+        黑名单中的角色已从智脑中移除（其全部信息已被清除），后续 AI 分析不会再关注他们的内容。<br/>
+        放出后该角色可再次被智脑分析（聊天中再次提到时可能重新建立角色资料）。
+      </div>
+      <div v-if="blacklistedCharacters.length === 0" class="zhino-empty-hint">
+        暂无黑名单角色
+      </div>
+      <div v-else class="zhino-blacklist-list">
+        <div v-for="name in blacklistedCharacters" :key="name" class="zhino-blacklist-item">
+          <span class="zhino-char-name">{{ name }}</span>
+          <button class="zhino-btn-sm zhino-btn-save" @click="openUnblacklistConfirm(name)">放出</button>
+        </div>
+      </div>
+      <template #footer>
+        <button class="zhino-btn-sm" @click="showBlacklistPopup = false">关闭</button>
+      </template>
+    </Modal>
+
+    <!-- 加入黑名单二次确认弹窗 -->
+    <Modal :visible="showBlacklistConfirm" :is-mobile="isMobile" title="加入黑名单" @close="showBlacklistConfirm = false">
+      <div class="zhino-merge-desc">
+        你确定要把角色「<strong>{{ blacklistConfirmName }}</strong>」加入黑名单吗？<br/>
+        之后该角色将不再出现在智脑中：<br/>
+        · 该角色的所有信息（记忆/人设/关系/位置等）将被彻底清除<br/>
+        · 物品保留，但归属该角色的物品 owner/位置 会置空<br/>
+        · 可随时从角色库的「黑名单」中放出
+      </div>
+      <template #footer>
+        <button class="zhino-btn-sm" @click="showBlacklistConfirm = false">取消</button>
+        <button class="zhino-btn-sm zhino-btn-danger" @click="confirmBlacklistCharacter">确认加入黑名单</button>
+      </template>
+    </Modal>
+
+    <!-- 放出二次确认弹窗 -->
+    <Modal :visible="showUnblacklistConfirm" :is-mobile="isMobile" title="放出角色" @close="showUnblacklistConfirm = false">
+      <div class="zhino-merge-desc">
+        确定要把角色「<strong>{{ unblacklistConfirmName }}</strong>」从黑名单中放出吗？<br/>
+        放出后该角色可再次被智脑分析（聊天中再次提到时可能重新建立角色资料）。
+      </div>
+      <template #footer>
+        <button class="zhino-btn-sm" @click="showUnblacklistConfirm = false">取消</button>
+        <button class="zhino-btn-sm zhino-btn-save" @click="confirmUnblacklistCharacter">确认放出</button>
       </template>
     </Modal>
 
@@ -1318,6 +1417,26 @@ function confirmAddCharacter() {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+.zhino-blacklist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+.zhino-blacklist-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--zn-border-base);
+  background: var(--zn-bg-surface1);
+  color: var(--zn-text-regular);
+  font-size: 13px;
 }
 .zhino-char-item {
   display: inline-flex;
@@ -1687,6 +1806,13 @@ function confirmAddCharacter() {
 }
 .zhino-btn-save:hover {
   background: rgba(var(--zn-accent-rgb), 0.15);
+}
+.zhino-btn-danger {
+  border-color: rgba(var(--zn-danger-rgb), 0.3);
+  color: rgba(var(--zn-danger-rgb), 0.8);
+}
+.zhino-btn-danger:hover {
+  background: rgba(var(--zn-danger-rgb), 0.12);
 }
 .zhino-btn-group {
   display: flex;

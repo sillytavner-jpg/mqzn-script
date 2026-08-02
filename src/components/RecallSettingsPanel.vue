@@ -79,7 +79,7 @@
             class="zhino-recall-input url"
             :value="store.settings.embeddingApiUrl"
             @change="store.updateSettings({ embeddingApiUrl: ($event.target as HTMLInputElement).value })"
-            placeholder="https://api.siliconflow.cn/v1/embeddings"
+            placeholder="https://api.siliconflow.cn/v1/embeddings" aria-label="https://api.siliconflow.cn/v1/embeddings"
           />
         </div>
         <div class="zhino-recall-row">
@@ -89,7 +89,7 @@
             class="zhino-recall-input key"
             :value="store.settings.embeddingApiKey"
             @change="store.updateSettings({ embeddingApiKey: ($event.target as HTMLInputElement).value })"
-            placeholder="sk-..."
+            placeholder="sk-..." aria-label="sk-..."
           />
         </div>
         <div class="zhino-recall-row">
@@ -98,7 +98,7 @@
             class="zhino-recall-input model-name"
             :value="store.settings.embeddingModel"
             @input="onModelChange(($event.target as HTMLInputElement).value)"
-            placeholder="BAAI/bge-m3"
+            placeholder="BAAI/bge-m3" aria-label="BAAI/bge-m3"
           />
         </div>
         <div class="zhino-recall-row">
@@ -166,7 +166,7 @@
             class="zhino-recall-input model-name"
             :value="store.settings.rerankModel"
             @input="store.updateSettings({ rerankModel: ($event.target as HTMLInputElement).value })"
-            placeholder="BAAI/bge-reranker-v2-m3"
+            placeholder="BAAI/bge-reranker-v2-m3" aria-label="BAAI/bge-reranker-v2-m3"
           />
           <button class="zhino-recall-action-btn" style="margin-left:4px;padding:1px 6px;font-size:9px" @click="testRerankConnection">测试</button>
         </div>

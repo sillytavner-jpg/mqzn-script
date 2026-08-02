@@ -1,13 +1,13 @@
 <template>
   <div class="zn-collapsible" :class="{ open: isOpen }">
-    <button class="zn-collapsible-header" @click="toggle">
+    <button class="zn-collapsible-header" @click="toggle" :aria-expanded="isOpen" :aria-controls="bodyId">
       <span class="zn-caret">{{ isOpen ? '▾' : '▸' }}</span>
       <span class="zn-collapsible-title">{{ title }}</span>
       <span v-if="count !== undefined && count !== ''" class="zn-collapsible-count">{{ count }}</span>
       <slot name="actions" />
     </button>
     <Transition name="zn-collapse">
-      <div v-show="isOpen" class="zn-collapsible-body">
+      <div v-show="isOpen" :id="bodyId" class="zn-collapsible-body">
         <slot />
       </div>
     </Transition>
@@ -29,6 +29,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void }>();
 
 const localOpen = ref(props.defaultOpen);
+const bodyId = 'zn-collapsible-body-' + Math.random().toString(36).slice(2, 9);
 const isControlled = computed(() => props.modelValue !== undefined);
 const isOpen = computed(() => (isControlled.value ? props.modelValue! : localOpen.value));
 

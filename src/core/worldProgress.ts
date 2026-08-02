@@ -11,6 +11,7 @@ import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { WorldProgressSchema } from '../utils/schemas';
 import { logInfo, logError } from '../utils/logger';
 import { normalizeStoryTime } from '../utils/storyTime';
+import { buildBlacklistReminder } from '../utils/characterNames';
 
 import type { CapturedContent, GrandSummary, SmallSummaryRecord } from '../stores/mainStore';
 import type { PlotOutline } from './plotDirector';
@@ -140,10 +141,17 @@ function buildWorldProgressInstruction(
   _plotOutline?: PlotOutline | null,
   candidateNames?: string[],
   worldBookEntries?: Array<{ key: string; content: string }>,
+  blacklistedNames?: string[],
 ): string {
+  // 黑名单提醒：本次推演不要生成黑名单角色的行动与记忆
+  const blacklistReminder = buildBlacklistReminder(
+    blacklistedNames,
+    '本次推演不要生成以下角色的行动与记忆',
+  );
   const lines = [
     `${userName}: 秋青子，现在需要你以第一人称叙述下面角色的行动。`,
     '',
+    ...(blacklistReminder ? [blacklistReminder] : []),
     '## 任务说明',
     '',
     `本次需要输出行动的角色为${(candidateNames || []).length > 0 ? candidateNames.map(n => `「${n}」`).join('、') : '（待确认）'}`,
@@ -164,11 +172,15 @@ function buildWorldProgressInstruction(
       : ['']),
     `## 角色行动指南：先生活，后剧情`,
     '',
-    `### 核心立场`,
+    `### 核心立场（去${userName}中心化，唯一权威表述）`,
     '',
     `- 每个角色都是自己人生的主角。${userName}只是世界中的一个人，不是所有行动的默认原因、目标或观众。`,
     `- 场外推演用于延续角色的生活与世界因果，不负责制造供${userName}发现的线索、偶遇、悬念或登场机会。`,
     `- 普通、琐碎、没有戏剧效果的行动完全有效。吃饭、休息、工作、履行职责、处理私事、维持关系、发呆和失败，都比牵强地靠近${userName}更真实。`,
+    `- 对${userName}的好感/厌恶/思念/好奇，只是影响选择的一个因素，不能单独成为赶往${userName}身边、暗中观察、准备礼物、递送口信或留下线索的充分理由；可以想起${userName}，但"想起"不能代替实际行动。`,
+    `- 允许角色优先别人、拒绝${userName}相关事务、忘记不重要的约定、判断失误、休息或什么大事也没发生。`,
+    `- 多个角色的行动默认彼此独立；只有现有材料证明能联络、同处一地或共享目标时才允许交叉。`,
+    `- 不要让角色为"给${userName}剧情可用"而改变路线、制造痕迹、保留物品、等待原地或延后自己的事务。`,
     '',
     `### 行动选择顺序`,
     '',
@@ -184,13 +196,6 @@ function buildWorldProgressInstruction(
     '',
     '若故事时间相较上次场外行动没有明显前进，默认角色仍在继续原活动，只补充细小进度或状态，不得仅因对话楼层增加就让角色连续完成多件新事。',
     '',
-    `### 去${userName}中心化铁律`,
-    '',
-    `- 对${userName}的好感、厌恶、思念或好奇，只是影响选择的一个因素，不能单独成为赶往${userName}身边、暗中观察${userName}、准备礼物、递送口信或留下线索的充分理由。`,
-    `- 不要让角色为了"给${userName}剧情可用"而改变路线、制造痕迹、保留物品、等待原地或延后自己的事务。`,
-    `- 可以想起${userName}，但"想起${userName}"不能代替实际行动；行动仍应扎根于角色当下的生活处境。`,
-    `- 允许角色优先别人、拒绝${userName}相关事务、忘记不重要的约定、判断失误、休息或什么大事也没发生。`,
-    '- 多个角色的行动默认彼此独立。只有现有材料证明他们能联络、同处一地或共享目标时，才允许产生交叉。',
     '',
     '### 输出自检',
     '',
@@ -206,6 +211,7 @@ function buildWorldProgressInstruction(
     `- 关于主角${userName}：不能创造"主角留下的东西/说过的话/做过的事"，不能编造主角与NPC的关系。`,
     '- 禁止凭空创造新角色。',
     '- 入场引导是机会项：当前场景不合适可完全不输出 entryHint，不要为了占位硬造一条。',
+    '- 若本次推演 2 个角色且都适合自然登场，仅选条件最自然者给 entryHint，全 JSON 只一个 entryHint 对象（另一个角色照常推进 advancedCharacters，但不给 entryHint）。',
     '必须参考该角色"最新10条角色记忆"，推演行动要与其既往事实、态度、目标保持连续，不能凭空跳出设定。',
     '',
     '## 思维链要求',
@@ -216,6 +222,7 @@ function buildWorldProgressInstruction(
     '2.根据世界观及角色设定思考，正文事件的信息能否被角色感知到',
     '3.如果能感知到，根据角色的性格，角色会做什么。如果感知不到，角色有什么自己的事情可以做',
     '4.当前角色的地点，状态是否适合入场',
+    '5. 对照输入材料中该角色"最新10条角色记忆"，确认本次行动与既往事实/态度/目标连续；若发现冲突（如记忆里她在养伤，本次却写她远行），必须优先沿用记忆设定或给出合理过渡，不得凭空跳出设定。',
     '</thinking>',
     '',
     '## 输出格式（JSON）',
@@ -237,6 +244,34 @@ function buildWorldProgressInstruction(
     '    "hint": "如果正文自然出现停顿、转场、传话、路过痕迹，可如何让此角色/行动痕迹入场。",',
     '    "avoid": "不要强行登场，不要打断玩家选择。"',
     '  }',
+    '}',
+    '```',
+    '',
+    '### 输出范例（照此结构，二选一）',
+    '',
+    '```json',
+    '// 范例 A：无自然入场条件',
+    '{',
+    '  "currentTime": "2025年2月5日08:30",',
+    '  "advancedCharacters": [',
+    '    {"characterName":"清月","location":"寒月宫净室",',
+    '     "memoryText":"我守着炉火把那炉药再温了一遍，顺手合上昨夜没看完的卷宗。",',
+    '     "result":"药还温着，卷宗归位"}',
+    '  ],',
+    '  "entryHint": null',
+    '}',
+    '// 范例 B：仅一个角色适合自然登场时',
+    '{',
+    '  "currentTime": "2025年2月5日08:30",',
+    '  "advancedCharacters": [',
+    '    {"characterName":"江念","location":"月微居偏院",',
+    '     "memoryText":"我把陶罐搁在石凳上，蹲下身继续择那堆草药。",',
+    '     "result":"草药择好大半，陶罐在石凳上待取"},',
+    '    {"characterName":"清月","location":"寒月宫净室",',
+    '     "memoryText":"我照例把净室各处擦拭一遍，顺手给炉子添了块炭。",',
+    '     "result":"净室整洁，炉火更旺"}',
+    '  ],',
+    '  "entryHint": {"characterName":"江念","level":1,"hint":"若正文出现偏院转场或路过痕迹，可让江念择草药的身影自然入镜。","avoid":"不要强行登场，不要打断玩家选择。"}',
     '}',
     '```',
     '',
@@ -621,6 +656,7 @@ export async function executeWorldProgress(
   kgInjectTopK?: number,
   candidates?: WorldProgressCandidate[],
   currentAttempt?: number,
+  blacklistedNames?: string[],
 ): Promise<WorldProgressRecord> {
   console.log('[世界推进] 构建输入材料:', JSON.stringify({
     currentFloor,
@@ -629,7 +665,7 @@ export async function executeWorldProgress(
     worldBookKeys: (worldBookEntries || []).map(e => e.key),
   }));
   const selectedNames = (candidates || []).slice(0, 2).map(c => c.characterName);
-  const instruction = buildWorldProgressInstruction(userName, plotOutline, selectedNames, worldBookEntries);
+  const instruction = buildWorldProgressInstruction(userName, plotOutline, selectedNames, worldBookEntries, blacklistedNames);
   let inputMaterial = buildWorldProgressMaterial(
     latestSummary,
     recentContents,

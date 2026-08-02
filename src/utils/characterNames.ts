@@ -100,3 +100,22 @@ export function scanCharacterNamesFromContent(
 
   return [...matched];
 }
+
+/**
+ * 构建提示词中的「黑名单角色」提醒段（按分析类型定制话术）。
+ * 黑名单角色已从智脑中移除，AI 在正文里可能仍看到其名字——按本次分析职责提醒其不要输出相关内容。
+ * 无黑名单时返回空串（调用方直接拼接即可）。
+ * @param blacklistedNames 黑名单角色名列表
+ * @param hint 定制话术（不带角色名，如「本次不要生成以下角色的记忆」）
+ */
+export function buildBlacklistReminder(blacklistedNames: string[] | undefined, hint: string): string {
+  const names = (blacklistedNames || []).filter(Boolean);
+  if (names.length === 0) return '';
+  return [
+    '## 黑名单角色（已从智脑中移除）',
+    `${hint}：${names.join('、')}`,
+    '',
+    '---',
+    '',
+  ].join('\n');
+}

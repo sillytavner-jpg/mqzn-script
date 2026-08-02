@@ -21,6 +21,7 @@ import { getEmbedding } from './embedding';
 import { KnowledgeGraphDiffSchema } from '../utils/schemas';
 import { z } from 'zod';
 import { logInfo, logWarn, logError } from '../utils/logger';
+import { buildBlacklistReminder } from '../utils/characterNames';
 
 // ========== 输出 Schema ==========
 // 新版：去掉 summary 节点，AI 直接在 graphDiff.add.characters 里列每个在场角色 + location；
@@ -88,11 +89,17 @@ function buildInstruction(
   userName: string,
   kgDigest?: string,
   worldProgressMaterial?: string,
-  previousContext?: PreviousRoundContext,
+  blacklistedNames?: string[],
 ): string {
+  // 黑名单提醒：本次不要记录黑名单角色（图谱人物/在场/互动均不含）
+  const blacklistReminder = buildBlacklistReminder(
+    blacklistedNames,
+    '本次不要记录以下角色：它们不得出现在在场角色、互动角色或图谱人物节点中',
+  );
   const lines: string[] = [
     `${userName}: 秋青子，现在需要你做一项数据整理任务。`,
     '',
+    ...(blacklistReminder ? [blacklistReminder] : []),
     '## 任务说明',
     '',
     '阅读输入材料，更新世界图谱。',
@@ -122,6 +129,7 @@ function buildInstruction(
     '  / placed（放在某地）/ stored（装入容器/收纳）/ lost（遗失/去向不明）。',
     '- statusDetail 是状态细节补充（具体位置、损坏、朝向等自由文本），不重复 status 已表达的内容。',
     '- 一人可同时穿/持多件物品，每件各占一条 item，status 互不冲突。',
+    '⚠️ 瞬时持有态降级【作用域】：仅对"本轮在场且此前为 held/worn/carried、本轮正文未再描述"的物品生效；角色本轮不在场时不输出 update（由代码端离场降级兜底）。降级非永久删除，下次重新拿起即恢复正常状态。',
     '⚠️ 瞬时持有态降级（held/worn/carried 在本轮未被观测时失效）：若"已有条目清单"中某物品 status 是 held/worn/carried，且本轮正文中该角色出场了（在场）却没再描写本物品（既未说"拿着/穿着/带着"也未说"放下/转交/易主"）→ 视作该瞬时持有态失效：输出 update 把该物品 status 置空串 ""、statusDetail 置空串 ""、location 改回该角色名（"东西还在角色那儿，但当下持有方式不明"）。',
     '  ※ 角色本轮不在场时不要输出 update——不归本轮管，由代码端"离场降级"自动兜底。只对"在场但本轮未被 AI 再次描述"的物品降级。',
     '  ※ 降级并非永久删除：下次该角色重新拿起/穿戴该物品 → 正常更新把 status 写回 held/worn/carried 即可，代码端不会拦截。',
@@ -158,6 +166,15 @@ function buildInstruction(
     '**判定句**：录入任何地点前，必须能回答——"本轮输入材料里，是否有角色/势力/事件正在这个地点实际发生？"答案不是明确的"是"，就不要录入。',
     '注意：输入材料除正文外可能还含背景角色的行动（[其他场景事件]），这些行动所在的地点属有效背景行动地点，按上面规则正常记录，不要因"不是当前镜头"就丢弃。',
 
+    '### 高频错误对照（务必规避）',
+    '',
+    '- ✗ 把"草棚边的石凳上""院中老槐树下"录为 add.locations → 石凳、老槐是院落内部景物设施，不是地点。',
+    '  ✓ 正确：location 写"月微居偏院"（院落级地名），细节进物品 statusDetail 或角色记忆。',
+    '- ✗ 江念把陶罐放石凳，写 owner=江念 location=江念 → 东西已不在身上。',
+    '  ✓ 正确：owner=江念（未易主）location="月微居偏院" status=placed statusDetail="草棚边的石凳上"。',
+    '- ✗ 角色本轮在场但没再描写随身剑 → 仍写 location=该角色 status=held（维持旧瞬时态）。',
+    '  ✓ 正确：按"瞬时持有态降级"输出 update，status/statusDetail 置空、location 改回该角色（"还在那儿但持有方式不明"）。',
+
     '### 铁律',
     '',
     '- 我 = ' + userName + '。正文里的"我"就是这个角色名；位置更新和其他角色同样处理，写入 characters 列表。',
@@ -170,12 +187,7 @@ function buildInstruction(
     '- **角色必须是人/拟人存在**：character 只能是有意识的人或拟人存在；衣物、配饰、武器、道具、器物（如裤子、手表、玉佩、剑、蛊、瓶子）一律归入 items，禁止进 characters。若不确定某实体是角色还是物品，优先按物品处理。',
     '- **角色位置**：同一角色在本段发生移动时，取最后一次明确所在地点。角色没出现位置证据时，不写该角色。',
     '- **物品数量**：物品数量必须写在 quantity 字段，如"1把""3枚""半瓶""若干"；brief 只写物品是什么，不要写数量。',
-    '- **物品 owner 与 location**（核心铁律，避免归属/位置混淆）：',
-    '  - owner = 静态所有权（角色名或地点名）。只在物品被"送/给/抢/易主"明确改换主人时更新；被原主放下、暂存他处不改 owner。',
-    '  - location = 当前动态位置（角色名或地点名）。物品被拿起、放下、取出、移动、转交时即更新。location 可以是角色名（在某角色手上/身上）或地点名（放在某处）。',
-    '  - 当物品"被原主放下在某地"时 → owner 不变（保持原主），location = 该地点名，status = placed，statusDetail = 位置细节。',
-    '  - 当物品"被某人拿起/穿戴/随身携带"（不是易主，只是持有）→ owner 不变，location = 该角色名，status = held/worn/carried。',
-    '  - 当物品"被原主明确送给/转交/被抢"另一角色 → owner = 新主，location = 新主，status = 持有方式。',
+    '- **物品 owner 与 location**：判定严格遵循上方「物品记录标准」段的 owner/location 核心铁律（见文件前面定义），此处不重复。一句话：owner=静态所有权（仅"送/给/抢/易主"时改），location=当前动态位置（拿起/放下/转交即改）。',
     '- **同名物品 ≠ 同一实体**：本段出现与已有条目同名的物品，但 owner 不同（不同来源角色拿出/带来的），且正文没有明确转移证据（"递给/送给/还给/塞给/丢给/抢走/接过/转交"等任一动作词）时，作为新实例写入 `add.items`，不要覆盖旧条目的 brief/owner/quantity/status。只有当正文确实写明"已有条目的前任 owner 把它转移给当前持有者"时，才按同一实体更新 owner/location/status/quantity。判别不清时优先按新实例 add。',
     '- **已消耗物品**：物品被吃掉、喝光、烧毁、碎裂、献祭、一次性用尽、失效且不能自然恢复时，写 consumed=true；只是暂时使用中、佩戴中、拿在手上，不算已消耗。',
     '- **道路关系**：同一两个地点之间的同一条路只输出一条 connected，detail 写稳定的中性描述。',
@@ -203,50 +215,19 @@ function buildInstruction(
     aiResponse,
   ];
 
-  // 上一轮在场角色与物品快照（用于本轮判重，避免把同一角色拆成两个或把两个角色并成一个）
-  const prevChars = previousContext?.presentCharacters || [];
-  const prevItems = previousContext?.items || [];
-  if (prevChars.length > 0 || prevItems.length > 0) {
-    lines.push('');
-    lines.push('[上一轮在场角色与物品]');
-    lines.push('下文是上一轮结束时在场角色与物品的快照，用于判别本轮新出现实体是新增还是已有实体的延续/移动。');
-    lines.push('不要把同一角色拆成两个、也不要把两个角色并成一个；本轮若未明确改换主人/位置，沿用此处的归属与位置。');
-    if (prevChars.length > 0) {
-      const locMap = new Map<string, string>();
-      for (const cl of previousContext?.characterLocations || []) {
-        if (cl.name && cl.location) locMap.set(cl.name, cl.location);
-      }
-      lines.push('');
-      lines.push('在场角色：');
-      for (const name of prevChars) {
-        const loc = locMap.get(name);
-        lines.push(loc ? `- ${name} @ ${loc}` : `- ${name}`);
-      }
-    }
-    if (prevItems.length > 0) {
-      lines.push('');
-      lines.push('物品持有态：');
-      for (const it of prevItems) {
-        const parts: string[] = [it.name];
-        if (it.owner) parts.push(`owner=${it.owner}`);
-        if (it.location) parts.push(`location=${it.location}`);
-        if (it.status) parts.push(`status=${it.status}`);
-        lines.push(`- ${parts.join('， ')}`);
-      }
-    }
-  }
-
-  // 世界推进日记子块（仅发送最近一条未消费的记录）
+  // 对策4：世界推进挪到 AI 回复后，独立成区（不混主线正文）
   if (worldProgressMaterial && worldProgressMaterial.trim()) {
     lines.push('');
-    lines.push('[其他场景事件]');
+    lines.push('### 并发场景事件（如有，世界推进产生，作为背景行动证据，与主线正文同等效力但独立标注）');
     lines.push(worldProgressMaterial);
   }
 
-  // 已有相关图谱条目（若提供），供 AI 判断 update
+  // 对策2：上一轮在场角色与物品已内联为图谱底账的 [在场]/[在场·态] 标记，不再单独拼快照块
+
+  // 图谱底账（对策1：四桶合并为扁平三表 + edges 独立成区）
   if (kgDigest && kgDigest.trim()) {
     lines.push('');
-    lines.push('## 已有相关图谱条目（update 回填这里的 id；正文新出现且不在此列 → add）');
+    lines.push('## 图谱底账（update 回填这里的 id；正文新出现且不在此列 → add）');
     lines.push('');
     lines.push(kgDigest);
   }
@@ -259,7 +240,7 @@ function buildInstruction(
   lines.push('步骤1：按"地点录入铁律"筛出本段实际承载事件的地点。对照已有相关图谱条目，命中则沿用正式名，新增叫法放 aliases。补 contains/connected 时，同一两端同一条路写一条中性 connected。');
 
   lines.push('步骤2：列出本段有明确位置证据的角色（含' + userName + '我）。对照已有角色 name/aliases，命中则使用正式名。角色移动时取本段结束时的地点。');
-  lines.push('步骤3：列出本段有明确状态变化或首次出现的重要物品。对照已有物品 name/aliases，命中则使用正式名；数量写 quantity，brief 不写数量。判明 owner（静态所有权）和 location（当前动态位置）：被原主放下在某地 → owner 不变、location 改为地点名、status=placed；被拿起/穿戴/随身 → owner 不变、location 改为持有者角色名、status=held/worn/carried；明确转交/送给/易主 → owner 和 location 都改、status 为持有方式；未发生变化的字段不重写。彻底用尽/毁掉/吃掉/喝光时 consumed=true。owner 不同于已有条目且无明确转移证据者按新实例 add。');
+  lines.push('步骤3：列出本段有明确状态变化或首次出现的重要物品。对照已有物品 name/aliases 命中则使用正式名；数量写 quantity，brief 不写数量。owner/location/consumed/新实例判定严格按前述 owner/location 核心铁律执行：被原主放下→owner不变、location改地点名、status=placed；被拿起/穿戴/随身→owner不变、location改持有者、status=held/worn/carried；明确转交/易主→owner与location同改；彻底用尽/毁掉→consumed=true；owner不同于已有条目且无转移证据→新实例add。');
   lines.push('步骤4：单独列出本轮正文中"实际出场并互动"的角色（含' + userName + '我）——出现了且至少满足下列之一：说话、做出动作、与场景/他人直接交互（被攻击、被送物、被搂抱/牵引、直接对话参与）。**不算**：仅被回忆/传闻/设想单独提及、仅远方单纯传闻、剧情旁白一笔带过没有实际在场。此列表用于世界推进判断角色是否在场，不录入图谱、不影响 add.characters 的"位置证据"准则。');
   lines.push('</thinking>');
 
@@ -456,6 +437,7 @@ export async function executeSmallSummary(
   kgOptions?: SmallSummaryKgOptions,
   characterEntries?: CharacterNameEntry[],
   previousContext?: PreviousRoundContext,
+  blacklistedNames?: string[],
 ): Promise<SmallSummaryResult> {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -490,6 +472,11 @@ export async function executeSmallSummary(
           }
         }
         const topK = kgOptions.kgInjectTopK || 40;
+        // 对策2：组装在场标记参数（来自 previousContext，传给图谱构建打 [在场·态] 标记）
+        const prevItemStatusMap = new Map<string, string>();
+        for (const it of previousContext?.items || []) {
+          if (it.status) prevItemStatusMap.set(it.name, it.status);
+        }
         kgDigest = buildContextualKgDigestForSmallSummary({
           query,
           graph: kgOptions.knowledgeGraph!,
@@ -500,6 +487,8 @@ export async function executeSmallSummary(
           characterLocations: kgOptions.characterLocations || {},
           centerCharacterNames: kgOptions.centerCharacterNames || [],
           centerLocationNames: kgOptions.centerLocationNames || [],
+          presentCharacterNames: previousContext?.presentCharacters || [],
+          prevItemStatusMap,
         });
       } catch (e) {
         logWarn('小总结', '图谱精简清单构建失败', (e as Error).message);
@@ -513,7 +502,7 @@ export async function executeSmallSummary(
     userName,
     kgDigest,
     kgOptions?.worldProgressMaterial,
-    previousContext,
+    blacklistedNames,
   );
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [

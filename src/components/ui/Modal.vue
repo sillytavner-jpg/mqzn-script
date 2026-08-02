@@ -1,10 +1,20 @@
 <template>
   <Transition name="zn-modal">
     <div v-if="visible" class="zn-overlay" :class="{ 'is-mobile': isMobile }" @click.self="$emit('close')">
-      <div class="zn-modal-card" :class="{ 'is-mobile': isMobile }" :style="maxWidth ? { maxWidth } : undefined">
+      <div
+        ref="cardRef"
+        class="zn-modal-card"
+        :class="{ 'is-mobile': isMobile }"
+        :style="maxWidth ? { maxWidth } : undefined"
+        role="dialog"
+        aria-modal="true"
+        tabindex="-1"
+        :aria-labelledby="title ? 'zn-modal-title' : undefined"
+        :aria-label="title ? undefined : (ariaLabel || '对话框')"
+      >
         <div v-if="title || $slots.header" class="zn-modal-header">
           <slot name="header">
-            <span class="zn-modal-title">{{ title }}</span>
+            <span id="zn-modal-title" class="zn-modal-title">{{ title }}</span>
           </slot>
           <button class="zn-modal-close" aria-label="关闭" @click="$emit('close')">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -21,14 +31,88 @@
 </template>
 
 <script setup lang="ts">
+import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
+
 defineOptions({ name: 'Modal' });
 withDefaults(defineProps<{
   visible: boolean;
   title?: string;
   isMobile?: boolean;
   maxWidth?: string;
+  ariaLabel?: string;
 }>(), { isMobile: false });
-defineEmits<{ (e: 'close'): void }>();
+const emit = defineEmits<{ (e: 'close'): void }>();
+
+const cardRef = ref<HTMLElement | null>(null);
+
+function getFocusable(): HTMLElement[] {
+  if (!cardRef.value) return [];
+  const sel = 'a[href], button:not([disabled]), textarea, input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  return Array.from(cardRef.value.querySelectorAll<HTMLElement>(sel)).filter(
+    (el) => el.offsetParent !== null || el.getClientRects().length > 0
+  );
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    emit('close');
+    return;
+  }
+  // Tab 循环陷阱：焦点被锁在对话框内
+  if (e.key !== 'Tab') return;
+  const f = getFocusable();
+  if (f.length === 0) {
+    e.preventDefault();
+    cardRef.value?.focus();
+    return;
+  }
+  const first = f[0];
+  const last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+function lockScroll(lock: boolean) {
+  document.body.style.overflow = lock ? 'hidden' : '';
+}
+
+function focusInitial() {
+  nextTick(() => {
+    const f = getFocusable();
+    (f[0] ?? cardRef.value)?.focus();
+  });
+}
+
+watch(
+  () => props.visible,
+  (v) => {
+    if (v) {
+      lockScroll(true);
+      focusInitial();
+    } else {
+      lockScroll(false);
+    }
+  }
+);
+
+onMounted(() => {
+  if (props.visible) {
+    lockScroll(true);
+    focusInitial();
+  }
+  window.addEventListener('keydown', onKeydown);
+});
+
+onBeforeUnmount(() => {
+  lockScroll(false);
+  window.removeEventListener('keydown', onKeydown);
+});
 </script>
 
 <style scoped>
@@ -61,6 +145,10 @@ defineEmits<{ (e: 'close'): void }>();
   border-radius: var(--zn-radius-lg);
   box-shadow: var(--zn-shadow-glass), var(--zn-glass-highlight);
   overflow: hidden;
+}
+.zn-modal-card:focus-visible {
+  outline: 2px solid var(--zn-accent);
+  outline-offset: -2px;
 }
 .zn-modal-card.is-mobile {
   max-width: 100%;

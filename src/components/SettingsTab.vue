@@ -1002,7 +1002,7 @@ function executeSelectiveDelete() {
                 <input
                   v-model="archiveDialogName"
                   class="zhino-input zhino-archive-dialog-input"
-                  placeholder="存档名称（可选，留空用时间戳）"
+                  placeholder="存档名称（可选，留空用时间戳）" aria-label="存档名称（可选，留空用时间戳）"
                   @keyup.enter="confirmArchive"
                   @keyup.escape="cancelArchiveDialog"
                 />
@@ -1029,7 +1029,7 @@ function executeSelectiveDelete() {
                   v-model="editingArchiveName"
                   class="zhino-input zhino-archive-name-input"
                   style="width:160px;margin-bottom:2px"
-                  placeholder="存档名称（留空清除）"
+                  placeholder="存档名称（留空清除）" aria-label="存档名称（留空清除）"
                   @keyup.enter="saveEditArchiveName(item.archiveId)"
                   @keyup.escape="cancelEditArchiveName"
                   @blur="saveEditArchiveName(item.archiveId)"
@@ -1188,9 +1188,9 @@ function executeSelectiveDelete() {
           <div v-for="api in (store.settings as any).apiLibrary || []" :key="api.id" class="zhino-api-lib-card">
             <template v-if="editingApiId === api.id">
               <div class="zhino-api-lib-edit">
-                <input class="zhino-input" v-model="apiDraft.name" placeholder="名称（如 DeepSeek Pro）" />
-                <input class="zhino-input" v-model="apiDraft.url" placeholder="API地址（如 https://api.deepseek.com/v1）" />
-                <input class="zhino-input" type="password" v-model="apiDraft.key" placeholder="API Key" />
+                <input class="zhino-input" v-model="apiDraft.name" placeholder="名称（如 DeepSeek Pro）" aria-label="名称（如 DeepSeek Pro）" />
+                <input class="zhino-input" v-model="apiDraft.url" placeholder="API地址（如 https://api.deepseek.com/v1）" aria-label="API地址（如 https://api.deepseek.com/v1）" />
+                <input class="zhino-input" type="password" v-model="apiDraft.key" placeholder="API Key" aria-label="API Key" />
                 <div class="zhino-model-row">
                   <select class="zhino-input zhino-model-select" v-model="apiDraft.model">
                     <option value="" disabled>选择模型</option>

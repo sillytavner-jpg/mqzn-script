@@ -14,6 +14,7 @@ import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { CharacterMemoryUpdateSchema } from '../utils/schemas';
 import { normalizeStoryTime } from '../utils/storyTime';
 import { logInfo } from '../utils/logger';
+import { buildBlacklistReminder } from '../utils/characterNames';
 
 // ========== 破限常量（通用） ==========
 
@@ -184,8 +185,16 @@ function buildCharacterMemoryInstruction(
 function buildInputMaterial(
   capturedContents: CapturedContent[],
   existingMemories: CharacterMemory[],
+  blacklistedNames?: string[],
 ): string {
   const parts: string[] = [];
+
+  // 黑名单提醒：本次不要生成黑名单角色的记忆
+  const blacklistReminder = buildBlacklistReminder(
+    blacklistedNames,
+    '本次不要生成或更新以下角色的记忆与NSFW记录',
+  );
+  if (blacklistReminder) parts.push(blacklistReminder);
 
   // 已知角色列表
   if (existingMemories.length > 0) {
@@ -422,13 +431,14 @@ export async function executeCharacterMemoryUpdate(
   userName: string = '{{user}}',
   abortSignal?: AbortSignal,
   extraGenerateParams?: { _responseFormat?: 'json_object' | 'text' },
+  blacklistedNames?: string[],
 ): Promise<CharacterMemoryUpdateResult> {
   if (capturedContents.length === 0) {
     throw new Error('没有可用的正文日志');
   }
 
   const instruction = buildCharacterMemoryInstruction(userName, memoryMin, memoryMax);
-  const inputMaterial = buildInputMaterial(capturedContents, existingMemories);
+  const inputMaterial = buildInputMaterial(capturedContents, existingMemories, blacklistedNames);
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [
     { role: 'system', content: buildJailbreakHead(userName) },

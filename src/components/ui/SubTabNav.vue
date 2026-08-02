@@ -1,10 +1,12 @@
 <template>
-  <div class="zn-subnav">
+  <div class="zn-subnav" role="tablist">
     <button
       v-for="item in items"
       :key="item.key"
       class="zn-subnav-btn"
       :class="{ active: modelValue === item.key }"
+      role="tab"
+      :aria-selected="modelValue === item.key"
       @click="$emit('update:modelValue', item.key)"
     >{{ item.label }}</button>
   </div>

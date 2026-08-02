@@ -181,6 +181,10 @@ export interface RecalledEntity {
   quantity?: string;
   /** 已消耗/已毁/已用尽，召回时可作为历史事实提示 */
   consumed?: boolean;
+  /** 上一轮结束时该角色/物品是否在场（来自 previousContext，对策2在场标记） */
+  present?: boolean;
+  /** 上一轮结束时该物品的瞬时持有态（held/worn/carried），用于降级提示 */
+  prevStatus?: string;
   sim: number;
 }
 
@@ -223,6 +227,10 @@ export interface SmallSummaryKgDigestOptions {
   centerItemLimit?: number;
   /** 正文直接命中的旧实体上限。 */
   exactMatchLimit?: number;
+  /** 上一轮结束时在场的角色名（来自 previousContext.presentCharacters，对策2在场标记） */
+  presentCharacterNames?: string[];
+  /** 上一轮结束时在场物品的瞬时态：itemId/name → status（来自 previousContext.items，对策2降级提示） */
+  prevItemStatusMap?: Map<string, string>;
 }
 
 // ========== 工具函数 ==========
@@ -1021,6 +1029,8 @@ interface KgDigestFormatOptions {
   characterTitle?: string;
   includeOtherCharacters?: boolean;
   otherCharactersTitle?: string;
+  /** edges 独立成区开关（对策1：edges 从地点方括号抽离成独立关系边区） */
+  emitEdgesSection?: boolean;
 }
 
 /**
@@ -1075,7 +1085,8 @@ function characterToRecalled(ch: GraphCharacter, sim = 1): RecalledEntity {
     kind: 'character',
     id: ch.id,
     name: ch.name,
-    brief: ch.location || '',
+    brief: '',                       // 角色暂无简介字段，留空（brief 不再挪用装 location）
+    location: ch.location || '',    // 位置独立成字段（修正原 brief 挪用）
     aliases: ch.aliases,
     sim,
   };
@@ -1175,48 +1186,38 @@ function formatKgDigestForSmallSummary(
   if (locs.length > 0) {
     lines.push(options.locationTitle || '### 已有相关地点（对应本次正文出现的：update/delete 回填其 id；本次正文新出现且不在此列 → add）');
     for (const l of locs) {
-      const al = l.aliases?.length ? ` 别名:${l.aliases.join('/')}` : '';
-      let line = `- id=${l.id} | ${l.name}${l.brief ? '：' + l.brief : ''}${al}`;
-      // 补该地点的 contains/connected 关系（让 AI 知道现有边，避免重复 add）
-      if (graph) {
-        const rels: string[] = [];
-        for (const e of graph.edges) {
-          if (e.type === 'contains' && e.from === l.id) {
-            const child = graph.locations.find(x => x.id === e.to);
-            if (child) rels.push(`包含→${child.name}`);
-          } else if (e.type === 'connected' && e.from === l.id) {
-            const target = graph.locations.find(x => x.id === e.to);
-            if (target) rels.push(`连通→${target.name}${e.detail ? `（${e.detail}）` : ''}`);
-          } else if (e.type === 'connected' && e.to === l.id) {
-            const source = graph.locations.find(x => x.id === e.from);
-            if (source) rels.push(`←连通 ${source.name}${e.detail ? `（${e.detail}）` : ''}`);
-          }
-        }
-        if (rels.length > 0) line += ` [${rels.join('，')}]`;
-      }
-      lines.push(line);
+      const parts: string[] = [`id=${l.id}`, l.name];
+      if (l.brief) parts.push(`brief:${l.brief}`);
+      if (l.aliases?.length) parts.push(`aliases:[${l.aliases.join(',')}]`);
+      lines.push(`- ${parts.join(' | ')}`);
     }
   }
   if (items.length > 0) {
     lines.push(options.itemTitle || '### 已有相关物品（update/delete 回填其 id；本次正文新出现且不在此列 → add）');
     lines.push('⚠️ 判重铁律：owner 相同且 name/aliases 命中 → 合并更新；owner 不同或 owner 不明 → 按独立新实例 add，不要覆盖旧条目。');
     for (const it of items) {
-      const al = it.aliases?.length ? ` 别名:${it.aliases.join('/')}` : '';
-      const ownerTxt = it.owner ? ` [所有:${it.owner}]` : '';
-      const locTxt = it.location && it.location !== it.owner ? ` 当前位置:${it.location}` : '';
-      const statusTxt = it.status ? ` 方式:${it.status}` : '';
-      const detailTxt = it.statusDetail ? ` 细节:${it.statusDetail}` : '';
-      const quantity = it.quantity ? ` 数量:${it.quantity}` : '';
-      const consumed = it.consumed ? ' 已消耗:true' : '';
-      lines.push(`- id=${it.id} | ${it.name}${ownerTxt}${locTxt}${statusTxt}${detailTxt}${it.brief ? '：' + it.brief : ''}${quantity}${consumed}${al}`);
+      const parts: string[] = [`id=${it.id}`, it.name];
+      if (it.brief) parts.push(`brief:${it.brief}`);
+      if (it.owner) parts.push(`owner:${it.owner}`);
+      if (it.location) parts.push(`loc:${it.location}`);
+      if (it.status) parts.push(`status:${it.status}`);
+      if (it.statusDetail) parts.push(`detail:${it.statusDetail}`);
+      if (it.quantity) parts.push(`qty:${it.quantity}`);
+      if (it.consumed) parts.push('consumed:true');
+      if (it.aliases?.length) parts.push(`aliases:[${it.aliases.join(',')}]`);
+      if (it.present) parts.push(`[在场${it.prevStatus ? '·' + it.prevStatus : ''}]`);
+      lines.push(`- ${parts.join(' | ')}`);
     }
   }
   if (chars.length > 0) {
     lines.push(options.characterTitle || '### 已有相关角色（update/delete 回填其 id；本次正文新出现且不在此列 → add）');
     for (const ch of chars) {
-      const al = ch.aliases?.length ? ` 别名:${ch.aliases.join('/')}` : '';
-      const loc = ch.brief ? ` → 位于 ${ch.brief}` : '';
-      lines.push(`- id=${ch.id} | ${ch.name}${loc}${al}`);
+      const parts: string[] = [`id=${ch.id}`, ch.name];
+      if (ch.location) parts.push(`loc:${ch.location}`);
+      if (ch.brief) parts.push(`brief:${ch.brief}`);
+      if (ch.aliases?.length) parts.push(`aliases:[${ch.aliases.join(',')}]`);
+      if (ch.present) parts.push('[在场]');
+      lines.push(`- ${parts.join(' | ')}`);
     }
   }
 
@@ -1229,12 +1230,39 @@ function formatKgDigestForSmallSummary(
     const recalledCharIds = new Set(chars.map(c => c.id));
     const missingChars = (graph.characters || []).filter(ch => !recalledCharIds.has(ch.id));
     if (missingChars.length > 0) {
-      lines.push(options.otherCharactersTitle || '### 其他已有角色（未在召回 top-K 里，但全量列出供别名识别——下列名字的任何变体出现，都按已存在角色处理，禁止 add）');
+      lines.push(options.otherCharactersTitle || '### 角色别名索引（仅判重用，不输出位置——下列名字的任何变体出现，都按已存在角色处理，禁止 add）');
       for (const ch of missingChars) {
-        const al = ch.aliases?.length ? ` 别名:${ch.aliases.join('/')}` : '';
-        const loc = ch.location ? ` @${ch.location}` : '';
-        lines.push(`- id=${ch.id} | ${ch.name}${loc}${al}`);
+        const al = ch.aliases?.length ? ` | aliases:[${ch.aliases.join(',')}]` : '';
+        lines.push(`- id=${ch.id} | ${ch.name}${al}`);
       }
+    }
+  }
+
+  // 对策1：edges 独立成区（从地点方括号抽离，双向 connected 合并为一条）
+  if (options.emitEdgesSection && graph) {
+    const locIds = new Set(locs.map(l => l.id));
+    const seenEdge = new Set<string>();
+    const edgeLines: string[] = [];
+    for (const e of graph.edges) {
+      if (e.type === 'belongs_to') continue;
+      if (!locIds.has(e.from) && !locIds.has(e.to)) continue;
+      const normDetail = (e.detail || '').trim();
+      const key = e.type === 'connected'
+        ? `connected|${[e.from, e.to].sort().join('|')}|${normDetail}`
+        : `${e.type}|${e.from}|${e.to}`;
+      if (seenEdge.has(key)) continue;
+      seenEdge.add(key);
+      const fromName = graph.locations.find(l => l.id === e.from)?.name || e.from;
+      const toName = graph.locations.find(l => l.id === e.to)?.name || e.to;
+      if (e.type === 'contains') {
+        edgeLines.push(`- contains: ${fromName} → ${toName}`);
+      } else {
+        edgeLines.push(`- connected: ${fromName} ↔ ${toName}${normDetail ? ` | ${normDetail}` : ''}`);
+      }
+    }
+    if (edgeLines.length > 0) {
+      lines.push('### 关系边（双向只一条，update 已有边不重复 add）');
+      lines.push(...edgeLines);
     }
   }
   return lines;
@@ -1407,53 +1435,35 @@ export function buildContextualKgDigestForSmallSummary(options: SmallSummaryKgDi
     pushUniqueRecalled(semantic, used, entity);
   }
 
-  const lines: string[] = [];
-  if (centered.length > 0) {
-    const centerLabel = centerNames.length > 0 ? `（${centerNames.slice(0, 6).join('、')}）` : '';
-    lines.push(`### 中心角色/地点相关图谱${centerLabel}`);
-    lines.push(...formatKgDigestForSmallSummary(centered, graph, {
-      locationTitle: '#### 中心范围地点',
-      itemTitle: '#### 中心范围物品',
-      characterTitle: '#### 中心范围角色',
-    }));
-  }
+  // 对策1：四桶合并为扁平三表（中心/命中/召回 三策略收集逻辑保留，但输出合并成一次 format 调用）
+  const merged: RecalledEntity[] = [...centered, ...exact, ...semantic];
 
-  if (exact.length > 0) {
-    lines.push('### 正文直接命中的旧图谱条目（优先 update，禁止同名/别名重复 add）');
-    lines.push(...formatKgDigestForSmallSummary(exact, graph, {
-      locationTitle: '#### 命中地点',
-      itemTitle: '#### 命中物品',
-      characterTitle: '#### 命中角色',
-    }));
-  }
-
-  if (semantic.length > 0) {
-    lines.push('### 语义召回补充（只作补漏；若与上方冲突，以上方 id 为准）');
-    lines.push(...formatKgDigestForSmallSummary(semantic, graph, {
-      locationTitle: '#### 召回地点',
-      itemTitle: '#### 召回物品',
-      characterTitle: '#### 召回角色',
-    }));
-  }
-
-  if (lines.length === 0) {
-    lines.push('（本段没有命中高相关图谱条目；下方名称索引用于实体判重）');
-  }
-
-  const contextCharIds = new Set(
-    [...centered, ...exact, ...semantic]
-      .filter(e => e.kind === 'character')
-      .map(e => e.id),
-  );
-  const missingChars = (graph.characters || []).filter(ch => !contextCharIds.has(ch.id));
-  if (missingChars.length > 0) {
-    lines.push('### 其他已有角色（全量列出供别名识别——下列名字的任何变体出现，都按已存在角色处理，禁止 add）');
-    for (const ch of missingChars) {
-      const al = ch.aliases?.length ? ` 别名:${ch.aliases.join('/')}` : '';
-      const loc = ch.location ? ` @${ch.location}` : '';
-      lines.push(`- id=${ch.id} | ${ch.name}${loc}${al}`);
+  // 对策2：在场标记（merge 后统一打标，character 打 present，item 打 present+prevStatus）
+  const presentSet = new Set((options.presentCharacterNames || []).map(n => buildStableId(n)));
+  const prevStatusMap = options.prevItemStatusMap || new Map<string, string>();
+  for (const e of merged) {
+    if (e.kind === 'character') {
+      if (presentSet.has(buildStableId(e.name)) || (e.aliases || []).some(a => presentSet.has(buildStableId(a)))) {
+        e.present = true;
+      }
+    } else if (e.kind === 'item') {
+      const prev = prevStatusMap.get(e.id) || prevStatusMap.get(e.name);
+      if (prev) {
+        e.prevStatus = prev;
+        e.present = true;
+      }
     }
   }
+
+  const lines: string[] = formatKgDigestForSmallSummary(merged, graph, {
+    emptyMessage: '（本段没有命中高相关图谱条目；下方名称索引用于实体判重）',
+    locationTitle: '### 地点表',
+    itemTitle: '### 物品表',
+    characterTitle: '### 角色表',
+    includeOtherCharacters: true,
+    otherCharactersTitle: '### 角色别名索引（仅判重用，不输出位置——下列名字的任何变体出现，都按已存在角色处理，禁止 add）',
+    emitEdgesSection: true,
+  });
 
   return lines.join('\n');
 }

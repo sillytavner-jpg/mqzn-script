@@ -168,6 +168,8 @@ async function runGrandSummaryAndHide(
     previousSummary?.rawText,
     store.getUserName(),
     undefined,
+    undefined,
+    store.getBlacklistedCharacters(),
   );
 
   // V2: 步骤2 — 角色记忆+NSFW（调色盘分析）
@@ -177,6 +179,9 @@ async function runGrandSummaryAndHide(
     store.settings.memoryMinPerChar,
     store.settings.memoryMaxPerChar,
     store.getUserName(),
+    undefined,
+    undefined,
+    store.getBlacklistedCharacters(),
   );
 
   // === 组装 GrandSummary ===
@@ -573,7 +578,7 @@ async function triggerManualDreamtalk() {
   logInfo('梦呓', '手动触发分析');
 
   try {
-    const { dreamtalk: result, nsfwDreamtalk } = await executeDreamtalkAnalysis(store.userInputRecords, store.persona.rawInput, store.dreamtalk, undefined, store.getUserName());
+    const { dreamtalk: result, nsfwDreamtalk } = await executeDreamtalkAnalysis(store.userInputRecords, store.persona.rawInput, store.dreamtalk, undefined, store.getUserName(), store.getBlacklistedCharacters());
     store.updateDreamtalk(result);
     if (nsfwDreamtalk) {
       store.updateNsfwDreamtalk(nsfwDreamtalk);
@@ -624,7 +629,8 @@ async function triggerOpeningGraph() {
           }
         : undefined;
       let { record, graphDiff, characterLocations: parsedCharLocs } = await executeSmallSummary(
-        '', content, -1, 0, allNames, userNameNorm, kgOptions, characterEntries,
+        '', content, -1, 0, allNames, userNameNorm, kgOptions, characterEntries, undefined,
+        store.getBlacklistedCharacters(),
       );
       record.presentCharacters = store.resolveKnownCharacterNames(record.presentCharacters, true);
       if (parsedCharLocs?.length) {
@@ -733,7 +739,8 @@ async function triggerFloorSummary() {
           }
         : undefined;
       let { record, graphDiff, characterLocations: parsedCharLocs } = await executeSmallSummary(
-        '', content, floor, floor, allNames, userNameNorm, kgOptions, characterEntries,
+        '', content, floor, floor, allNames, userNameNorm, kgOptions, characterEntries, undefined,
+        store.getBlacklistedCharacters(),
       );
       record.presentCharacters = store.resolveKnownCharacterNames(record.presentCharacters, true);
       if (parsedCharLocs?.length) {
@@ -967,7 +974,7 @@ async function triggerFloorSummary() {
           <input
             v-model="selectedSummaryRange"
             class="zhino-input"
-            placeholder="如 2-16 或 1,3,5,7-10"
+            placeholder="如 2-16 或 1,3,5,7-10" aria-label="如 2-16 或 1,3,5,7-10"
           >
           <button
             class="zhino-btn"
@@ -992,7 +999,7 @@ async function triggerFloorSummary() {
           <input
             v-model="manualHideRange"
             class="zhino-input"
-            placeholder="输入楼层号或范围"
+            placeholder="输入楼层号或范围" aria-label="输入楼层号或范围"
           >
           <button
             class="zhino-btn"

@@ -285,7 +285,7 @@ function isEditing(evt: TimelineEvent): boolean {
         <input
           v-model="searchQuery"
           class="zhino-search-input"
-          placeholder="搜索事件…"
+          placeholder="搜索事件…" aria-label="搜索事件…"
         />
       </div>
     </div>
@@ -369,11 +369,11 @@ function isEditing(evt: TimelineEvent): boolean {
         <template v-else>
           <div class="zhino-edit-row">
             <label class="zhino-edit-label">时间</label>
-            <input v-model="editDraft.time" class="zhino-edit-input" placeholder="剧情日期" />
+            <input v-model="editDraft.time" class="zhino-edit-input" placeholder="剧情日期" aria-label="剧情日期" />
           </div>
           <div class="zhino-edit-row">
             <label class="zhino-edit-label">事件</label>
-            <textarea v-model="editDraft.event" class="zhino-edit-textarea" rows="2" placeholder="事件内容" />
+            <textarea v-model="editDraft.event" class="zhino-edit-textarea" rows="2" placeholder="事件内容" aria-label="事件内容" />
           </div>
           <div class="zhino-edit-row">
             <label class="zhino-edit-label">重要度</label>
@@ -387,15 +387,15 @@ function isEditing(evt: TimelineEvent): boolean {
           </div>
           <div class="zhino-edit-row">
             <label class="zhino-edit-label">激活角色</label>
-            <input v-model="editDraft.triggers.characters" class="zhino-edit-input" placeholder="逗号分隔" />
+            <input v-model="editDraft.triggers.characters" class="zhino-edit-input" placeholder="逗号分隔" aria-label="逗号分隔" />
           </div>
           <div class="zhino-edit-row">
             <label class="zhino-edit-label">激活关键词</label>
-            <input v-model="editDraft.triggers.keywords" class="zhino-edit-input" placeholder="逗号分隔" />
+            <input v-model="editDraft.triggers.keywords" class="zhino-edit-input" placeholder="逗号分隔" aria-label="逗号分隔" />
           </div>
           <div class="zhino-edit-row">
             <label class="zhino-edit-label">完整详情</label>
-            <textarea v-model="editDraft.detail" class="zhino-edit-textarea" rows="3" placeholder="事件详细过程" />
+            <textarea v-model="editDraft.detail" class="zhino-edit-textarea" rows="3" placeholder="事件详细过程" aria-label="事件详细过程" />
           </div>
           <div class="zhino-edit-actions">
             <button class="zhino-edit-save" @click="saveEdit(evt)">保存</button>
@@ -408,11 +408,11 @@ function isEditing(evt: TimelineEvent): boolean {
       <div v-if="editingKey?.startsWith('__new__')" class="zhino-timeline-card">
         <div class="zhino-edit-row">
           <label class="zhino-edit-label">时间</label>
-          <input v-model="editDraft.time" class="zhino-edit-input" placeholder="剧情日期" />
+          <input v-model="editDraft.time" class="zhino-edit-input" placeholder="剧情日期" aria-label="剧情日期" />
         </div>
         <div class="zhino-edit-row">
           <label class="zhino-edit-label">事件</label>
-          <textarea v-model="editDraft.event" class="zhino-edit-textarea" rows="2" placeholder="事件内容" />
+          <textarea v-model="editDraft.event" class="zhino-edit-textarea" rows="2" placeholder="事件内容" aria-label="事件内容" />
         </div>
         <div class="zhino-edit-row">
           <label class="zhino-edit-label">重要度</label>
@@ -426,15 +426,15 @@ function isEditing(evt: TimelineEvent): boolean {
         </div>
         <div class="zhino-edit-row">
           <label class="zhino-edit-label">激活角色</label>
-          <input v-model="editDraft.triggers.characters" class="zhino-edit-input" placeholder="逗号分隔" />
+          <input v-model="editDraft.triggers.characters" class="zhino-edit-input" placeholder="逗号分隔" aria-label="逗号分隔" />
         </div>
         <div class="zhino-edit-row">
           <label class="zhino-edit-label">激活关键词</label>
-          <input v-model="editDraft.triggers.keywords" class="zhino-edit-input" placeholder="逗号分隔" />
+          <input v-model="editDraft.triggers.keywords" class="zhino-edit-input" placeholder="逗号分隔" aria-label="逗号分隔" />
         </div>
         <div class="zhino-edit-row">
           <label class="zhino-edit-label">完整详情</label>
-          <textarea v-model="editDraft.detail" class="zhino-edit-textarea" rows="3" placeholder="事件详细过程" />
+          <textarea v-model="editDraft.detail" class="zhino-edit-textarea" rows="3" placeholder="事件详细过程" aria-label="事件详细过程" />
         </div>
         <div class="zhino-edit-actions">
           <button class="zhino-edit-save" @click="saveAdd()">添加</button>

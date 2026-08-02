@@ -19,7 +19,7 @@
           <input
             v-model="editingAliasesText"
             class="sheet-alias-input"
-            placeholder="逗号/斜杠分隔，如：小月、月儿"
+            placeholder="逗号/斜杠分隔，如：小月、月儿" aria-label="逗号/斜杠分隔，如：小月、月儿"
             @keydown.enter="saveAliases"
             @keydown.escape="cancelEditAliases"
             autofocus
@@ -45,7 +45,7 @@
             v-if="locSelect === '__custom__'"
             v-model="locCustom"
             class="sheet-loc-input"
-            placeholder="输入地点名"
+            placeholder="输入地点名" aria-label="输入地点名"
             @keydown.enter="saveLoc"
             @keydown.escape="cancelEditLoc"
             autofocus

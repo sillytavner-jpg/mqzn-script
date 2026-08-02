@@ -9,7 +9,7 @@
     <EmptyHint v-if="items.length === 0" text="暂无物品记录。小总结生成时顺带从正文自动提取有意义的重要物品。" />
 
     <div v-else class="wt-search-row">
-      <input v-model="itemSearch" class="wt-search-input" placeholder="搜索物品、别名、描述、数量、归属、状态、已消耗" />
+      <input v-model="itemSearch" class="wt-search-input" placeholder="搜索物品、别名、描述、数量、归属、状态、已消耗" aria-label="搜索物品、别名、描述、数量、归属、状态、已消耗" />
       <button v-if="itemSearch" class="wt-search-clear" @click="itemSearch = ''">清空</button>
     </div>
 
@@ -57,7 +57,7 @@
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">别名</span>
-            <input v-model="editAliases" class="wt-edit-input" placeholder="斜杠分隔，如 别名1/别名2" />
+            <input v-model="editAliases" class="wt-edit-input" placeholder="斜杠分隔，如 别名1/别名2" aria-label="斜杠分隔，如 别名1/别名2" />
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">描述</span>
@@ -65,15 +65,15 @@
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">数量</span>
-            <input v-model="editQuantity" class="wt-edit-input" placeholder="如 1把 / 3枚 / 半瓶 / 若干" />
+            <input v-model="editQuantity" class="wt-edit-input" placeholder="如 1把 / 3枚 / 半瓶 / 若干" aria-label="如 1把 / 3枚 / 半瓶 / 若干" />
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">归属</span>
-            <input v-model="editOwner" class="wt-edit-input" placeholder="角色名或地点名（仅在易主时改）" list="kg-owner-list" />
+            <input v-model="editOwner" class="wt-edit-input" placeholder="角色名或地点名（仅在易主时改）" aria-label="角色名或地点名（仅在易主时改）" list="kg-owner-list" />
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">当前位置</span>
-            <input v-model="editLocation" class="wt-edit-input" placeholder="放下/拿起/转交即改" list="kg-loc-list" />
+            <input v-model="editLocation" class="wt-edit-input" placeholder="放下/拿起/转交即改" aria-label="放下/拿起/转交即改" list="kg-loc-list" />
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">持有方式</span>
@@ -90,7 +90,7 @@
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">位置细节</span>
-            <input v-model="editStatusDetail" class="wt-edit-input" placeholder="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" />
+            <input v-model="editStatusDetail" class="wt-edit-input" placeholder="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" aria-label="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" />
           </div>
           <label class="wt-edit-row wt-edit-check">
             <span class="wt-edit-label">消耗</span>
@@ -114,7 +114,7 @@
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">别名</span>
-          <input v-model="editAliases" class="wt-edit-input" placeholder="斜杠分隔，如 别名1/别名2" />
+          <input v-model="editAliases" class="wt-edit-input" placeholder="斜杠分隔，如 别名1/别名2" aria-label="斜杠分隔，如 别名1/别名2" />
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">描述</span>
@@ -122,15 +122,15 @@
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">数量</span>
-          <input v-model="editQuantity" class="wt-edit-input" placeholder="如 1把 / 3枚 / 半瓶 / 若干" />
+          <input v-model="editQuantity" class="wt-edit-input" placeholder="如 1把 / 3枚 / 半瓶 / 若干" aria-label="如 1把 / 3枚 / 半瓶 / 若干" />
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">归属</span>
-          <input v-model="editOwner" class="wt-edit-input" placeholder="角色名或地点名（仅在易主时改）" list="kg-owner-list" />
+          <input v-model="editOwner" class="wt-edit-input" placeholder="角色名或地点名（仅在易主时改）" aria-label="角色名或地点名（仅在易主时改）" list="kg-owner-list" />
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">当前位置</span>
-          <input v-model="editLocation" class="wt-edit-input" placeholder="放下/拿起/转交即改" list="kg-loc-list" />
+          <input v-model="editLocation" class="wt-edit-input" placeholder="放下/拿起/转交即改" aria-label="放下/拿起/转交即改" list="kg-loc-list" />
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">持有方式</span>
@@ -147,7 +147,7 @@
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">位置细节</span>
-          <input v-model="editStatusDetail" class="wt-edit-input" placeholder="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" />
+          <input v-model="editStatusDetail" class="wt-edit-input" placeholder="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" aria-label="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" />
         </div>
         <label class="wt-edit-row wt-edit-check">
           <span class="wt-edit-label">消耗</span>

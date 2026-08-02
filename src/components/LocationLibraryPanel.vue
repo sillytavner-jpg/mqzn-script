@@ -9,7 +9,7 @@
     <EmptyHint v-if="locations.length === 0" text="暂无地点。小总结生成时顺带从正文自动提取，或点新增手动添加。" />
 
     <div v-else class="wt-search-row">
-      <input v-model="locationSearch" class="wt-search-input" placeholder="搜索地点、别名、描述、关系、物品、角色" />
+      <input v-model="locationSearch" class="wt-search-input" placeholder="搜索地点、别名、描述、关系、物品、角色" aria-label="搜索地点、别名、描述、关系、物品、角色" />
       <button v-if="locationSearch" class="wt-search-clear" @click="locationSearch = ''">清空</button>
     </div>
 
@@ -66,7 +66,7 @@
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">别名</span>
-            <input v-model="editAliases" class="wt-edit-input" placeholder="斜杠分隔" />
+            <input v-model="editAliases" class="wt-edit-input" placeholder="斜杠分隔" aria-label="斜杠分隔" />
           </div>
           <div class="wt-edit-row">
             <span class="wt-edit-label">描述</span>
@@ -81,8 +81,8 @@
                 <option value="contains">包含</option>
                 <option value="connected">连通</option>
               </select>
-              <input v-model="r.target" class="wt-rel-input" :placeholder="r.type === 'contains' ? '子地点名' : '连通目标名'" />
-              <input v-if="r.type === 'connected'" v-model="r.path" class="wt-rel-path" placeholder="路径（如 走过小路推开石门）" />
+              <input v-model="r.target" class="wt-rel-input" :placeholder="r.type === 'contains' ? '子地点名' : '连通目标名'" aria-label="r.type === 'contains' ? '子地点名' : '连通目标名'" />
+              <input v-if="r.type === 'connected'" v-model="r.path" class="wt-rel-path" placeholder="路径（如 走过小路推开石门）" aria-label="路径（如 走过小路推开石门）" />
               <button class="wt-rel-del" @click="editRelations.splice(ri, 1)">✕</button>
             </div>
             <button class="wt-rel-add" @click="editRelations.push({ type: 'contains', target: '', path: '' })">＋ 添加关系</button>
@@ -105,7 +105,7 @@
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">别名</span>
-          <input v-model="editAliases" class="wt-edit-input" placeholder="斜杠分隔" />
+          <input v-model="editAliases" class="wt-edit-input" placeholder="斜杠分隔" aria-label="斜杠分隔" />
         </div>
         <div class="wt-edit-row">
           <span class="wt-edit-label">描述</span>
@@ -120,8 +120,8 @@
               <option value="contains">包含</option>
               <option value="connected">连通</option>
             </select>
-            <input v-model="r.target" class="wt-rel-input" :placeholder="r.type === 'contains' ? '子地点名' : '连通目标名'" />
-            <input v-if="r.type === 'connected'" v-model="r.path" class="wt-rel-path" placeholder="路径（如 走过小路推开石门）" />
+            <input v-model="r.target" class="wt-rel-input" :placeholder="r.type === 'contains' ? '子地点名' : '连通目标名'" aria-label="r.type === 'contains' ? '子地点名' : '连通目标名'" />
+            <input v-if="r.type === 'connected'" v-model="r.path" class="wt-rel-path" placeholder="路径（如 走过小路推开石门）" aria-label="路径（如 走过小路推开石门）" />
             <button class="wt-rel-del" @click="editRelations.splice(ri, 1)">✕</button>
           </div>
           <button class="wt-rel-add" @click="editRelations.push({ type: 'contains', target: '', path: '' })">＋ 添加关系</button>

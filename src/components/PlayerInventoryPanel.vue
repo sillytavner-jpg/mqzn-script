@@ -21,7 +21,7 @@
               v-if="locSelect === '__custom__'"
               v-model="locCustom"
               class="player-loc-input"
-              placeholder="输入地点名"
+              placeholder="输入地点名" aria-label="输入地点名"
               @keydown.enter="saveLoc"
               @keydown.escape="cancelEditLoc"
               autofocus

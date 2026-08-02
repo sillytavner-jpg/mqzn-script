@@ -60,7 +60,7 @@
   /* 文字透明度阶梯 */
   --zn-text-primary: rgba(255, 255, 255, 0.92);
   --zn-text-regular: rgba(255, 255, 255, 0.70);
-  --zn-text-muted:   rgba(255, 255, 255, 0.40);
+  --zn-text-muted:   rgba(255, 255, 255, 0.58);
 
   /* 表面 */
   --zn-bg-surface1: rgba(255, 255, 255, 0.03);
@@ -104,14 +104,14 @@
   --zn-glass-border: rgba(167, 139, 250, 0.28);
   --zn-glass-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.6);
 
-  --zn-accent: #8b5cf6;                      /* 加深保对比 */
-  --zn-accent-rgb: 139, 92, 246;
+  --zn-accent: #7c3aed;                      /* 加深保对比 */
+  --zn-accent-rgb: 124, 58, 237;
   --zn-accent-dim: rgba(139, 92, 246, 0.10);
   --zn-accent-glow: rgba(139, 92, 246, 0.25);
 
   --zn-text-primary: #2a2440;
   --zn-text-regular: #5a527a;
-  --zn-text-muted:   #8b85a3;
+  --zn-text-muted:   #6f6888;
 
   --zn-bg-surface1: rgba(139, 92, 246, 0.04);
   --zn-bg-surface2: rgba(139, 92, 246, 0.08);

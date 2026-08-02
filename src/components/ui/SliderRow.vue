@@ -12,6 +12,7 @@
       :step="step"
       :value="modelValue"
       :disabled="disabled"
+      :aria-label="label"
       @input="$emit('update:modelValue', Number(($event.target as HTMLInputElement).value))"
     />
   </div>

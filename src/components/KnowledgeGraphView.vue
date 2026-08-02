@@ -684,14 +684,15 @@ watch(() => [props.graph, props.characterLocations, props.relationshipProfiles, 
         <span v-show="!rosterCollapsed" class="kgv-roster-count">{{ rosterNodes.length }}</span>
       </div>
       <div v-show="!rosterCollapsed" class="kgv-roster-list">
-        <div v-for="n in rosterNodes" :key="n.id"
+        <button type="button" v-for="n in rosterNodes" :key="n.id"
           class="kgv-roster-item"
           :class="{ 'is-active': rosterActiveId === n.id, 'is-player': n.type === 'player' }"
+          :aria-label="`聚焦角色：${n.name}`"
           @click="focusOnNode(n.id, 1.6, true, false)"
         >
           <span class="kgv-roster-dot" :class="n.type"></span>
           <span class="kgv-roster-name">{{ n.name.length > 8 ? n.name.slice(0, 8) + '…' : n.name }}</span>
-        </div>
+        </button>
       </div>
     </div>
 
@@ -703,14 +704,15 @@ watch(() => [props.graph, props.characterLocations, props.relationshipProfiles, 
     </button>
     <Transition name="kgv-roster-drawer">
       <div v-if="isMobile && rosterNodes.length && mobileRosterOpen" class="kgv-roster-h">
-        <div v-for="n in rosterNodes" :key="n.id"
+        <button type="button" v-for="n in rosterNodes" :key="n.id"
           class="kgv-roster-h-item"
           :class="{ 'is-active': rosterActiveId === n.id, 'is-player': n.type === 'player' }"
+          :aria-label="`聚焦角色：${n.name}`"
           @click="focusMobileRosterNode(n.id)"
         >
           <span class="kgv-roster-dot" :class="n.type"></span>
           <span class="kgv-roster-name">{{ n.name.length > 6 ? n.name.slice(0, 6) + '…' : n.name }}</span>
-        </div>
+        </button>
       </div>
     </Transition>
 
@@ -763,7 +765,7 @@ watch(() => [props.graph, props.characterLocations, props.relationshipProfiles, 
             <input
               v-model="editingAliases"
               class="kgv-aliases-input"
-              placeholder="多个别名用 、 或逗号分隔"
+              placeholder="多个别名用 、 或逗号分隔" aria-label="多个别名用 、 或逗号分隔"
               @keyup.enter="saveAliases"
               @keyup.esc="cancelEditAliases"
             />
@@ -798,7 +800,7 @@ watch(() => [props.graph, props.characterLocations, props.relationshipProfiles, 
               <input
                 v-model="editingLocation"
                 class="kgv-loc-input"
-                placeholder="输入地点名"
+                placeholder="输入地点名" aria-label="输入地点名"
                 @keyup.enter="saveLocation"
                 @keyup.esc="cancelEditLocation"
               />
@@ -983,6 +985,13 @@ watch(() => [props.graph, props.characterLocations, props.relationshipProfiles, 
   transition: background 0.15s, color 0.15s;
   position: relative;
   word-break: break-all;
+  /* button 复位（点击 div → button 无障碍） */
+  font-family: inherit;
+  text-align: left;
+  background: transparent;
+  border: none;
+  appearance: none;
+  -webkit-appearance: none;
 }
 .kgv-roster-item:hover { background: rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.85); }
 .kgv-roster-item.is-active {
@@ -1031,6 +1040,12 @@ watch(() => [props.graph, props.characterLocations, props.relationshipProfiles, 
   font-size: 11px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
+  /* button 复位（点击 div → button 无障碍） */
+  font-family: inherit;
+  text-align: left;
+  border: none;
+  appearance: none;
+  -webkit-appearance: none;
 }
 .kgv-roster-h-item:hover { background: rgba(255, 255, 255, 0.1); }
 .kgv-roster-h-item.is-active {

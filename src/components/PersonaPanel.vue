@@ -12,7 +12,7 @@
       <input
         v-model="newPersonaName"
         class="zhino-input"
-        placeholder="人设名称（如：日常角色、战斗角色）"
+        placeholder="人设名称（如：日常角色、战斗角色）" aria-label="人设名称（如：日常角色、战斗角色）"
         @keyup.enter="addPersona"
       />
       <button class="zhino-btn-sm zhino-btn-save" @click="addPersona">创建</button>
@@ -31,7 +31,11 @@
         :key="p.id"
         class="zhino-persona-item"
         :class="{ active: store.activePersonaId === p.id }"
+        role="button"
+        tabindex="0"
+        :aria-label="`切换到人设：${p.name || '未命名'}`"
         @click="switchPersona(p.id)"
+        @keydown="onPersonaItemKey($event, p.id)"
       >
         <div class="zhino-persona-item-left">
           <span v-if="renamingId !== p.id" class="zhino-persona-name">{{ p.name || '未命名' }}</span>
@@ -61,7 +65,7 @@
         v-model="editingPersona"
         class="zhino-textarea"
         rows="5"
-        placeholder="填写你的角色人设（性格、行为模式、说话风格等）"
+        placeholder="填写你的角色人设（性格、行为模式、说话风格等）" aria-label="填写你的角色人设（性格、行为模式、说话风格等）"
       />
       <div class="zhino-btn-row">
         <button class="zhino-btn-sm" @click="savePersonaOnly">仅保存</button>
@@ -125,6 +129,15 @@ function removePersona(id: string) {
 // 切换激活人设
 function switchPersona(id: string) {
   store.setActivePersona(id);
+}
+
+// 键盘激活（容器 role=button，内部 button/input 不触发）
+function onPersonaItemKey(e: KeyboardEvent, id: string) {
+  if (e.target !== e.currentTarget) return;
+  if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+    e.preventDefault();
+    switchPersona(id);
+  }
 }
 
 // 开始重命名
@@ -337,6 +350,10 @@ function savePersonaOnly() {
 .zhino-persona-item.active {
   background: rgba(var(--zn-accent-rgb), 0.12);
   border-color: rgba(var(--zn-accent-rgb), 0.3);
+}
+.zhino-persona-item:focus-visible {
+  outline: 2px solid var(--zn-accent);
+  outline-offset: 2px;
 }
 .zhino-persona-item-left {
   display: flex;

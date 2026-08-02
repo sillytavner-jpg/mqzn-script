@@ -3,27 +3,27 @@
     <div class="item-form">
       <div class="form-row">
         <span class="form-label">名称</span>
-        <input v-model="editName" class="form-input" placeholder="物品名称" />
+        <input v-model="editName" class="form-input" placeholder="物品名称" aria-label="物品名称" />
       </div>
       <div class="form-row">
         <span class="form-label">别名</span>
-        <input v-model="editAliases" class="form-input" placeholder="斜杠分隔，如 别名1/别名2" />
+        <input v-model="editAliases" class="form-input" placeholder="斜杠分隔，如 别名1/别名2" aria-label="斜杠分隔，如 别名1/别名2" />
       </div>
       <div class="form-row">
         <span class="form-label">描述</span>
-        <input v-model="editBrief" class="form-input" placeholder="基本描述" />
+        <input v-model="editBrief" class="form-input" placeholder="基本描述" aria-label="基本描述" />
       </div>
       <div class="form-row">
         <span class="form-label">数量</span>
-        <input v-model="editQuantity" class="form-input" placeholder="如 1把 / 3枚 / 半瓶" />
+        <input v-model="editQuantity" class="form-input" placeholder="如 1把 / 3枚 / 半瓶" aria-label="如 1把 / 3枚 / 半瓶" />
       </div>
       <div class="form-row">
         <span class="form-label">归属</span>
-        <input v-model="editOwner" class="form-input" placeholder="角色名或地点名（仅在易主时改）" list="kg-owner-list" />
+        <input v-model="editOwner" class="form-input" placeholder="角色名或地点名（仅在易主时改）" aria-label="角色名或地点名（仅在易主时改）" list="kg-owner-list" />
       </div>
       <div class="form-row">
         <span class="form-label">当前位置</span>
-        <input v-model="editLocation" class="form-input" placeholder="角色名或地点名（放下/拿起/转交即改）" list="kg-loc-list" />
+        <input v-model="editLocation" class="form-input" placeholder="角色名或地点名（放下/拿起/转交即改）" aria-label="角色名或地点名（放下/拿起/转交即改）" list="kg-loc-list" />
       </div>
       <div class="form-row">
         <span class="form-label">持有方式</span>
@@ -40,7 +40,7 @@
       </div>
       <div class="form-row">
         <span class="form-label">位置细节</span>
-        <input v-model="editStatusDetail" class="form-input" placeholder="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" />
+        <input v-model="editStatusDetail" class="form-input" placeholder="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" aria-label="如 草棚边的石凳上 / 床头的木盒中 / 损坏一角" />
       </div>
       <label class="form-row form-check">
         <span class="form-label">消耗</span>

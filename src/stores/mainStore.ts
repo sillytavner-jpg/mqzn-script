@@ -391,6 +391,8 @@ export interface ChatData {
   // P2 写入收口：AI 输出的名字 resolve 不中（歧义/未知）时挂入此队列，
   // 不再无脑 fallback 新建角色。待 P5 人工/规则仲裁。
   pendingUnresolved: PendingResolution[];
+  // 角色黑名单：加入后该角色所有数据被清除，且不再被 AI 分析/扫描重建（软删除名单）
+  blacklistedCharacters: string[];
 }
 
 // ========== 存储拆分：脚本变量（全局共享） ==========
@@ -592,6 +594,8 @@ const ChatDataSchema = z
     characterRegistry: z.any().prefault(null),
     // P2 写入收口：待仲裁的歧义/未知角色名队列
     pendingUnresolved: z.array(z.any()).prefault([]),
+    // 角色黑名单（软删除名单，名字用归一化形式存储）
+    blacklistedCharacters: z.array(z.string()).prefault([]),
   })
   .prefault({});
 
@@ -2301,6 +2305,8 @@ export const useMainStore = defineStore('main', () => {
    */
   function invalidateSummaryProjectionsFromFloor(floor: number): number {
     const normalizedFloor = Math.max(0, Math.floor(floor));
+    // 保守护栏：备份当前热投影，全量作废后用于回退，避免 UI 全清空
+    const previousCharacterMemories = chatData.value.characterMemories;
     const dependsOnChangedFloor = (summary: GrandSummary): boolean => {
       const covered = (summary.coveredMessageIds ?? []).filter(Number.isFinite);
       if (covered.length > 0) return covered.some(messageId => messageId >= normalizedFloor);
@@ -2326,7 +2332,9 @@ export const useMainStore = defineStore('main', () => {
 
     const latest = [...chatData.value.summaries].reverse().find(summary => !summary.isFailed);
     chatData.value.lastSummaryAtMessageId = latest?.upToMessageId ?? -1;
-    chatData.value.characterMemories = latest?.characterMemories ?? [];
+    // 保守护栏：全量作废后如果没有可用 delta，保留旧快照而不是设空，避免 UI 全清空。
+    // 旧快照可能过期，但优于空白；调用方（enqueueSourceChangeReconcile）区分失败类型后决定是否真正清空。
+    chatData.value.characterMemories = latest?.characterMemories ?? previousCharacterMemories ?? [];
     forcePersist({ settings: false });
     rebuildAssembled();
     return removed.length + removedHistory.length;
@@ -3858,6 +3866,8 @@ export const useMainStore = defineStore('main', () => {
       const name = normalizeMemoryCharacterName(entry.name);
       const key = name.toLowerCase();
       if (!name || !key) continue;
+      // 黑名单角色不进入角色索引（角色列表 UI / 注入侧 / 扫描器全部自动排除）
+      if (isBlacklisted(name)) continue;
       const existing = finalByNorm.get(key);
       if (existing) {
         existing.aliases.add(entry.name);
@@ -3924,6 +3934,8 @@ export const useMainStore = defineStore('main', () => {
     const raw = String(rawName || '').trim();
     if (!raw) return '';
     if (isUserCharacterName(raw)) return getUserName();
+    // 黑名单拦截：黑名单角色已从智脑移除，任何解析/收口路径都不得让其复活
+    if (isBlacklisted(raw)) return '';
     // P3 读取收口：优先用 registry 按 id 仲裁（解决原 buildCharacterNameIndex "先注册先占" 的别名录错传染）
     // registry 为空时回退原逻辑（双轨兜底，保证旧存档/未迁移时不崩）
     const registry = chatData.value.characterRegistry;
@@ -5042,6 +5054,61 @@ export const useMainStore = defineStore('main', () => {
     });
   }
 
+  // ========== 角色黑名单管理 ==========
+
+  /** 黑名单匹配：归一化名相等即命中（黑名单内存的是归一化名） */
+  function isBlacklisted(name?: string): boolean {
+    const norm = normalizeMemoryCharacterName(name);
+    if (!norm || isUserCharacterName(norm)) return false;
+    return (chatData.value.blacklistedCharacters || []).some(
+      b => normalizeMemoryCharacterName(b).toLowerCase() === norm.toLowerCase(),
+    );
+  }
+
+  function getBlacklistedCharacters(): string[] {
+    return [...(chatData.value.blacklistedCharacters || [])];
+  }
+
+  /**
+   * 加入黑名单 = 彻底删除该角色全部数据（复用 deleteCharacter）+ 名字登记进黑名单。
+   * 此后角色列表不再显示、AI 分析不再重建该角色。
+   */
+  function blacklistCharacter(name: string) {
+    const resolved = resolveKnownCharacterName(name, true);
+    if (!resolved) return;
+    deleteCharacter(resolved);
+    const norm = normalizeMemoryCharacterName(resolved);
+    const list = chatData.value.blacklistedCharacters || [];
+    if (!list.some(b => normalizeMemoryCharacterName(b).toLowerCase() === norm.toLowerCase())) {
+      list.push(resolved);
+    }
+    chatData.value.blacklistedCharacters = list;
+    pushCodeLog({
+      id: _codeLogIdCounter++,
+      timestamp: new Date().toISOString(),
+      module: '存储',
+      level: 'info',
+      message: `角色已加入黑名单: ${resolved}（数据已清除，不再被智脑分析）`,
+    });
+  }
+
+  /** 从黑名单放出：仅解除拦截，已删数据不恢复（聊天再提到时 AI 可重新建立） */
+  function unblacklistCharacter(name: string) {
+    const norm = normalizeMemoryCharacterName(name);
+    if (!norm) return;
+    const list = (chatData.value.blacklistedCharacters || []).filter(
+      b => normalizeMemoryCharacterName(b).toLowerCase() !== norm.toLowerCase(),
+    );
+    chatData.value.blacklistedCharacters = list;
+    pushCodeLog({
+      id: _codeLogIdCounter++,
+      timestamp: new Date().toISOString(),
+      module: '存储',
+      level: 'info',
+      message: `角色已移出黑名单: ${name}（可再次被智脑分析）`,
+    });
+  }
+
   // ========== 梦呓相关 ==========
 
   function updateDreamtalk(data: DreamtalkData) {
@@ -5126,6 +5193,8 @@ export const useMainStore = defineStore('main', () => {
   function updateNsfwMemories(memories: NsfwCharacterMemory[]) {
     for (const mem of memories) {
       mem.characterName = resolveKnownCharacterName(mem.characterName, true);
+      // 黑名单角色被收口解析为空名时丢弃该条，避免空名入库
+      if (!mem.characterName) continue;
       const existing = chatData.value.nsfwMemories.find(m =>
         normalizeMemoryCharacterName(m.characterName) === normalizeMemoryCharacterName(mem.characterName),
       );
@@ -5218,6 +5287,8 @@ export const useMainStore = defineStore('main', () => {
       } else {
         profile.toName = getUserName();
       }
+      // 黑名单角色被收口解析为空名 → 丢弃该条关系档案
+      if (!profile.from || !profile.to) continue;
       if (profile.from === '__zhino_user__' || profile.to === '__zhino_user__') {
         const charName = profile.from === '__zhino_user__' ? profile.to : profile.from;
         profile.id = `__zhino_user__::${charName}`;
@@ -6369,6 +6440,11 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     renameCharacter,
     // 角色删除管理
     deleteCharacter,
+    // 角色黑名单管理（软删除：清数据 + 拦截重建）
+    blacklistCharacter,
+    unblacklistCharacter,
+    isBlacklisted,
+    getBlacklistedCharacters,
     // 角色名字系统重构：稳定 ID 注册表（P1/P3/P5）
     characterRegistry,
     ensureCharacterRegistry,

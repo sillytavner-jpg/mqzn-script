@@ -379,6 +379,7 @@ export async function executeBatchSummary(
             store.getUserName(),
             controller.signal,
             { _responseFormat: 'json_object' },
+            store.getBlacklistedCharacters(),
           );
 
           // AI 调用完成后立即检查中止
@@ -395,6 +396,7 @@ export async function executeBatchSummary(
             store.getUserName(),
             controller.signal,
             { _responseFormat: 'json_object' },
+            store.getBlacklistedCharacters(),
           );
 
           if (abortSignal?.value) {

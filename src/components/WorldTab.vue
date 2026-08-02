@@ -293,6 +293,8 @@ function retryWorldProgress(r: WorldProgressRecord) {
         store.chatData.characterLocations,
         store.settings.kgInjectTopK,
         candidates,
+        undefined,
+        store.getBlacklistedCharacters(),
       );
       // 用新记录替换失败记录（保持位置）
       const idx = store.chatData.worldProgressRecords.findIndex((x: any) => x.id === r.id);
@@ -715,7 +717,7 @@ function doAdvanceStage() {
                 v-model="draftWpManualChars"
                 class="wt-plot-worldbook-search"
                 style="font-size:11px"
-                placeholder="例：秋青、张伟"
+                placeholder="例：秋青、张伟" aria-label="例：秋青、张伟"
                 maxlength="60"
               />
             </div>
@@ -729,7 +731,7 @@ function doAdvanceStage() {
             </div>
             <div v-if="showWPWorldBook" class="wt-plot-worldbook-list wt-wb-list-wrap">
               <div class="wt-wb-toolbar">
-                <input v-model="wpWorldBookSearch" class="wt-plot-worldbook-search" placeholder="搜索条目/世界书..." />
+                <input v-model="wpWorldBookSearch" class="wt-plot-worldbook-search" placeholder="搜索条目/世界书..." aria-label="搜索条目/世界书..." />
                 <button class="wt-wb-save-btn" @click="saveWPWBKeys">保存</button>
               </div>
               <div class="wt-wb-groups">
@@ -944,7 +946,7 @@ function doAdvanceStage() {
             </div>
             <div v-if="showWorldBookSelector" class="wt-plot-worldbook-list wt-wb-list-wrap">
               <div class="wt-wb-toolbar">
-                <input v-model="worldBookSearch" class="wt-plot-worldbook-search" placeholder="搜索条目/世界书..." />
+                <input v-model="worldBookSearch" class="wt-plot-worldbook-search" placeholder="搜索条目/世界书..." aria-label="搜索条目/世界书..." />
                 <button class="wt-wb-save-btn" @click="savePlotWBKeys">保存</button>
               </div>
               <div class="wt-wb-groups">
@@ -1025,7 +1027,7 @@ function doAdvanceStage() {
             <input
               v-model="plotUserInput"
               class="wt-plot-input"
-              placeholder="描述你想要的剧情方向..."
+              placeholder="描述你想要的剧情方向..." aria-label="描述你想要的剧情方向..."
               :disabled="plotConversing"
               @keyup.enter="sendPlotMessage"
             />

@@ -198,6 +198,7 @@ async function triggerAnalysis() {
       store.dreamtalk,
       style,
       store.getUserName(),
+      store.getBlacklistedCharacters(),
     );
     store.updateDreamtalk(result);
     if (nsfwDreamtalk) store.updateNsfwDreamtalk(nsfwDreamtalk);

@@ -25,6 +25,7 @@ import { getTutorialEssence } from './tutorial-essence';
 import { callGenerateRaw } from '../utils/apiCaller';
 import { replaceUserReferences } from '../utils/textCleanup';
 import { logWarn } from '../utils/logger';
+import { buildBlacklistReminder } from '../utils/characterNames';
 
 // 统一的分隔符匹配（兼容普通连字符和 Unicode 破折号变体）
 const SECTION_SEP = /[-–—]{2,5}SECTION[-–—]{2,5}/i;
@@ -255,8 +256,16 @@ function buildInputMaterial(
   capturedContents: CapturedContent[],
   oldCharacterMemories?: CharacterMemory[],
   pendingTimeline?: TimelineEvent[],
+  blacklistedNames?: string[],
 ): string {
   const parts: string[] = [];
+
+  // 黑名单提醒：本次总结不要为黑名单角色生成/更新记忆（时间线事件照常记录，角色数据不建）
+  const blacklistReminder = buildBlacklistReminder(
+    blacklistedNames,
+    '本次总结不要为以下角色生成或更新任何记忆与角色表条目',
+  );
+  if (blacklistReminder) parts.push(blacklistReminder);
 
   // 已知角色列表：列出已存在的角色名和别名，防止 AI 用别名做标题
   const knownNames = new Set<string>();
@@ -827,6 +836,7 @@ export async function executeGrandSummary(
   userName = '{{user}}',
   abortSignal?: AbortSignal,
   maxRetries?: number,
+  blacklistedNames?: string[],
 ): Promise<{ summary: GrandSummary; nsfwMemories: NsfwCharacterMemory[] }> {
   const summaryVersion = (previousSummary?.version || 0) + 1;
   const isFirstSummary = !previousSummary;
@@ -837,7 +847,12 @@ export async function executeGrandSummary(
 
   // ===== 1. AI 仅总结新楼层（不喂任何旧记忆）=====
   const instruction = buildSummaryInstruction(memoryMinPerChar, memoryMaxPerChar, userName);
-  let inputMaterial = buildInputMaterial(capturedContents, previousSummary?.characterMemories, previousSummary?.timeline);
+  let inputMaterial = buildInputMaterial(
+    capturedContents,
+    previousSummary?.characterMemories,
+    previousSummary?.timeline,
+    blacklistedNames,
+  );
 
   // 如果用户提供了总结方向指引，放在正文材料最前面
   if (userGuidance && userGuidance.trim()) {

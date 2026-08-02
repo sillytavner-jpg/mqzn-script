@@ -12,6 +12,19 @@ import {
   applyJailbreakOverrideToUserInput,
 } from './jailbreakPrompts';
 
+// 模块级 API 失败追踪（供 enqueueSourceChangeReconcile 等模块查询系统稳定性）
+let _lastApiFailureTime = 0;
+
+/** 记录 API 失败时间（fetch 失败、HTTP 错误、空响应等） */
+export function recordApiFailure(): void {
+  _lastApiFailureTime = Date.now();
+}
+
+/** 获取最后一次 API 失败的时间戳（0 = 从未失败） */
+export function getLastApiFailureTime(): number {
+  return _lastApiFailureTime;
+}
+
 interface OrderedPrompt {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -180,12 +193,14 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
     });
   } catch (err: any) {
     if (err?.name === 'AbortError') throw err;
+    recordApiFailure();
     logError('API调用', 'fetch失败（CORS或网络问题）', String(err.message || err));
     const netErr = new Error(`网络请求失败: ${err.message || err}\n提示：如果酒馆通过HTTPS加载，API也需要HTTPS；本地API可能需要配置CORS。`);
     recordFailAndThrow('', `网络请求失败: ${err.message || err}`, netErr);
   }
 
   if (!response.ok) {
+    recordApiFailure();
     const errorText = await response.text().catch(() => '(无法读取响应)');
     logError('API调用', `返回错误: ${response.status} ${response.statusText}`);
 
@@ -204,6 +219,7 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
 
   const data = await response.json().catch(() => null);
   if (!data) {
+    recordApiFailure();
     const emptyErr = new Error('API返回了空响应或非JSON格式');
     recordFailAndThrow('', 'API返回了空响应或非JSON格式', emptyErr);
   }
