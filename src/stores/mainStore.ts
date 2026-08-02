@@ -193,10 +193,6 @@ export interface DynamicProfile {
 export interface GrandSummary {
   version: number;
   generatedAt: string;
-  /** 新记忆仓中与本轮来源楼层对应的原子提交 ID。 */
-  memoryBundleId?: string;
-  /** 批量重建事务 ID；用于 ready Checkpoint 恢复时避免重复投影。 */
-  rebuildTransactionId?: string;
   upToMessageId?: number;
   coveredMessageIds?: number[];
   characterMemories: CharacterMemory[];
@@ -2001,10 +1997,27 @@ export const useMainStore = defineStore('main', () => {
    * 旧格式（_summaryDeltaFormat=false）首次调用时自动迁移。
    */
   /**
-   * 在进入正式持久化边界前统一规范化大总结派生数据。
-   * 新记忆仓与 addSummary 共用，确保两边保存的是同一份角色名和记忆顺序。
+   * 增量存储：每条 summary 只存本轮新增内容，不再存合并后的全集。
+   * 旧格式（_summaryDeltaFormat=false）首次调用时自动迁移。
    */
-  function prepareSummaryForCommit(summary: GrandSummary): GrandSummary {
+  function addSummary(summary: GrandSummary, upToMessageId?: number, coveredMessageIds?: number[]) {
+    // ── 旧格式迁移：旧版每条 summary 都是全量快照，只保留最后一条作为基础 delta ──
+    if (!(chatData.value as any)._summaryDeltaFormat) {
+      const oldCount = chatData.value.summaries.length;
+      if (oldCount > 0) {
+        // 只保留最后一条（已包含所有合并信息），其余丢弃（都是重复数据）
+        chatData.value.summaries = [chatData.value.summaries[oldCount - 1]];
+        pushCodeLog({
+          id: _codeLogIdCounter++,
+          timestamp: new Date().toISOString(),
+          module: '存储',
+          level: 'info',
+          message: `大总结存储已迁移为增量格式 (旧版 ${oldCount} 条 → 1 条基础delta)`,
+        });
+      }
+      (chatData.value as any)._summaryDeltaFormat = true;
+    }
+
     summary.characterMemories = normalizeIncomingCharacterMemories(summary.characterMemories);
     summary.characterTable = normalizeIncomingCharacterTable(summary.characterTable);
     for (const event of summary.timeline || []) {
@@ -2045,32 +2058,6 @@ export const useMainStore = defineStore('main', () => {
         (mem as any).orderedNewMemories = orderedItems;
       }
     }
-    return summary;
-  }
-
-  /**
-   * 增量存储：每条 summary 只存本轮新增内容，不再存合并后的全集。
-   * 旧格式（_summaryDeltaFormat=false）首次调用时自动迁移。
-   */
-  function addSummary(summary: GrandSummary, upToMessageId?: number, coveredMessageIds?: number[]) {
-    // ── 旧格式迁移：旧版每条 summary 都是全量快照，只保留最后一条作为基础 delta ──
-    if (!(chatData.value as any)._summaryDeltaFormat) {
-      const oldCount = chatData.value.summaries.length;
-      if (oldCount > 0) {
-        // 只保留最后一条（已包含所有合并信息），其余丢弃（都是重复数据）
-        chatData.value.summaries = [chatData.value.summaries[oldCount - 1]];
-        pushCodeLog({
-          id: _codeLogIdCounter++,
-          timestamp: new Date().toISOString(),
-          module: '存储',
-          level: 'info',
-          message: `大总结存储已迁移为增量格式 (旧版 ${oldCount} 条 → 1 条基础delta)`,
-        });
-      }
-      (chatData.value as any)._summaryDeltaFormat = true;
-    }
-
-    prepareSummaryForCommit(summary);
 
     const normalizedCoveredIds = coveredMessageIds ?? getCapturedContentMessageIds(chatData.value.capturedContents);
     summary.coveredMessageIds = normalizedCoveredIds;
@@ -2098,21 +2085,14 @@ export const useMainStore = defineStore('main', () => {
   }
 
   /** 组装增量 delta 为完整大总结视图（纯函数，不含响应式） */
-  /** 组装增量 delta 为完整大总结视图（纯函数，不含响应式） */
-  function buildAssembledSummary(additionalSummaries: GrandSummary[] = []): GrandSummary | undefined {
+  function buildAssembledSummary(): GrandSummary | undefined {
     // ★ 失败占位（isFailed=true）不参与组装：其 rawText="总结失败" 空 timeline/记忆
     // 一旦进入组装会污染 Section1 与 last delta，故先剔除
-    const stored = chatData.value.summaries.filter(s => !s.isFailed);
-    const deltas = additionalSummaries.length > 0
-      ? [
-          ...((chatData.value as any)._summaryDeltaFormat ? stored : stored.slice(-1)),
-          ...additionalSummaries.filter(s => !s.isFailed),
-        ]
-      : stored;
+    const deltas = chatData.value.summaries.filter(s => !s.isFailed);
     if (deltas.length === 0) return undefined;
 
     // 旧格式（尚未迁移）：直接返回最后一条
-    if (!(chatData.value as any)._summaryDeltaFormat && additionalSummaries.length === 0) {
+    if (!(chatData.value as any)._summaryDeltaFormat) {
       return deltas[deltas.length - 1];
     }
 
@@ -2238,8 +2218,6 @@ export const useMainStore = defineStore('main', () => {
     return {
       version: last.version,
       generatedAt: last.generatedAt,
-      memoryBundleId: last.memoryBundleId,
-      rebuildTransactionId: last.rebuildTransactionId,
       upToMessageId: last.upToMessageId,
       coveredMessageIds: last.coveredMessageIds,
       rawText: fullRawText,
@@ -2247,97 +2225,6 @@ export const useMainStore = defineStore('main', () => {
       timeline: allTimeline,
       characterTable: charTable,
     };
-  }
-
-  /** 只预览额外 delta 的组装结果，不写 store；批量重建用于续接下一批上下文。 */
-  function previewSummarySequence(additionalSummaries: GrandSummary[]): GrandSummary | undefined {
-    return buildAssembledSummary(additionalSummaries);
-  }
-
-  /**
-   * 批量重建激活后的单次投影：选区内旧 delta 一次性替换，最后只持久化一次。
-   * 世界书记忆仓是权威数据；这里是兼容现有 UI/注入链的热投影。
-   */
-  function replaceSummaryRangeAtomically(
-    floorStart: number,
-    floorEnd: number,
-    incomingSummaries: GrandSummary[],
-  ): void {
-    const start = Math.max(0, Math.floor(floorStart));
-    const end = Math.max(start, Math.floor(floorEnd));
-    const existingKeys = new Set<string>();
-    const incoming = incomingSummaries
-      .filter(summary => !summary.isFailed)
-      .map(summary => prepareSummaryForCommit(summary))
-      .filter(summary => {
-        const key = summary.memoryBundleId || `${summary.rebuildTransactionId || ''}|${summary.version}`;
-        if (existingKeys.has(key)) return false;
-        existingKeys.add(key);
-        return true;
-      });
-    const incomingBundleIds = new Set(incoming.map(summary => summary.memoryBundleId).filter(Boolean));
-    const overlapsRange = (summary: GrandSummary): boolean => {
-      const covered = (summary.coveredMessageIds ?? []).filter(Number.isFinite);
-      if (covered.length > 0) return covered.some(floor => floor >= start && floor <= end);
-      const upTo = summary.upToMessageId;
-      return Number.isFinite(upTo) && Number(upTo) >= start && Number(upTo) <= end;
-    };
-    const retained = chatData.value.summaries.filter(summary => (
-      !overlapsRange(summary)
-      && (!summary.memoryBundleId || !incomingBundleIds.has(summary.memoryBundleId))
-    ));
-    chatData.value.summaries = [...retained, ...incoming]
-      .sort((left, right) => (
-        (left.upToMessageId ?? -1) - (right.upToMessageId ?? -1)
-        || left.version - right.version
-      ));
-    (chatData.value as any)._summaryDeltaFormat = true;
-    const latest = [...chatData.value.summaries].reverse().find(summary => !summary.isFailed);
-    chatData.value.lastSummaryAtMessageId = latest?.upToMessageId ?? 0;
-    if (latest) chatData.value.characterMemories = latest.characterMemories;
-    forcePersist();
-    rebuildAssembled();
-  }
-
-  /**
-   * 原始聊天从某楼层开始变化时，移除所有依赖该楼层或更后来源的热总结投影。
-   * 记忆仓作废必须先完成；本方法只负责 mainStore/UI，不能单独当作事实事务。
-   */
-  function invalidateSummaryProjectionsFromFloor(floor: number): number {
-    const normalizedFloor = Math.max(0, Math.floor(floor));
-    // 保守护栏：备份当前热投影，全量作废后用于回退，避免 UI 全清空
-    const previousCharacterMemories = chatData.value.characterMemories;
-    const dependsOnChangedFloor = (summary: GrandSummary): boolean => {
-      const covered = (summary.coveredMessageIds ?? []).filter(Number.isFinite);
-      if (covered.length > 0) return covered.some(messageId => messageId >= normalizedFloor);
-      return Number(summary.upToMessageId ?? -1) >= normalizedFloor;
-    };
-    const removed = chatData.value.summaries.filter(dependsOnChangedFloor);
-    const removedHistory = chatData.value.summaryHistory.filter(dependsOnChangedFloor);
-    if (removed.length === 0 && removedHistory.length === 0) return 0;
-
-    chatData.value.summaries = chatData.value.summaries.filter(summary => !dependsOnChangedFloor(summary));
-    chatData.value.summaryHistory = chatData.value.summaryHistory.filter(summary => !dependsOnChangedFloor(summary));
-    const removedVersions = new Set([...removed, ...removedHistory].map(summary => summary.version));
-    chatData.value.dynamicProfiles = chatData.value.dynamicProfiles.filter(
-      profile => !removedVersions.has(profile.basedOnSummaryVersion),
-    );
-    if (chatData.value.itemMemories?.length) {
-      for (const version of removedVersions) {
-        chatData.value.itemMemories = removeItemHistoryByVersion(chatData.value.itemMemories, version);
-      }
-    }
-    // NSFW 独立热表当前没有来源版本，无法安全保留受影响范围；从原始聊天重建优于继续注入陈旧状态。
-    chatData.value.nsfwMemories = [];
-
-    const latest = [...chatData.value.summaries].reverse().find(summary => !summary.isFailed);
-    chatData.value.lastSummaryAtMessageId = latest?.upToMessageId ?? -1;
-    // 保守护栏：全量作废后如果没有可用 delta，保留旧快照而不是设空，避免 UI 全清空。
-    // 旧快照可能过期，但优于空白；调用方（enqueueSourceChangeReconcile）区分失败类型后决定是否真正清空。
-    chatData.value.characterMemories = latest?.characterMemories ?? previousCharacterMemories ?? [];
-    forcePersist({ settings: false });
-    rebuildAssembled();
-    return removed.length + removedHistory.length;
   }
 
   // ⭐ 缓存化的 assembledSummary：shallowRef + 手动失效，避免编辑时全量重算
@@ -6407,11 +6294,6 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     restoreLastSummary,
     updateSummaryRawText,
     getHiddenFloors,
-    // 记忆仓热投影协同
-    prepareSummaryForCommit,
-    previewSummarySequence,
-    replaceSummaryRangeAtomically,
-    invalidateSummaryProjectionsFromFloor,
     // 动态人设
     updateDynamicProfile,
     removeDynamicProfile,
