@@ -29,7 +29,7 @@
           v-if="batchProgress.status === 'paused'"
           class="zhino-batch-stop-btn"
           @click="stopBatch()"
-        >⏹ 放弃本次重建</button>
+        >⏹ 停止总结</button>
         <button
           v-if="batchRunning"
           class="zhino-batch-stop-btn"
@@ -49,12 +49,7 @@
             第 {{ batchProgress.currentBatch }}/{{ batchProgress.totalBatches }} 批 ({{ batchProgress.currentBatchFloorStart }}-{{ batchProgress.currentBatchFloorEnd }}层{{ batchProgress.currentBatchCount !== undefined ? ', ' + batchProgress.currentBatchCount + '条' : '' }})
           </template>
           <template v-else-if="batchProgress.status === 'paused'">
-            <span v-if="batchProgress.pauseReason === 'user'">
-              ⏸ 已暂停在第 {{ batchProgress.currentBatch }}/{{ batchProgress.totalBatches }} 批，可从一致检查点继续
-            </span>
-            <span v-else>
-              ⚠ 第 {{ batchProgress.currentBatch }}/{{ batchProgress.totalBatches }} 批重试耗尽，已暂停
-            </span>
+            ⚠ 第 {{ batchProgress.currentBatch }}/{{ batchProgress.totalBatches }} 批重试耗尽，已暂停
           </template>
           <template v-else-if="batchProgress.status === 'cancelled'">
             ⏹ 已停止 ({{ batchProgress.currentBatch - 1 }}/{{ batchProgress.totalBatches }} 批)
@@ -80,7 +75,6 @@
 import { storeToRefs } from 'pinia';
 import { useMainStore } from '../stores/mainStore';
 import { executeBatchSummary, type BatchProgress } from '../core/batchSummary';
-import { abandonBatchRebuild } from '../core/memoryWarehouseRuntime';
 import { Collapsible } from './ui';
 import { readAssistantContentsInRange } from '../utils/chatContent';
 
@@ -116,14 +110,13 @@ async function runBatch(fromFloor: number) {
     });
   }
   await executeBatchSummary(
-    batchStart.value,
+    fromFloor,
     batchEnd.value,
     batchSize.value,
     capturedContents.value,
     store,
     onBatchProgress,
     batchAbortRequested,
-    { resumeFromFloor: fromFloor },
   );
   batchRunning.value = false;
 }
@@ -141,20 +134,11 @@ function resumeBatch() {
   runBatch(resumeFloor);
 }
 
-async function stopBatch() {
+function stopBatch() {
   if (batchRunning.value) {
     batchAbortRequested.value = true;
   } else {
-    try {
-      const chatId = SillyTavern.getCurrentChatId()?.trim() ?? '';
-      if (chatId) await abandonBatchRebuild(chatId);
-    } catch (error) {
-      console.error('[智脑批量总结] 放弃重建失败，保留暂停状态以便重试', error);
-      toastr.error('放弃重建失败，检查点仍保留，请重试');
-      return;
-    }
     batchProgress.value.status = 'cancelled';
-    batchProgress.value.pauseReason = undefined;
     batchRunning.value = false;
   }
 }
