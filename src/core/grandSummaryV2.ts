@@ -135,7 +135,7 @@ function buildGrandSummaryInstruction(
     parts.push('');
     parts.push('## 上次大总结（时间线续写参考）');
     parts.push('');
-    parts.push(section1.slice(0, 3000));
+    parts.push(section1);
   }
 
   return parts.join('\n');
@@ -162,8 +162,7 @@ function buildInputMaterial(capturedContents: CapturedContent[]): string {
   for (const c of sorted) {
     if (!c.content.trim()) continue;
     parts.push(`### 楼层 #${c.messageId}`);
-    // 与角色记忆保持一致：每条截断 1500 字，避免单条过长撑爆 token
-    parts.push(`原文：${c.content.trim().slice(0, 1500)}`);
+    parts.push(`原文：${c.content.trim()}`);
     parts.push('');
   }
 

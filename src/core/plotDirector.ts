@@ -230,7 +230,7 @@ function buildOutlineConversationInstruction(
       ? [
           '## 世界书参考',
           '',
-          ...selectedWorldBook.map(e => `### ${e.key}\n${e.content.slice(0, 2000)}`),
+          ...selectedWorldBook.map(e => `### ${e.key}\n${e.content}`),
           '',
         ]
       : []),
@@ -439,7 +439,7 @@ function buildPlotCheckInstruction(
     '',
     '## 最近正文内容',
     '',
-    recentContent.slice(0, 2000),
+    recentContent,
     '',
     '## 在<thinking>中分析后，在<plot_check>标签内输出JSON：',
     '',

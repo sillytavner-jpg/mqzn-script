@@ -96,7 +96,15 @@ export interface UserPersona {
 
 export interface CapturedContent {
   messageId: number;
+  /** 纯正文（已剥离思维链） */
   content: string;
+  /**
+   * 思维链原文（角色/视角/在场锚点）。
+   * 只投递给「认人」类分析：角色记忆 / 角色小传 / 动态人设。
+   * 事件类分析（小总结/大总结/世界推进/剧情导演）不消费此字段——
+   * 防止把思维链里的「构思草稿」当成已发生事件。
+   */
+  thinkingChain?: string;
   capturedAt: string;
   swipeCount: number;
 }
@@ -4261,6 +4269,84 @@ export const useMainStore = defineStore('main', () => {
     return true;
   }
 
+  /**
+   * 批量应用「世界书提取角色」的结果。
+   *
+   * 策略（2026-09-10 主人定）：
+   * - 已存在（主名或别名命中）→ **把新别名并进已有角色**，不动主名、不动 _manuallyEdited
+   *   （别名越全，分析越不会认错；只增不改，风险低）
+   * - 不存在 → 新建角色（与「＋新建角色」同样构造，_manuallyEdited = true）
+   *
+   * 返回处理明细，供 UI 回报玩家。
+   */
+  function applyExtractedCharacters(
+    items: Array<{ name: string; aliases?: string[] }>,
+  ): { added: string[]; merged: Array<{ name: string; addedAliases: string[] }>; unchanged: string[] } {
+    const added: string[] = [];
+    const merged: Array<{ name: string; addedAliases: string[] }> = [];
+    const unchanged: string[] = [];
+
+    for (const item of items || []) {
+      const rawName = String(item?.name || '').trim();
+      if (!rawName) continue;
+      const incoming = Array.from(new Set(
+        (item.aliases || []).map(a => String(a || '').trim()).filter(Boolean),
+      ));
+
+      // 1) 命中已有角色 → 并入别名
+      const latestDelta = getLatestDelta();
+      const existing = findCharacterMemoryByName(chatData.value.characterMemories, rawName)
+        || findCharacterMemoryByName(latestDelta?.characterMemories, rawName);
+      if (existing) {
+        const before = new Set((existing.aliases || []).map(a => normalizeMemoryCharacterName(a)));
+        const candidate = [...(existing.aliases || []), rawName, ...incoming];
+        const cleaned = cleanCharacterAliases(candidate, existing.characterName);
+        const fresh = cleaned.filter(a => !before.has(normalizeMemoryCharacterName(a)));
+        if (fresh.length > 0) {
+          existing.aliases = cleaned;
+          // 最新 delta 里也写一份（名字解析两处都会读），并触发响应式
+          const deltaTarget = findCharacterMemoryByName(latestDelta?.characterMemories, existing.characterName);
+          if (deltaTarget && deltaTarget !== existing) deltaTarget.aliases = cleaned;
+          const lastIdx = chatData.value.summaries.length - 1;
+          if (latestDelta && lastIdx >= 0) chatData.value.summaries[lastIdx] = { ...latestDelta };
+          merged.push({ name: existing.characterName, addedAliases: fresh });
+        } else {
+          unchanged.push(existing.characterName);
+        }
+        continue;
+      }
+
+      // 2) 新建
+      const canonical = resolveKnownCharacterName(rawName, true) || rawName;
+      const cleanedAliases = cleanCharacterAliases(incoming, canonical);
+      const mem = normalizeCharacterMemoryArrays({
+        characterName: canonical,
+        aliases: cleanedAliases,
+        attitude: 'neutral',
+        coreMemories: [],
+        recentMemories: [],
+        keywords: [],
+        orderedNewMemories: [],
+      });
+      (mem as any)._manuallyEdited = true;
+      chatData.value.characterMemories.push(mem);
+      added.push(canonical);
+    }
+
+    if (added.length > 0 || merged.length > 0) {
+      rebuildAssembled();
+      forcePersist({ settings: false });
+    }
+    pushCodeLog({
+      id: _codeLogIdCounter++,
+      timestamp: new Date().toISOString(),
+      module: '存储',
+      level: 'info',
+      message: `世界书提取角色：新增 ${added.length} 个，补充别名 ${merged.length} 个，无变化 ${unchanged.length} 个`,
+    });
+    return { added, merged, unchanged };
+  }
+
   // ========== 角色合并 ==========
 
   /**
@@ -6309,6 +6395,7 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     resolveKnownCharacterNames,
     updateCharacterAliases,
     addCharacter,
+    applyExtractedCharacters,
     // 角色设定档案
     setCharacterProfile,
     removeCharacterProfile,

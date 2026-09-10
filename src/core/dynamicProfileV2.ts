@@ -13,6 +13,7 @@ import { resolveCharacterName, buildBlacklistReminder } from '../utils/character
 import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { DynamicProfileV2Schema } from '../utils/schemas';
 import { logInfo } from '../utils/logger';
+import { formatThinkingChainForAnalysis } from '../utils/messageParser';
 
 // ====== 数据结构 =========
 
@@ -172,7 +173,13 @@ function buildInputMaterial(
   parts.push('');
   for (const item of capturedContents) {
     parts.push(`### 楼层 #${item.messageId}`);
-    parts.push(item.content.slice(0, 1200));
+    // 思维链锚点：帮模型认准视角与在场角色（动态人设属「认人」类分析，吃思维链）
+    const chain = formatThinkingChainForAnalysis(item.thinkingChain || '');
+    if (chain) {
+      parts.push(chain);
+      parts.push('');
+    }
+    parts.push(item.content);
     parts.push('');
   }
 

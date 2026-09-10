@@ -121,6 +121,7 @@ const ANALYSIS_TYPES: Array<{ key: string; label: string }> = [
   { key: 'plot_director', label: '剧情导演' },
   { key: 'persona', label: '人设分析' },
   { key: 'character_profile', label: '角色设定' },
+  { key: 'character_extract', label: '世界书提取角色' },
 ];
 
 function addApi() {

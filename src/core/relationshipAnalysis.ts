@@ -399,7 +399,7 @@ function buildCharacterMaterial(
     parts.push(`世界书: ${worldbook?.found ? '有' : '无，按普通NPC或仅按大总结处理'}`);
     if (worldbook?.found) {
       for (const content of worldbook.contents) {
-        parts.push(`[世界书内容]\n${content.slice(0, 1400)}`);
+        parts.push(`[世界书内容]\n${content}`);
       }
     }
     if (profile) {

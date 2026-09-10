@@ -5,7 +5,7 @@ import type { NsfwCharacterMemory } from '../core/nsfwIsolation';
 import type { DynamicProfileV2 } from '../core/dynamicProfileV2';
 import { executeDynamicProfileV2 } from '../core/dynamicProfileV2';
 import { useIsMobile } from '../composables/useIsMobile';
-import { Modal, SubTabNav } from './ui';
+import { Modal, SubTabNav, ProgressBar } from './ui';
 import { logError } from '../utils/logger';
 import { readRecentAssistantContents } from '../utils/chatContent';
 import CharacterSheetHeader from './CharacterSheetHeader.vue';
@@ -13,6 +13,7 @@ import InventoryGrid from './InventoryGrid.vue';
 import ItemEditModal from './ItemEditModal.vue';
 import type { KnowledgeGraph, OwnedItem } from '../core/knowledgeGraph';
 import { getItemsBelongingTo, createEmptyKnowledgeGraph } from '../core/knowledgeGraph';
+import { extractCharactersFromWorldbook, listWorldbookNames, normalizeWorldbookToken } from '../core/worldBookCharacterExtract';
 const store = useMainStore();
 const isMobile = useIsMobile();
 
@@ -672,6 +673,165 @@ function confirmAddCharacter() {
   }
 }
 
+// ─── 从世界书提取角色 ───
+const showExtractPopup = ref(false);
+const extractBookName = ref('');
+const extractBookOptions = ref<string[]>([]);
+const extractBusy = ref(false);
+const extractStatus = ref('');
+const extractError = ref('');
+const extractItems = ref<Array<{ name: string; aliases: string[]; selected: boolean; isNew?: boolean }>>([]);
+const selectedExtractCount = computed(() => extractItems.value.filter(i => i.selected).length);
+/** 进行中的提取请求控制器（用于「暂停」） */
+const extractAbort = ref<AbortController | null>(null);
+/** 批次进度 */
+const extractBatchTotal = ref(0);
+const extractBatchDone = ref(0);
+/** 完整模式：额外读全正文（更全但更慢更贵），默认关 */
+const extractFullMode = ref(false);
+
+/** 世界书清单：优先酒馆助手 API，降级用脚本已缓存的条目来源 */
+async function loadExtractBookOptions(): Promise<string[]> {
+  const books = new Set<string>();
+  try {
+    for (const name of await listWorldbookNames()) books.add(name);
+  } catch (_) {}
+  for (const entry of store.chatData.worldBookEntries || []) {
+    if (entry.book) books.add(entry.book);
+  }
+  return [...books].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+}
+
+async function openExtractPopup() {
+  showExtractPopup.value = true;
+  extractBookName.value = '';
+  extractItems.value = [];
+  extractStatus.value = '';
+  extractError.value = '';
+  extractBatchTotal.value = 0;
+  extractBatchDone.value = 0;
+  extractBookOptions.value = await loadExtractBookOptions();
+  if (extractBookOptions.value.length === 1) extractBookName.value = extractBookOptions.value[0];
+}
+
+/** 关闭弹窗：若正在提取，先中止请求再关，避免 API 卡住时关不掉 */
+function closeExtractPopup() {
+  if (extractBusy.value) abortExtract();
+  showExtractPopup.value = false;
+}
+
+/** 暂停进行中的提取（已完成的批次结果会保留） */
+function abortExtract() {
+  const ctrl = extractAbort.value;
+  if (ctrl && !ctrl.signal.aborted) ctrl.abort();
+}
+
+function selectAllExtract(selected: boolean) {
+  for (const item of extractItems.value) item.selected = selected;
+}
+
+/**
+ * 用最新的跨批合并清单刷新预览列表。
+ * - 保留用户已取消的勾选（按名字+别名的归一化 token 匹配，合并后依然尊重取消意图）
+ * - 标记本批新增（freshTokens）的行，让"每成功一批"看得见
+ */
+function applyExtractItems(
+  items: Array<{ name: string; aliases: string[] }>,
+  freshTokens: string[],
+) {
+  const deselected = new Set<string>();
+  for (const it of extractItems.value) {
+    if (it.selected) continue;
+    deselected.add(normalizeWorldbookToken(it.name));
+    for (const a of it.aliases) deselected.add(normalizeWorldbookToken(a));
+  }
+  const fresh = new Set(freshTokens);
+  extractItems.value = items.map(it => {
+    const tokens = [normalizeWorldbookToken(it.name), ...it.aliases.map(a => normalizeWorldbookToken(a))];
+    return {
+      ...it,
+      selected: !tokens.some(t => deselected.has(t)),
+      isNew: tokens.some(t => fresh.has(t)),
+    };
+  });
+}
+
+async function runExtract() {
+  if (!extractBookName.value || extractBusy.value) return;
+  const controller = new AbortController();
+  extractAbort.value = controller;
+
+  extractBusy.value = true;
+  extractError.value = '';
+  extractItems.value = [];
+  extractBatchTotal.value = 0;
+  extractBatchDone.value = 0;
+  extractStatus.value = `正在读取世界书「${extractBookName.value}」…（可随时暂停）`;
+  try {
+    const result = await extractCharactersFromWorldbook({
+      bookName: extractBookName.value,
+      userName: store.getUserName(),
+      abortSignal: controller.signal,
+      mode: extractFullMode.value ? 'full' : 'fast',
+      onProgress: (p) => {
+        if (p.phase === 'prepared') {
+          extractBatchTotal.value = p.total;
+          extractBatchDone.value = 0;
+          extractStatus.value = `可用条目 ${p.usedEntries} 条（跳过 ${p.skippedEntries} 条脚本/空条目）`
+            + ` · 约 ${(p.totalChars / 10000).toFixed(1)} 万字`
+            + ` · ${p.mode === 'full' ? '完整模式' : '快速模式'}`
+            + ` · 共 ${p.total} 批，开始提取…`;
+          return;
+        }
+        extractBatchDone.value = p.done;
+        if (p.items.length > 0) applyExtractItems(p.items, p.batchTokens);
+        extractStatus.value = p.failed
+          ? `第 ${p.done}/${p.total} 批失败，已跳过 · 累计 ${p.items.length} 个角色`
+          : `第 ${p.done}/${p.total} 批完成：本批 +${p.batchCount} · 累计 ${p.items.length} 个角色`;
+      },
+    });
+    const tail = result.aborted
+      ? `已暂停：完成 ${result.doneBatches}/${result.batches} 批`
+      : [`共 ${result.batches} 批`, result.failedBatches > 0 ? `${result.failedBatches} 批失败` : '']
+          .filter(Boolean)
+          .join(' · ');
+    extractStatus.value = `${tail} · 提取到 ${result.items.length} 个角色`;
+    // 提取结束，清掉"本批新增"高亮
+    extractItems.value = extractItems.value.map(i => ({ ...i, isNew: false }));
+  } catch (e) {
+    if ((e as any)?.name === 'AbortError') {
+      extractStatus.value = '已暂停（已完成的批次结果保留）';
+      return;
+    }
+    extractError.value = String((e as Error)?.message || e);
+    extractStatus.value = '';
+    logError('世界书提取', '提取失败', String(e));
+  } finally {
+    if (extractAbort.value === controller) extractAbort.value = null;
+    extractBusy.value = false;
+  }
+}
+
+function confirmExtract() {
+  const picked = extractItems.value
+    .filter(i => i.selected && i.name.trim())
+    .map(i => ({ name: i.name.trim(), aliases: i.aliases }));
+  if (picked.length === 0) return;
+  const result = store.applyExtractedCharacters(picked);
+  const summary = `新增 ${result.added.length} 个，补充别名 ${result.merged.length} 个，无变化 ${result.unchanged.length} 个`;
+  const mergedNames = result.merged.map(m => m.name).slice(0, 8).join('、');
+  try {
+    (window as any).toastr?.success(
+      summary + (mergedNames ? `<br/><small>补别名：${mergedNames}</small>` : ''),
+      '✅ 已写入角色库',
+      { timeOut: 5000 },
+    );
+  } catch (_) {}
+  extractItems.value = [];
+  extractStatus.value = '';
+  showExtractPopup.value = false;
+}
+
 </script>
 
 <template>
@@ -712,6 +872,13 @@ function confirmAddCharacter() {
           title="查看黑名单角色，可放出"
         >
           黑名单<template v-if="blacklistCount > 0"> ({{ blacklistCount }})</template>
+        </button>
+        <button
+          class="zhino-btn-sm zhino-edit-role-btn"
+          @click="openExtractPopup"
+          title="选一本世界书，用一次 API 提取其中的角色名与别名录入角色库"
+        >
+          从世界书提取角色
         </button>
       </div>
 
@@ -1083,6 +1250,76 @@ function confirmAddCharacter() {
           :disabled="!newCharName.trim()"
           @click="confirmAddCharacter"
         >确认新建</button>
+      </template>
+    </Modal>
+
+    <!-- 从世界书提取角色弹窗 -->
+    <Modal :visible="showExtractPopup" :is-mobile="isMobile" title="从世界书提取角色" @close="closeExtractPopup">
+      <div class="zhino-merge-desc">
+        选一本世界书，调一次 API 提取其中的角色名与别名。<br/>
+        角色库里已有的角色只会<strong>补充别名</strong>（不改主名），不存在的才会新建。先预览勾选，确认后再写入。
+      </div>
+      <div class="zhino-merge-field">
+        <span class="zhino-detail-label">世界书：</span>
+        <select v-model="extractBookName" class="zhino-merge-select" style="flex:1" :disabled="extractBusy">
+          <option value="">请选择世界书</option>
+          <option v-for="book in extractBookOptions" :key="book" :value="book">{{ book }}</option>
+        </select>
+      </div>
+      <div v-if="extractBookOptions.length === 0" class="zhino-merge-hint">
+        没读到任何世界书。请确认酒馆助手扩展（JS-Slash-Runner）已启用，且酒馆里存在世界书。
+      </div>
+      <label class="zhino-extract-mode">
+        <input type="checkbox" v-model="extractFullMode" :disabled="extractBusy" />
+        <span>也读正文（更全但更慢更贵）</span>
+      </label>
+      <div class="zhino-merge-hint" style="margin-top: 4px;">
+        默认快速模式：只读「条目标题路径 + 触发词 + 正文前 300 字」。
+        触发词（世界书 key）是别名最可靠的来源，比正文更小更准。
+      </div>
+      <div v-if="extractStatus" class="zhino-merge-hint">{{ extractStatus }}</div>
+      <div v-if="extractError" class="zhino-merge-hint" style="color: var(--zn-danger-rgb, #e06c75);">{{ extractError }}</div>
+      <ProgressBar
+        v-if="extractBusy || extractBatchTotal > 0"
+        :value="extractBatchDone"
+        :total="extractBatchTotal || 1"
+        :label="extractBatchTotal > 0 ? `批次进度 ${extractBatchDone} / ${extractBatchTotal}` : '准备中…'"
+        show-value
+        style="margin-top: 8px;"
+      />
+
+      <template v-if="extractItems.length > 0">
+        <div class="zhino-merge-field" style="justify-content: space-between; align-items: center;">
+          <span class="zhino-detail-label">提取到 {{ extractItems.length }} 个角色，已选 {{ selectedExtractCount }} 个</span>
+          <span class="zhino-extract-pickall">
+            <button class="zhino-btn-sm" @click="selectAllExtract(true)">全选</button>
+            <button class="zhino-btn-sm" @click="selectAllExtract(false)">全不选</button>
+          </span>
+        </div>
+        <div class="zhino-extract-list">
+          <label v-for="(item, idx) in extractItems" :key="idx" class="zhino-extract-item">
+            <input type="checkbox" v-model="item.selected" />
+            <span class="zhino-extract-name">{{ item.name }}</span>
+            <span v-if="item.isNew" class="zhino-extract-new">本批新增</span>
+            <span v-if="item.aliases.length" class="zhino-extract-alias">{{ item.aliases.join('、') }}</span>
+          </label>
+        </div>
+      </template>
+
+      <template #footer>
+        <button class="zhino-btn-sm" @click="closeExtractPopup">{{ extractBusy ? '暂停并关闭' : '关闭' }}</button>
+        <button
+          v-if="extractBusy"
+          class="zhino-btn-sm zhino-btn-danger"
+          @click="abortExtract"
+          title="中止当前请求；已完成的批次结果会保留，可继续勾选写入"
+        >暂停</button>
+        <button class="zhino-btn-sm" :disabled="!extractBookName || extractBusy" @click="runExtract">
+          {{ extractBusy ? '提取中…' : (extractItems.length > 0 ? '重新提取' : '开始提取') }}
+        </button>
+        <button class="zhino-btn-sm zhino-btn-save" :disabled="selectedExtractCount === 0 || extractBusy" @click="confirmExtract">
+          写入角色库（{{ selectedExtractCount }}）
+        </button>
       </template>
     </Modal>
 
@@ -2094,6 +2331,53 @@ function confirmAddCharacter() {
 .zhino-pending-snippet {
   color: #888780;
   flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 从世界书提取角色 —— 预览勾选列表 */
+.zhino-extract-pickall { display: inline-flex; gap: 6px; }
+.zhino-extract-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin-top: 8px;
+  cursor: pointer;
+}
+.zhino-extract-mode input { margin: 0; }
+.zhino-extract-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--zn-border, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin-top: 6px;
+}
+.zhino-extract-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.zhino-extract-item:hover { background: rgba(255, 255, 255, 0.04); }
+.zhino-extract-item input { flex: none; margin: 0; }
+.zhino-extract-name { flex: none; font-weight: 500; }
+.zhino-extract-new {
+  flex: none;
+  font-size: 10px;
+  line-height: 1.5;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: rgba(var(--zn-accent-rgb, 120, 120, 120), 0.18);
+  color: var(--zn-accent, #7F77DD);
+}
+.zhino-extract-alias {
+  color: #888780;
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

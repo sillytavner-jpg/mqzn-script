@@ -617,6 +617,7 @@ $(() => {
     aiFloor: number,
     userText: string,
     aiText: string,
+    aiThinkingChain?: string,
   ) {
     if (!store.settings.captureEnabled || !store.settings.smallSummaryEnabled) return;
     // 第0层是开场白/玩家填写信息界面，自动流程不触发小总结，避免浪费API。
@@ -684,6 +685,7 @@ $(() => {
       let { record, graphDiff, characterLocations: parsedCharLocs } = await executeSmallSummary(
         userText, aiText, userFloor, aiFloor, allNames, store.getUserName(), kgOptions, characterEntries, previousContext,
         store.getBlacklistedCharacters(),
+        aiThinkingChain,
       );
       if (!isCapturedContentCurrent(store, aiFloor, aiText)) {
         logWarn('小总结', `分析完成时来源已变化，丢弃过期结果: 楼层 ${aiFloor}`);
@@ -848,6 +850,7 @@ $(() => {
       }
       const currentContent = readAssistantContentAtFloor(messageId, store.chatData.capturedContents);
       const content = currentContent?.content || extractedContent;
+      const thinkingChain = currentContent?.thinkingChain || '';
       if (content) {
         store.touchChatContent();
 
@@ -865,7 +868,7 @@ $(() => {
           const userFloor = userInput?.messageId ?? messageId - 1;
           const aiFloor = messageId;
           const userText = userInput?.content ?? '';
-          runSmallSummaryForAiMessage(store, userFloor, aiFloor, userText, content);
+          runSmallSummaryForAiMessage(store, userFloor, aiFloor, userText, content, thinkingChain);
         }
 
         // 世界推进：每 N 轮对话（每个AI回复为一轮，开场白第0层单独算一轮）只标记 pending，等玩家下一次发送消息时触发
@@ -1036,6 +1039,7 @@ $(() => {
       }
       const currentContent = readAssistantContentAtFloor(messageId, store.chatData.capturedContents);
       const content = currentContent?.content || extractedContent;
+      const thinkingChain = currentContent?.thinkingChain || '';
       if (content) {
         store.touchChatContent();
 
@@ -1054,7 +1058,7 @@ $(() => {
         }
 
         // 重跑小总结 + 替换该楼层后的最新图谱（流程与 MESSAGE_RECEIVED 一致）
-        runSmallSummaryForAiMessage(store, userInput?.messageId ?? messageId - 1, messageId, userText, content);
+        runSmallSummaryForAiMessage(store, userInput?.messageId ?? messageId - 1, messageId, userText, content, thinkingChain);
       }
     }, 500);
   });

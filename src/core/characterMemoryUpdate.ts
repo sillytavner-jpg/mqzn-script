@@ -12,6 +12,7 @@ import { callGenerateRaw } from '../utils/apiCaller';
 import { replaceUserReferences } from '../utils/textCleanup';
 import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { CharacterMemoryUpdateSchema } from '../utils/schemas';
+import { formatThinkingChainForAnalysis } from '../utils/messageParser';
 import { normalizeStoryTime } from '../utils/storyTime';
 import { logInfo } from '../utils/logger';
 import { buildBlacklistReminder } from '../utils/characterNames';
@@ -211,7 +212,13 @@ function buildInputMaterial(
   parts.push('');
   for (const item of capturedContents) {
     parts.push(`### 楼层 #${item.messageId}`);
-    parts.push(item.content.slice(0, 1500));
+    // 思维链锚点：帮模型认准说话人与在场角色（角色记忆属「认人」类分析，吃思维链）
+    const chain = formatThinkingChainForAnalysis(item.thinkingChain || '');
+    if (chain) {
+      parts.push(chain);
+      parts.push('');
+    }
+    parts.push(item.content);
     parts.push('');
   }
 

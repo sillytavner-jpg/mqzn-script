@@ -494,7 +494,7 @@ function buildDreamtalkMaterial(
 
   if (userPersonaRaw) {
     parts.push('## 用户填写的角色人设（参考，不代表实际行为）');
-    parts.push(userPersonaRaw.slice(0, 800)); // 截断，不给太多
+    parts.push(userPersonaRaw);
     parts.push('');
   }
 
@@ -505,11 +505,11 @@ function buildDreamtalkMaterial(
   for (const record of validInputs) {
     parts.push(`### 楼层 #${record.messageId}`);
     parts.push(`【用户输入】${record.userInput}`);
-    parts.push(`【AI回复】${record.aiResponse.slice(0, 500)}`);
+    parts.push(`【AI回复】${record.aiResponse}`);
     if (record.rolledResponses && record.rolledResponses.length > 0) {
       parts.push(`【被Roll掉的版本(${record.rolledResponses.length}个)】`);
       for (const rolled of record.rolledResponses) {
-        parts.push('  - ' + rolled.slice(0, 200) + '...');
+        parts.push('  - ' + rolled);
       }
     }
     parts.push('');

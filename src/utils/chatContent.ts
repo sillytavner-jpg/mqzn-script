@@ -1,5 +1,5 @@
 import type { CapturedContent } from '../stores/mainStore';
-import { extractContentFromMessage, isValidMainContent } from './messageParser';
+import { extractContentFromMessage, isValidMainContent, parseAssistantMessage } from './messageParser';
 
 export interface ChatUserInput {
   messageId: number;
@@ -66,11 +66,13 @@ function isIgnoredMessageKind(message: any): boolean {
 
 function toContentRecord(message: any): CapturedContent | null {
   if (!message || message.role !== 'assistant' || isIgnoredMessageKind(message)) return null;
-  const content = extractContentFromMessage(getMessageText(message));
+  const parsed = parseAssistantMessage(getMessageText(message));
+  const content = parsed.content;
   if (!isValidMainContent(content)) return null;
   return {
     messageId: Number(message.message_id),
     content,
+    thinkingChain: parsed.thinkingChain || undefined,
     capturedAt: nowIso(),
     swipeCount: Number.isFinite(message.swipe_id) ? Number(message.swipe_id) : 0,
   };

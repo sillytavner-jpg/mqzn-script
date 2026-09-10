@@ -22,6 +22,7 @@ import { KnowledgeGraphDiffSchema } from '../utils/schemas';
 import { z } from 'zod';
 import { logInfo, logWarn, logError } from '../utils/logger';
 import { buildBlacklistReminder } from '../utils/characterNames';
+import { formatThinkingChainForAnalysis } from '../utils/messageParser';
 
 // ========== 输出 Schema ==========
 // 新版：去掉 summary 节点，AI 直接在 graphDiff.add.characters 里列每个在场角色 + location；
@@ -90,12 +91,14 @@ function buildInstruction(
   kgDigest?: string,
   worldProgressMaterial?: string,
   blacklistedNames?: string[],
+  aiThinkingChain?: string,
 ): string {
   // 黑名单提醒：本次不要记录黑名单角色（图谱人物/在场/互动均不含）
   const blacklistReminder = buildBlacklistReminder(
     blacklistedNames,
     '本次不要记录以下角色：它们不得出现在在场角色、互动角色或图谱人物节点中',
   );
+  const aiThinkingChainBlock = formatThinkingChainForAnalysis(aiThinkingChain || '');
   const lines: string[] = [
     `${userName}: 秋青子，现在需要你做一项数据整理任务。`,
     '',
@@ -211,6 +214,9 @@ function buildInstruction(
     '[用户输入]',
     userInput || '（无用户输入，这是开场白）',
     '',
+    // 思维链锚点：小总结只做图谱（地点/物品/人物），"谁拿着东西/谁在哪"全靠认人，必须给锚点。
+    // 标签里已写明草稿性内容尚未发生，防止把"构思草稿"里的地点物品当成已发生状态录入图谱。
+    ...(aiThinkingChainBlock ? [aiThinkingChainBlock, ''] : []),
     '[AI回复]',
     aiResponse,
   ];
@@ -438,6 +444,7 @@ export async function executeSmallSummary(
   characterEntries?: CharacterNameEntry[],
   previousContext?: PreviousRoundContext,
   blacklistedNames?: string[],
+  aiThinkingChain?: string,
 ): Promise<SmallSummaryResult> {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
@@ -503,6 +510,7 @@ export async function executeSmallSummary(
     kgDigest,
     kgOptions?.worldProgressMaterial,
     blacklistedNames,
+    aiThinkingChain,
   );
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [

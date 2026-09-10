@@ -165,7 +165,7 @@ function buildWorldProgressInstruction(
           '',
           ...worldBookEntries.filter(e => (e.content || '').trim().length > 0).flatMap(entry => [
             `### ${entry.key}`,
-            replaceUserReferences(entry.content.slice(0, 2000), userName),
+            replaceUserReferences(entry.content, userName),
             '',
           ]),
         ]
@@ -424,7 +424,7 @@ function buildWorldProgressMaterial(
     parts.push('');
     for (const item of recentContents.slice(-2)) {
       parts.push(`### 楼层 #${item.messageId}`);
-      parts.push((item.content || '').slice(0, 1500));
+      parts.push(item.content || '');
       parts.push('');
     }
   }
@@ -466,7 +466,7 @@ function buildWorldProgressMaterial(
       if (candidate.aliases?.length) parts.push(`- 别名: ${candidate.aliases.join('、')}`);
       if (candidate.attitude) parts.push(`- 与主角关系倾向（仅在本时段确有直接关联时参考）: ${candidate.attitude}`);
       if (typeof candidate.score === 'number') parts.push(`- 推演权重: ${candidate.score.toFixed(1)}${candidate.reason ? `（${candidate.reason}）` : ''}`);
-      if (candidate.profileBrief) parts.push(`- 角色设定摘要: ${candidate.profileBrief.slice(0, 700)}`);
+      if (candidate.profileBrief) parts.push(`- 角色设定摘要: ${candidate.profileBrief}`);
 
 
       if (candidate.memories?.length) {

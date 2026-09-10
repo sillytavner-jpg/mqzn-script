@@ -6,6 +6,7 @@ import {
   readAssistantContentsInRange,
   readPendingSummaryContents,
   readAssistantExtractedContentAtFloor,
+  readAssistantContentAtFloor,
 } from '../utils/chatContent';
 import { executeDreamtalkAnalysis } from '../core/dreamtalk';
 import { executeGrandSummaryV2 } from '../core/grandSummaryV2';
@@ -571,6 +572,7 @@ async function triggerOpeningGraph() {
       let { record, graphDiff, characterLocations: parsedCharLocs } = await executeSmallSummary(
         '', content, -1, 0, allNames, userNameNorm, kgOptions, characterEntries, undefined,
         store.getBlacklistedCharacters(),
+        readAssistantContentAtFloor(0, store.chatData.capturedContents)?.thinkingChain || '',
       );
       record.presentCharacters = store.resolveKnownCharacterNames(record.presentCharacters, true);
       if (parsedCharLocs?.length) {
@@ -681,6 +683,7 @@ async function triggerFloorSummary() {
       let { record, graphDiff, characterLocations: parsedCharLocs } = await executeSmallSummary(
         '', content, floor, floor, allNames, userNameNorm, kgOptions, characterEntries, undefined,
         store.getBlacklistedCharacters(),
+        readAssistantContentAtFloor(floor, store.chatData.capturedContents)?.thinkingChain || '',
       );
       record.presentCharacters = store.resolveKnownCharacterNames(record.presentCharacters, true);
       if (parsedCharLocs?.length) {

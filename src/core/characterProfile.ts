@@ -18,6 +18,7 @@ import { callGenerateRaw } from '../utils/apiCaller';
 import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { CharacterProfileSchema } from '../utils/schemas';
 import { logInfo, logError } from '../utils/logger';
+import { formatThinkingChainForAnalysis } from '../utils/messageParser';
 
 // ======== 破限常量（参考 dynamicProfileV2） ==========
 
@@ -227,6 +228,12 @@ function buildInputMaterial(
   parts.push('');
   for (const item of sliced) {
     parts.push(`### 楼层 #${item.messageId}`);
+    // 思维链锚点：帮模型认准视角与在场角色（角色小传属「认人」类分析，吃思维链）
+    const chain = formatThinkingChainForAnalysis(item.thinkingChain || '');
+    if (chain) {
+      parts.push(chain);
+      parts.push('');
+    }
     parts.push(item.content);
     parts.push('');
   }
