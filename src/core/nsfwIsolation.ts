@@ -245,20 +245,16 @@ let currentNsfwInjection: { uninject: () => void } | null = null;
  * 执行NSFW条件注入
  * 仅在NSFW激活时注入NSFW层数据
  */
-export function injectNsfwData(
+/**
+ * 构建 NSFW 隔离层注入文本（槽位机制与 depth 注入共用）。
+ * 只有导航页、没有实际数据时返回空串（不注入）。
+ */
+export function buildNsfwIsolationInjection(
   nsfwMemories: NsfwCharacterMemory[],
   nsfwDreamtalk: NsfwDreamtalkData | null,
   nsfwProfiles: NsfwDynamicProfile[],
   currentCharacters: string[],
-): void {
-  // 先移除旧注入
-  if (currentNsfwInjection) {
-    currentNsfwInjection.uninject();
-    currentNsfwInjection = null;
-  }
-
-  if (!isNsfwActive()) return;
-
+): string {
   const parts: string[] = [];
 
   // 导航页
@@ -277,7 +273,26 @@ export function injectNsfwData(
     parts.push(buildNsfwDreamtalkInjection(nsfwDreamtalk));
   }
 
-  if (parts.length <= 1) return; // 只有导航页没有实际数据，不注入
+  if (parts.length <= 1) return ''; // 只有导航页没有实际数据，不注入
+  return parts.join('\n\n');
+}
+
+export function injectNsfwData(
+  nsfwMemories: NsfwCharacterMemory[],
+  nsfwDreamtalk: NsfwDreamtalkData | null,
+  nsfwProfiles: NsfwDynamicProfile[],
+  currentCharacters: string[],
+): void {
+  // 先移除旧注入
+  if (currentNsfwInjection) {
+    currentNsfwInjection.uninject();
+    currentNsfwInjection = null;
+  }
+
+  if (!isNsfwActive()) return;
+
+  const injectionText = buildNsfwIsolationInjection(nsfwMemories, nsfwDreamtalk, nsfwProfiles, currentCharacters);
+  if (!injectionText) return;
 
   currentNsfwInjection = injectPrompts([
     {
@@ -285,7 +300,7 @@ export function injectNsfwData(
       position: 'in_chat',
       depth: 0,
       role: 'system',
-      content: parts.join('\n\n'),
+      content: injectionText,
       should_scan: false,
     },
   ]);

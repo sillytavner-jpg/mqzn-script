@@ -5,7 +5,6 @@ import { executeWorldProgress, injectWorldProgress, createFailedWorldProgressRec
 import { enqueueAnalysis } from '../core/backgroundQueue';
 import type { PlotOutline } from '../core/plotDirector';
 import { hydrateSelectedWorldBookEntries } from '../core/worldBookSelection';
-import WorldBookTagsTab from './WorldBookTagsTab.vue';
 import { SubTabNav, ConfirmButton, EmptyHint } from './ui';
 import { logInfo, logError } from '../utils/logger';
 import { readAssistantContentsInRange } from '../utils/chatContent';
@@ -13,12 +12,11 @@ import { readAssistantContentsInRange } from '../utils/chatContent';
 const store = useMainStore();
 
 // ─── 子面板切换 ───
-type SubPanel = 'world_progress' | 'plot_director' | 'worldbook_tags';
+type SubPanel = 'world_progress' | 'plot_director';
 const activePanel = ref<SubPanel>('world_progress');
 const items = [
   { key: 'world_progress', label: '世界推进' },
   { key: 'plot_director', label: '剧情导演' },
-  { key: 'worldbook_tags', label: '世界书标签（施工中）' },
 ];
 
 // ═══════════════════════════════════════
@@ -1094,8 +1092,6 @@ function doAdvanceStage() {
       </template>
     </div>
 
-    <!-- ═══ 世界书标签面板 ═══ -->
-    <WorldBookTagsTab v-if="activePanel === 'worldbook_tags'" />
   </div>
 </template>
 

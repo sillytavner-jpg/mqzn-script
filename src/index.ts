@@ -17,9 +17,9 @@ import './styles/components.css';
 import './components/ui'; // UI 原语库（统一出口，强制参与编译）
 import App from './App.vue';
 import { buildDreamtalkInjection, executeDreamtalkAnalysis, scanCharacterNamesFromContent } from './core/dreamtalk';
-import { injectPersonaIntoCompletion } from './core/persona';
-import { injectNeuralChain, removeNeuralChainInjection } from './core/neuralChain';
-import { injectNsfwData, isNsfwActive, removeNsfwInjection } from './core/nsfwIsolation';
+import { buildPersonaInjection, injectPersonaIntoCompletion } from './core/persona';
+import { buildNeuralChainInjection, injectNeuralChain, removeNeuralChainInjection } from './core/neuralChain';
+import { buildNsfwIsolationInjection, injectNsfwData, isNsfwActive, removeNsfwInjection } from './core/nsfwIsolation';
 
 import {
   buildMemorySectionText,
@@ -37,7 +37,7 @@ import { applyKnowledgeGraphDiff, createEmptyKnowledgeGraph, embedKnowledgeGraph
 import type { KnowledgeGraph } from './core/knowledgeGraph';
 import { buildWorldGraphInjection, injectWorldGraphIntoCompletion, removeWorldGraphInjection } from './core/worldGraphInject';
 import { getHiddenFloorsFromChat } from './core/floorVisibility';
-import { injectRelationshipProfiles, removeRelationshipInjection, updateRelationshipWorldbookCacheFromLore } from './core/relationshipAnalysis';
+import { buildRelationshipInjection, injectRelationshipProfiles, removeRelationshipInjection, updateRelationshipWorldbookCacheFromLore } from './core/relationshipAnalysis';
 import {
   countContentTextLength,
   isValidMainContent,
@@ -51,9 +51,10 @@ import { useMainStore, type CapturedContent, type CharacterMemory, type GrandSum
 // ========== 新模块导入 ==========
 import { executeGrandSummaryV2 } from './core/grandSummaryV2';
 import { executeCharacterMemoryUpdate } from './core/characterMemoryUpdate';
-import { executeDynamicProfileV2, injectDynamicProfileV2, removeDynamicProfileV2Injection } from './core/dynamicProfileV2';
+import { buildDynamicProfileV2Injection, executeDynamicProfileV2, injectDynamicProfileV2, removeDynamicProfileV2Injection } from './core/dynamicProfileV2';
 import {
   buildWorldProgressEntryInjection,
+  buildWorldProgressInjection,
   createFailedWorldProgressRecord,
   executeWorldProgress,
   injectWorldProgress,
@@ -61,9 +62,9 @@ import {
   removeWorldProgressInjection,
   shouldTriggerWorldProgress,
 } from './core/worldProgress';
-import { injectPlotGuidance, executePlotCheck, removePlotInjection, shouldTriggerPlotCheck, advanceOutlineStage } from './core/plotDirector';
+import { buildDynamicGuidanceInjection, buildPlotGuidanceInjection, injectPlotGuidance, executePlotCheck, removePlotInjection, shouldTriggerPlotCheck, advanceOutlineStage } from './core/plotDirector';
 
-import { injectWorldBookTagIndex, removeWorldBookTagIndexInjection } from './core/worldBookTags';
+import { applySlotInjections, findPresentSlots, type ZhinoSlotKey } from './core/slotInjection';
 import { hydrateSelectedWorldBookEntries } from './core/worldBookSelection';
 import {
   countPendingAssistantContents,
@@ -1144,6 +1145,15 @@ $(() => {
     store._isRealChatMessage = true;
 
     const latestSummary = store.getLatestSummary();
+
+    // ═══════════════════════════════════════════════════════════
+    // 槽位探测 —— 预设里放了 <!--ZHINO_XXX--> 标记时优先走槽位注入
+    // 命中槽位的模块不再走锚点/depth 注入，而是把内容原地填进标记位置；
+    // 未命中的模块保持原逻辑（兼容没用新机制的预设）。详见 core/slotInjection.ts
+    // ═══════════════════════════════════════════════════════════
+    const presentSlots = findPresentSlots(completion.messages);
+    const slotTexts: Partial<Record<ZhinoSlotKey, string>> = {};
+
     const activatedEventNames = new Set<string>();
     const currentLastMessageId = (() => {
       try { return getLastMessageId(); } catch { return -1; }
@@ -1200,7 +1210,20 @@ $(() => {
           }
         }
 
-        injectNeuralChain(store, latestMemory, scanText, allNames, characterEntries, userName, sharedQueryEmb ?? undefined, sharedQueryText || undefined, preReranked);
+        // 槽位优先：预设里有 <!--ZHINO_MEMORY_CHAIN--> 就填槽位，否则走 depth 注入
+        if (presentSlots.has('memory_chain')) {
+          const currentCharsForSlot = scanCharacterNamesFromContent(scanText, allNames, characterEntries);
+          if (currentCharsForSlot.length > 0) {
+            const builtForSlot = buildNeuralChainInjection(
+              store, latestMemory, currentCharsForSlot, userName,
+              sharedQueryEmb ?? undefined, sharedQueryText || undefined, preReranked,
+            );
+            if (builtForSlot?.text) slotTexts.memory_chain = builtForSlot.text;
+          }
+          removeNeuralChainInjection(); // 清掉可能残留的旧句柄，避免与槽位重复注入
+        } else {
+          injectNeuralChain(store, latestMemory, scanText, allNames, characterEntries, userName, sharedQueryEmb ?? undefined, sharedQueryText || undefined, preReranked);
+        }
 
         // B4: 事件回忆注入 — 近期全注入 + 远期触发召回
         const timeline = store.getLatestSummary()?.timeline || [];
@@ -1377,19 +1400,31 @@ $(() => {
 
     // --- 大总结注入（每次生成请求时动态获取最新总结内容） ---
     if (store.settings.summaryInjectionEnabled && latestSummary && latestSummary.rawText) {
-      injectSummaryIntoCompletion(completion.messages, latestSummary, activatedEventNames, store);
+      if (presentSlots.has('grand_summary')) {
+        slotTexts.grand_summary = buildSummaryInjectionText(latestSummary, store as any, activatedEventNames);
+      } else {
+        injectSummaryIntoCompletion(completion.messages, latestSummary, activatedEventNames, store);
+      }
     }
 
     // --- 摘要替代层：已废弃（小总结不再注入正文） ---
 
     // --- 用户人设注入 ---
     if (store.settings.personaEnabled && store.persona.analyzedProfile) {
-      injectPersonaIntoCompletion(
-        completion.messages,
-        store.persona.analyzedProfile,
-        store.persona.rawInput,
-        store.getUserName(),
-      );
+      if (presentSlots.has('user_persona')) {
+        slotTexts.user_persona = buildPersonaInjection(
+          store.persona.analyzedProfile,
+          store.persona.rawInput,
+          store.getUserName(),
+        );
+      } else {
+        injectPersonaIntoCompletion(
+          completion.messages,
+          store.persona.analyzedProfile,
+          store.persona.rawInput,
+          store.getUserName(),
+        );
+      }
     }
 
     // --- 知识图谱注入 <world_graph>（塞在 </chathistory> 之后，与角色记忆/神经链同区）---
@@ -1436,7 +1471,14 @@ $(() => {
             topK: store.settings.kgInjectTopK || 8,
             perCharacterItemLimit: store.settings.kgPerCharacterItemLimit || 0,
           });
-          if (injectWorldGraphIntoCompletion(completion.messages, kgText)) {
+          if (presentSlots.has('world_graph')) {
+            slotTexts.world_graph = kgText;
+            removeWorldGraphInjection(); // 清掉旧句柄，避免与槽位重复注入
+            logInfo(
+              '图谱注入',
+              `已写入槽位 source=${useMainGraphForInjection ? 'main' : 'version'} graph=${kgForInjection.version} target=${currentGeneratingFloorKG}`,
+            );
+          } else if (injectWorldGraphIntoCompletion(completion.messages, kgText)) {
             logInfo(
               '图谱注入',
               `已写入本轮上下文 source=${useMainGraphForInjection ? 'main' : 'version'} graph=${kgForInjection.version} target=${currentGeneratingFloorKG}`,
@@ -1452,7 +1494,16 @@ $(() => {
 
     // --- 世界推进：无入场信息的场外动态注入 D0（在动态人设前） ---
     if (store.settings.worldProgressInjectionEnabled && store.chatData.worldProgressRecords.length > 0) {
-      injectWorldProgress(store.chatData.worldProgressRecords, currentGeneratingFloor, store.settings.worldProgressInterval);
+      if (presentSlots.has('world_state')) {
+        slotTexts.world_state = buildWorldProgressInjection(
+          store.chatData.worldProgressRecords,
+          currentGeneratingFloor,
+          store.settings.worldProgressInterval,
+        );
+        removeWorldProgressInjection();
+      } else {
+        injectWorldProgress(store.chatData.worldProgressRecords, currentGeneratingFloor, store.settings.worldProgressInterval);
+      }
     }
 
     // --- 动态人设注入（V2优先，旧版兜底） ---
@@ -1463,21 +1514,32 @@ $(() => {
       const uniqueNamesDP = Array.from(new Set(allNamesDP));
 
       if (store.chatData.dynamicProfilesV2.length > 0) {
-        // V2 版本注入
-        injectDynamicProfileV2(store.chatData.dynamicProfilesV2, scanText, uniqueNamesDP, dpEntries);
+        // V2 版本注入（槽位优先）
+        if (presentSlots.has('dynamic_profile')) {
+          slotTexts.dynamic_profile = buildDynamicProfileV2Injection(
+            store.chatData.dynamicProfilesV2, scanText, uniqueNamesDP, dpEntries,
+          );
+          removeDynamicProfileV2Injection();
+        } else {
+          injectDynamicProfileV2(store.chatData.dynamicProfilesV2, scanText, uniqueNamesDP, dpEntries);
+        }
       }
       // V1 动态人设已移除，V2 即为唯一路径
     }
 
 
-    // --- 世界书标签索引注入（用户手动绑定的 <tag> 含义表） ---
-    if (store.chatData.worldBookTagBindings?.length > 0) {
-      injectWorldBookTagIndex(store.chatData.worldBookTagBindings);
-    }
+    // --- 世界书标签索引注入：功能已废弃（2026-09-23 决定移除，槽位同步取消） ---
 
 	    // --- 剧情导演引导注入 ---
     if (store.settings.plotGuidanceInjectionEnabled && store.chatData.plotOutline?.status === 'active') {
-      injectPlotGuidance(store.chatData.plotOutline, store.chatData.lastPlotCheckResult);
+      if (presentSlots.has('plot_guidance')) {
+        slotTexts.plot_guidance = store.chatData.lastPlotCheckResult
+          ? buildDynamicGuidanceInjection(store.chatData.plotOutline, store.chatData.lastPlotCheckResult)
+          : buildPlotGuidanceInjection(store.chatData.plotOutline);
+        removePlotInjection();
+      } else {
+        injectPlotGuidance(store.chatData.plotOutline, store.chatData.lastPlotCheckResult);
+      }
     }
 
     // --- 关系档案注入（手动分析后的稳定关系设定） ---
@@ -1487,7 +1549,12 @@ $(() => {
       const relAllNames = relEntries.map(entry => entry.name);
       const relChars = scanCharacterNamesFromContent(relScanText, relAllNames, relEntries);
       if (relChars.length > 0) {
-        injectRelationshipProfiles(store.relationshipProfiles, relChars, store.getUserName());
+        if (presentSlots.has('relationship_profiles')) {
+          slotTexts.relationship_profiles = buildRelationshipInjection(store.relationshipProfiles, relChars, store.getUserName()) || '';
+          removeRelationshipInjection();
+        } else {
+          injectRelationshipProfiles(store.relationshipProfiles, relChars, store.getUserName());
+        }
       }
     }
 
@@ -1501,23 +1568,60 @@ $(() => {
         store.chatData.worldProgressAttempts ?? -1,
       );
       if (entryText) {
-        injectWorldProgressEntryIntoUserMessage(completion.messages, entryText);
+        if (presentSlots.has('world_entry_hint')) {
+          slotTexts.world_entry_hint = entryText;
+        } else {
+          injectWorldProgressEntryIntoUserMessage(completion.messages, entryText);
+        }
       }
     }
 
-    // --- 梦呓注入 ---
-    if (store.settings.dreamtalkInjectionEnabled && store.dreamtalk) {
-      injectDreamtalkIntoUserMessage(completion.messages, store);
+    // --- 梦呓注入（槽位优先） ---
+    if (store.settings.dreamtalkInjectionEnabled && store.dreamtalk && store._isRealChatMessage) {
+      if (presentSlots.has('dreamtalk')) {
+        let lastAssistantText = '';
+        let lastUserText = '';
+        for (let i = completion.messages.length - 1; i >= 0; i--) {
+          const m = completion.messages[i];
+          if (typeof m.content !== 'string') continue;
+          if (!lastAssistantText && m.role === 'assistant') lastAssistantText = m.content;
+          if (!lastUserText && m.role === 'user') lastUserText = m.content;
+          if (lastAssistantText && lastUserText) break;
+        }
+        const dtEntries = store.getCharacterNameEntries();
+        const dtChars = scanCharacterNamesFromContent(
+          lastAssistantText + lastUserText,
+          dtEntries.map(entry => entry.name),
+          dtEntries,
+        );
+        slotTexts.dreamtalk = buildDreamtalkInjection(store.dreamtalk, dtChars);
+      } else {
+        injectDreamtalkIntoUserMessage(completion.messages, store);
+      }
     }
 
-    // --- NSFW隔离层注入 ---
+    // --- NSFW隔离层注入（槽位优先） ---
     if (store.settings.nsfwIsolationEnabled && isNsfwActive()) {
       const scanText2 = latestScanText;
       const nsfwEntries = store.getCharacterNameEntries();
       const allNames2 = nsfwEntries.map(entry => entry.name);
       const currentChars = scanCharacterNamesFromContent(scanText2, Array.from(new Set(allNames2)), nsfwEntries);
-      injectNsfwData(store.nsfwMemories, store.nsfwDreamtalk, store.nsfwDynamicProfiles, currentChars);
+      if (presentSlots.has('nsfw_isolation')) {
+        slotTexts.nsfw_isolation = buildNsfwIsolationInjection(
+          store.nsfwMemories, store.nsfwDreamtalk, store.nsfwDynamicProfiles, currentChars,
+        );
+        removeNsfwInjection();
+      } else {
+        injectNsfwData(store.nsfwMemories, store.nsfwDreamtalk, store.nsfwDynamicProfiles, currentChars);
+      }
     }
+
+    // --- 槽位填充：把本轮收集到的文本写进预设标记的位置 ---
+    // 预设里有标记的模块走槽位；没标记的模块已在上面走各自的原逻辑（锚点/depth）
+    if (presentSlots.size > 0) {
+      applySlotInjections(completion.messages, slotTexts);
+    }
+
     // 重置真实聊天消息标记
     store._isRealChatMessage = false;
   });
@@ -2409,7 +2513,6 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
     removeNeuralChainInjection();
     removeNsfwInjection();
     removeRelationshipInjection();
-    removeWorldBookTagIndexInjection();
     removePlotInjection();
     logInfo('系统', '聊天切换，已释放注入句柄');
   });

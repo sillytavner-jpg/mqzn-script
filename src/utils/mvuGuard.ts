@@ -18,6 +18,8 @@
  * 没装 MVU 时 typeof Mvu === 'undefined'，零副作用。
  */
 
+import { stripResidualSlotMarkers } from '../core/slotInjection';
+
 /**
  * 智脑注入到上下文的标签块清单（开闭标签名）。
  * 这些是智脑各模块通过 injectPrompts 或直接改 messages 塞进上下文的标签，
@@ -34,9 +36,6 @@ const ZHINO_INJECTION_TAGS: string[] = [
   'memory_chain',
   'neural_chain',
   'world_graph',
-  'worldbook_tag_index',
-  'before_character_definition_tags',
-  'after_character_definition_tags',
   'grand_summary',
   'plot_guidance',
   'plot_check',
@@ -68,8 +67,6 @@ const ZHINO_INJECTION_LEAD_LINES: string[] = [
   '\\*\\*以下是当前场景相关的可用记忆链，正文创作时可自然引用这些记忆作为角色行为的依据：\\*\\*',
   // relationshipAnalysis.ts:611
   '\\*\\*以下是当前在场角色之间的稳定关系档案（已整理确认，直接作为角色互动的设定参考）：\\*\\*',
-  // worldBookTags.ts:186
-  '以下是用户手动绑定的世界书标签索引。看到同名标签时，优先按这里的含义召回对应设定；索引用于辅助思考，不要直接输出。',
   // worldGraphInject.ts:491
   '当前场景图谱（保持地点、物品归属和可用性一致）：',
   // plotDirector.ts:391 / 572
@@ -155,9 +152,10 @@ export function stripZhinoInjectionsFromCompletion(completion: any): boolean {
 
   const cleanContent = (content: string): string => {
     if (typeof content !== 'string' || !content.includes('<') && !/[*\u4e00-\u9fa5]/.test(content)) return content;
-    // 先删标签块，再删标签外引导句，最后压多余空行
+    // 先删标签块，再删标签外引导句，最后清残留槽位标记、压多余空行
     let cleaned = content.replace(blockRe, '');
     cleaned = cleaned.replace(leadRe, '');
+    cleaned = stripResidualSlotMarkers(cleaned);
     cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
     return cleaned;
   };

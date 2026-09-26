@@ -174,66 +174,9 @@ export async function applyWorldBookTagBindings(bindings: WorldBookTagBinding[])
   return { ok: errors.length === 0, applied, errors };
 }
 
-export function buildWorldBookTagIndex(bindings: WorldBookTagBinding[]): string {
-  const active = (bindings || []).filter(b => b.tagName && b.meaning);
-  if (active.length === 0) return '';
+// ============================================================
+// 以下「标签索引注入」相关代码已于 2026-09-23 移除
+// （原 <worldbook_tag_index> 注入 + 对应槽位 <!--ZHINO_WORLDBOOK_TAG_INDEX-->）
+// 保留上面的绑定写回能力供 NPC 小传复用。
+// ============================================================
 
-  const world = active.filter(b => b.kind === 'world');
-  const characters = active.filter(b => b.kind === 'character');
-  const lines: string[] = [];
-
-  lines.push('<worldbook_tag_index>');
-  lines.push('以下是用户手动绑定的世界书标签索引。看到同名标签时，优先按这里的含义召回对应设定；索引用于辅助思考，不要直接输出。');
-
-  if (world.length > 0) {
-    lines.push('');
-    lines.push('<before_character_definition_tags>');
-    for (const binding of world) {
-      lines.push(`- <${binding.tagName}>：${binding.meaning}`);
-    }
-    lines.push('</before_character_definition_tags>');
-  }
-
-  if (characters.length > 0) {
-    lines.push('');
-    lines.push('<after_character_definition_tags>');
-    for (const binding of characters) {
-      const owner = binding.characterName ? `${binding.characterName}；` : '';
-      lines.push(`- <${binding.tagName}>：${owner}${binding.meaning}`);
-    }
-    lines.push('</after_character_definition_tags>');
-  }
-
-  lines.push('</worldbook_tag_index>');
-  return lines.join('\n');
-}
-
-let currentWorldBookTagIndexInjection: { uninject: () => void } | null = null;
-
-export function injectWorldBookTagIndex(bindings: WorldBookTagBinding[]): void {
-  if (currentWorldBookTagIndexInjection) {
-    currentWorldBookTagIndexInjection.uninject();
-    currentWorldBookTagIndexInjection = null;
-  }
-
-  const content = buildWorldBookTagIndex(bindings);
-  if (!content) return;
-
-  currentWorldBookTagIndexInjection = injectPrompts([
-    {
-      id: 'zhino_worldbook_tag_index',
-      position: 'in_chat',
-      depth: 0,
-      role: 'system',
-      content,
-      should_scan: false,
-    },
-  ]);
-}
-
-export function removeWorldBookTagIndexInjection(): void {
-  if (currentWorldBookTagIndexInjection) {
-    currentWorldBookTagIndexInjection.uninject();
-    currentWorldBookTagIndexInjection = null;
-  }
-}

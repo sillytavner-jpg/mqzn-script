@@ -201,7 +201,7 @@ const ExtractSchema = z.object({
  */
 function buildExtractInstruction(entriesText: string, userName: string): string {
   return [
-    `${userName}: 秋青子，现在需要你做一项「角色名录提取」任务。`,
+    `${userName}: 现在需要你做一项「角色名录提取」任务。`,
     '',
     '## 输入材料说明（重要）',
     '',

@@ -60,7 +60,7 @@ ${rawInput}
     max_chat_history: 0,
   });
 
-  const cleaned = result.trim().replace(/^Qiuqingzi[:：]\s*/i, '');
+  const cleaned = result.trim().replace(/^(?:Qiuqingzi|小左|小右|小爱|前额叶)\s*[:：]\s*/i, '');
   return replaceUserReferences(cleaned, userName);
 }
 
