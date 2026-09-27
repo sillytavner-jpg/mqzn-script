@@ -12,6 +12,8 @@ import { callGenerateRaw } from '../utils/apiCaller';
 import { logInfo } from '../utils/logger';
 import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { GrandSummaryV2Schema } from '../utils/schemas';
+import { patchToGrandSummaryEvents } from './timelinePatchBridge';
+import { parsePatchArray } from '../utils/stateDoc';
 
 // ======== 破限常量（通用） ==========
 
@@ -58,9 +60,24 @@ export function annotateTimeDist(eventTime: string, currentTime: string): string
 
 // ======== 提示词构建 ==========
 
+/** webpack 环境下 `require` 由运行时提供（项目未装 @types/node） */
+declare const require: (id: string) => any;
+
+/** 是否启用 patch 输出（灰度开关，缺省关 → 走旧的全量 JSON） */
+function isPatchEnabled(): boolean {
+  try {
+    const mod = require('../stores/mainStore');
+    const store = mod.useMainStore ? mod.useMainStore() : null;
+    return store?.settings?.statePatchEnabled?.grand_summary === true;
+  } catch {
+    return false;
+  }
+}
+
 function buildGrandSummaryInstruction(
   previousSummaryText: string | undefined,
   userName: string,
+  usePatch = false,
 ): string {
   const parts: string[] = [
     `${userName}: 现在需要你把以下剧情内容整理为完整连续时间线。`,
@@ -84,23 +101,37 @@ function buildGrandSummaryInstruction(
     '',
 '## 输出格式',
 '',
-'在<thinking>中思考后，输出以下JSON格式（用```json```代码块包裹）：',
-'',
-'```json',
-'{',
-'  "events": [',
-'    {',
-'      "time": "2025年2月5日晨",',
-'      "location": "咖啡馆",',
-'      "presentCharacters": ["疏影"],',
-'      "summary": "1-2句速览",',
-'      "event": "完整经过。5级4-6句(≤150字)/4级3-5句(≤120字)/3级2-4句(≤80字)/2级1-3句(≤60字)/1级1-2句(≤40字)。起因→经过→结果。保留关键对话原文用「」括起。禁止心理描写和修辞比喻。",',
-'      "importance": 1-5,',
-'      "keywords": ["关键词1","关键词2"]',
-'    }',
-'  ]',
-'}',
-'```',
+...(usePatch
+  ? [
+      '**先写最多 3 行人话说明**（只列关键变化），再输出增量补丁。',
+      '',
+      '```json 代码块，数组，**紧凑单行输出、禁止缩进换行美化**：',
+      '[{"op":"set","path":"/timeline/1","value":{"time":"2025年2月5日晨","location":"咖啡馆","presentCharacters":["疏影"],"summary":"1-2句速览","event":"完整经过。5级4-6句(≤150字)/4级3-5句(≤120字)/3级2-4句(≤80字)/2级1-3句(≤60字)/1级1-2句(≤40字)。起因→经过→结果。保留关键对话原文用「」括起。禁止心理描写和修辞比喻。","importance":4,"keywords":["关键词1","关键词2"]}}]',
+      '```',
+      '',
+      '**路径规范**：`/timeline/{序号}`，序号从 1 开始、按事件时间顺序递增。',
+      '- 每条事件一个 set，不要输出空事件。',
+      '- 与下面时间格式规则、铁律同时生效。',
+    ]
+  : [
+      '在<thinking>中思考后，输出以下JSON格式（用```json```代码块包裹）：',
+      '',
+      '```json',
+      '{',
+      '  "events": [',
+      '    {',
+      '      "time": "2025年2月5日晨",',
+      '      "location": "咖啡馆",',
+      '      "presentCharacters": ["疏影"],',
+      '      "summary": "1-2句速览",',
+      '      "event": "完整经过。5级4-6句(≤150字)/4级3-5句(≤120字)/3级2-4句(≤80字)/2级1-3句(≤60字)/1级1-2句(≤40字)。起因→经过→结果。保留关键对话原文用「」括起。禁止心理描写和修辞比喻。",',
+      '      "importance": 1-5,',
+      '      "keywords": ["关键词1","关键词2"]',
+      '    }',
+      '  ]',
+      '}',
+      '```',
+    ]),
     '',
     '## 时间格式规则',
     '',
@@ -219,7 +250,17 @@ function parseGrandSummaryOutput(rawText: string): GrandSummaryV2Event[] {
   const cleaned = text.replace(/<\/?thinking>/gi, '').replace(/<\/?grand_summary>/gi, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '').trim();
   const jsonText = extractJson(cleaned);
   if (jsonText) {
-    const data = safeJsonParse(jsonText, GrandSummaryV2Schema);
+    let data: any = safeJsonParse(jsonText, GrandSummaryV2Schema);
+
+    // ★ patch 格式（数组）→ 翻译成 events 数组，复用下面的 map 归一逻辑
+    if (!data) {
+      const lenient = parsePatchArray(jsonText, '大总结');
+      if (lenient) {
+        const { events: bridged } = patchToGrandSummaryEvents(lenient.ops as any);
+        if (bridged) data = { events: bridged };
+      }
+    }
+
     if (data?.events?.length > 0) {
       const events: any[] = data.events;
       return events.map((e: any) => ({
@@ -302,7 +343,7 @@ export async function executeGrandSummaryV2(
     throw new Error('没有可总结的正文，无法生成大总结');
   }
 
-  const instruction = buildGrandSummaryInstruction(previousSummaryText, userName);
+  const instruction = buildGrandSummaryInstruction(previousSummaryText, userName, isPatchEnabled());
   const inputMaterial = buildInputMaterial(capturedContents);
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [

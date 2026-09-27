@@ -7,10 +7,7 @@
 
 import { useMainStore, type ApiConfig } from '../stores/mainStore';
 import { logError } from '../utils/logger';
-import {
-  applyJailbreakOverrideToOrderedPrompts,
-  applyJailbreakOverrideToUserInput,
-} from './jailbreakPrompts';
+import { isFlashMode, buildFlashTail } from './jailbreakIdentity';
 
 // 模块级 API 失败追踪（供 enqueueSourceChangeReconcile 等模块查询系统稳定性）
 let _lastApiFailureTime = 0;
@@ -127,10 +124,65 @@ export async function callGenerateRaw(params: GenerateRawParams): Promise<string
   throw lastError;
 }
 
+/**
+ * flash 模式的破限投放 —— 两件事：
+ *
+ *  ① **摘掉末尾的 assistant prefill（卡思维链）**
+ *     智脑各模块原本都以 `{role:'assistant', content:'<thinking>'}` 收尾，
+ *     用「已经替它开了个头」的方式把模型按进思维链里。
+ *     这招对老模型好使，但对 3.7f / 3.8f 这类自带推理机制的新模型是有害的 ——
+ *     强行替它起头会**劫持它的原生思维链**，所以 flash 模式绝对不能加。
+ *     （预设里那条 prefill 的 identifier 就叫 `cot_hijack`，标注为「3.1 Pro 破限」）
+ *
+ *  ② **把「重申 + 输出契约」压到最末**
+ *     位置对应预设里的 jb_tail / output_contract（排在第 62/63 位，紧贴输出点）。
+ *     不再靠 prefill 起头，改由契约文本约束它自己以 `<thinking>` 开头。
+ *
+ * legacy 模式原样返回（老模型继续吃 prefill 这一套）。
+ */
+function applyFlashJailbreak(
+  prompts: Array<OrderedPrompt | 'user_input'>,
+): Array<OrderedPrompt | 'user_input'> {
+  if (!isFlashMode()) return prompts;
+  const tail = buildFlashTail();
+  if (!tail) return prompts;
+
+  const next = [...prompts];
+
+  // ① 摘掉末尾的 assistant prefill（只在它确实位于最末时动手）
+  let lastIdx = -1;
+  for (let i = next.length - 1; i >= 0; i--) {
+    if (next[i] !== 'user_input') {
+      lastIdx = i;
+      break;
+    }
+  }
+  if (lastIdx >= 0) {
+    const last = next[lastIdx];
+    if (last !== 'user_input' && last.role === 'assistant') {
+      next.splice(lastIdx, 1);
+    }
+  }
+
+  // ② 尾部破限压到最末
+  next.push({ role: 'system', content: tail });
+  return next;
+}
+
+/** 把 prompt 里的 {{user}} 换成实际玩家名（酒馆不会替脚本注入的文本做宏替换） */
+function fillUserToken(prompts: Array<OrderedPrompt | 'user_input'>, userName: string): void {
+  if (!userName) return;
+  for (const p of prompts) {
+    if (p === 'user_input') continue;
+    if (p.content.includes('{{user}}')) {
+      p.content = p.content.replace(/\{\{user\}\}/g, userName);
+    }
+  }
+}
+
 /** callGenerateRaw 的单次执行体 */
 async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
   const store = useMainStore();
-  const settings = store.settings;
 
   const apiConfig = getApiConfigForType(params._analysisType);
   if (!apiConfig || !apiConfig.url || !apiConfig.key) {
@@ -139,18 +191,15 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
 
   const modelName = apiConfig.model || '';
   const userName = typeof store.getUserName === 'function' ? store.getUserName() : '{{user}}';
-  const customizedPrompts = applyJailbreakOverrideToOrderedPrompts(
-    params.ordered_prompts,
-    params._analysisType,
-    (settings as any).jailbreakOverrides,
-    userName,
-  );
-  const orderedPrompts = adaptClaudePrefill(customizedPrompts, modelName);
-  const userInput = applyJailbreakOverrideToUserInput(
-    params.user_input,
-    params._analysisType,
-    (settings as any).jailbreakOverrides,
-  );
+  // 破限词固定由「总览界面 → 破限词」的模式开关（legacy / flash）决定，
+  // 不再支持逐分析类型的自定义覆盖（「自定义破限词」入口已下线）。
+  const basePrompts = [...params.ordered_prompts];
+  // flash 破限：① 摘掉末尾卡思维链的 prefill ② 末尾压「重申 + 输出契约」
+  const tailedPrompts = applyFlashJailbreak(basePrompts);
+  // 破限段里的 {{user}} 是脚本字面量，酒馆不会替我们替换，这里补上
+  fillUserToken(tailedPrompts, userName);
+  const orderedPrompts = adaptClaudePrefill(tailedPrompts, modelName);
+  const userInput = params.user_input;
   const messages = buildOpenAIMessages(orderedPrompts, userInput);
   const apiUrl = normalizeApiUrl(apiConfig.url.trim());
 

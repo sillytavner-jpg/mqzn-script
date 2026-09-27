@@ -17,6 +17,8 @@ import { formatThinkingChainForAnalysis } from '../utils/messageParser';
 import { normalizeStoryTime } from '../utils/storyTime';
 import { logInfo } from '../utils/logger';
 import { buildBlacklistReminder } from '../utils/characterNames';
+import { patchToCharacterMemoryData } from './castPatchBridge';
+import { parsePatchArray } from '../utils/stateDoc';
 
 // ========== 破限常量（通用） ==========
 
@@ -33,10 +35,28 @@ const ASSISTANT_PREFILL = '<thinking>';
 
 // ========== 提示词构建 ==========
 
+/** webpack 环境下 `require` 由运行时提供（项目未装 @types/node） */
+declare const require: (id: string) => any;
+
+/**
+ * 是否启用 patch 输出（灰度开关，缺省关 → 走旧的全量 JSON）。
+ * 惰性读 store，避开与 mainStore 的循环依赖；读不到一律按「关」处理。
+ */
+function isPatchEnabled(): boolean {
+  try {
+    const mod = require('../stores/mainStore');
+    const store = mod.useMainStore ? mod.useMainStore() : null;
+    return store?.settings?.statePatchEnabled?.character_memory === true;
+  } catch {
+    return false;
+  }
+}
+
 function buildCharacterMemoryInstruction(
   userName: string,
   memoryMin: number,
   memoryMax: number,
+  usePatch = false,
 ): string {
   const coreMax = Math.max(1, Math.ceil(memoryMax / 3));
   return [
@@ -74,32 +94,49 @@ function buildCharacterMemoryInstruction(
     '',
     '## 输出格式',
     '',
-    '用以下JSON格式输出（用```json```代码块包裹）：',
-    '',
-    '```json',
-    '{',
-    '  "characterMemories": [',
-    '    {',
-    '      "characterName": "角色正式名称",',
-    '      "aliases": ["别名"],',
-    '      "attitude": "like|dislike|neutral",',
-    '      "keywords": ["关键词"],',
-    '      "memories": [{"date": "剧情日期", "content": "角色第一人称记忆"}],',
-    '      "coreReasons": ["标准1,3：原因", ...],',
-    '      "coreIndices": [1, 3]',
-    '    }',
-    '  ],',
-    '  "nsfwMemories": [',
-    '    {',
-    '      "characterName": "角色名",',
-    '      "sensitivePoints": ["敏感点"],',
-    '      "preferences": ["偏好"],',
-    '      "behaviors": ["行为模式"],',
-    '      "memories": ["NSFW记忆"]',
-    '    }',
-    '  ]',
-    '}',
-    '```',
+    ...(usePatch
+      ? [
+          '**先写最多 3 行人话说明**（只列关键变化），再输出增量补丁。',
+          '',
+          '```json 代码块，数组，**紧凑单行输出、禁止缩进换行美化**：',
+          '[{"op":"set","path":"/cast/角色正式名/memory","value":{"attitude":"like|dislike|neutral","keywords":["关键词"],"memories":[{"date":"剧情日期","content":"角色第一人称记忆","core":true}],"coreReasons":["标准1,3：原因"]}},{"op":"set","path":"/cast/角色名/nsfw","value":{"sensitivePoints":["敏感点"],"preferences":["偏好"],"behaviors":["行为模式"],"memories":["NSFW记忆"]}}]',
+          '```',
+          '',
+          '**路径只有这两种**：`/cast/{角色正式名}/memory`、`/cast/{角色名}/nsfw`。',
+          '- 角色名必须用**正式名**，不许写别名。',
+          '- **核心记忆用该条 `memories` 里的 `"core": true` 标记**（`core` 可省略，省略即非核心）。**不要再用编号/索引表示核心**，避免歧义。',
+          '- **本轮没有记忆变化的角色，整条省略**（未提及 = 不变）；无 NSFW 内容时省略 `/nsfw` 条目。',
+          '- 全部无变化时输出空数组 `[]`。',
+          '- 与下面旧格式冲突时，以本段为准。',
+        ]
+      : [
+          '用以下JSON格式输出（用```json```代码块包裹）：',
+          '',
+          '```json',
+          '{',
+          '  "characterMemories": [',
+          '    {',
+          '      "characterName": "角色正式名称",',
+          '      "aliases": ["别名"],',
+          '      "attitude": "like|dislike|neutral",',
+          '      "keywords": ["关键词"],',
+          '      "memories": [{"date": "剧情日期", "content": "角色第一人称记忆"}],',
+          '      "coreReasons": ["标准1,3：原因", ...],',
+          '      "coreIndices": [1, 3]',
+          '    }',
+          '  ],',
+          '  "nsfwMemories": [',
+          '    {',
+          '      "characterName": "角色名",',
+          '      "sensitivePoints": ["敏感点"],',
+          '      "preferences": ["偏好"],',
+          '      "behaviors": ["行为模式"],',
+          '      "memories": ["NSFW记忆"]',
+          '    }',
+          '  ]',
+          '}',
+          '```',
+        ]),
     '',
     '（作为过渡期，也接受以下旧格式——仍可用<character_memory>标签，每个角色用 === 分隔：）',
     '',
@@ -243,7 +280,18 @@ function parseCharacterMemoryOutput(rawText: string, userName: string): Characte
   const cleaned = text.replace(/<\/?thinking>/gi, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '').trim();
   const jsonText = extractJson(cleaned);
   if (jsonText) {
-    const data = safeJsonParse(jsonText, CharacterMemoryUpdateSchema);
+    let data = safeJsonParse(jsonText, CharacterMemoryUpdateSchema);
+
+    // ★ patch 格式（数组）→ 翻译成与全量相同的 data 形状，复用下面的转换逻辑
+    //    用 parsePatchArray 宽容解析：输出被截断时也能救回前面的条目（防掉格式）
+    if (!data) {
+      const lenient = parsePatchArray(jsonText, '角色记忆');
+      if (lenient) {
+        const { data: bridged } = patchToCharacterMemoryData(lenient.ops as any);
+        if (bridged) data = bridged as any;
+      }
+    }
+
     if (data?.characterMemories?.length > 0) {
       return {
         characterMemories: data.characterMemories.map((m: any) => {
@@ -438,7 +486,7 @@ export async function executeCharacterMemoryUpdate(
     throw new Error('没有可用的正文日志');
   }
 
-  const instruction = buildCharacterMemoryInstruction(userName, memoryMin, memoryMax);
+  const instruction = buildCharacterMemoryInstruction(userName, memoryMin, memoryMax, isPatchEnabled());
   const inputMaterial = buildInputMaterial(capturedContents, existingMemories, blacklistedNames);
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [

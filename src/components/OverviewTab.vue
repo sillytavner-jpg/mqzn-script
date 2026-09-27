@@ -25,6 +25,8 @@ import { executeSmallSummary, type SmallSummaryKgOptions } from '../core/smallSu
 import { createEmptyKnowledgeGraph, applyKnowledgeGraphDiff } from '../core/knowledgeGraph';
 import { cleanCharacterAliases } from '../utils/characterNames';
 import { isValidMainContent } from '../utils/messageParser';
+import { getRecentPatchIssues } from '../utils/stateDoc';
+import { adaptCurrentPresetInTavern } from '../core/presetAdapter';
 import BatchSummaryPanel from './BatchSummaryPanel.vue';
 import SchedulerPanel from './SchedulerPanel.vue';
 import { useIsMobile } from '../composables/useIsMobile';
@@ -43,6 +45,61 @@ const charCardName = computed(() => {
   } catch { /* ignore */ }
   return '—';
 });
+
+// ── 破限词模式切换 ──
+// legacy = 老模型（身份框架 + 认可式）
+// flash  = 3.7f / 3.8f（尾部额外压一条「输出契约」，压制开场白与确认语）
+type JailbreakMode = 'legacy' | 'flash';
+const jailbreakMode = computed<JailbreakMode>(() => {
+  const m = (store.settings as any).jailbreakMode;
+  return m === 'flash' ? 'flash' : 'legacy';
+});
+function setJailbreakMode(mode: JailbreakMode) {
+  if (jailbreakMode.value === mode) return;
+  store.updateSettings({ jailbreakMode: mode } as any);
+  logInfo('破限词', `已切换到「${mode === 'flash' ? '3.7 / 8F 破限' : '老模型破限'}」`);
+}
+
+// ── 输出模式：输出结构 MUV 化（一个总开关）──
+// 默认启用三个输出量最大的模块（与 mainStore 的 prefault 保持一致）
+const MUV_DEFAULT_MODULES: Record<string, boolean> = {
+  small_summary: true,
+  grand_summary: true,
+  character_memory: true,
+};
+const statePatchOn = computed(() => {
+  const m = (store.settings as any).statePatchEnabled || {};
+  return Object.values(m).some(Boolean);
+});
+function toggleStatePatchAll() {
+  const on = statePatchOn.value;
+  store.updateSettings({ statePatchEnabled: on ? {} : { ...MUV_DEFAULT_MODULES } } as any);
+  logInfo('输出模式', on ? '已切回完整输出' : '已切到 MUV 化输出');
+}
+
+// patch 异常提示：只展示最近一小时内「丢过条目 / 输出被截断」的轮次
+const recentPatchIssues = computed(() => getRecentPatchIssues(store.chatData));
+
+// ── 预设适配：把智脑槽位条目一键插进「当前使用的预设」──
+const adaptingPreset = ref(false);
+const adaptResult = ref('');
+const adaptOk = ref(false);
+async function adaptPreset() {
+  if (adaptingPreset.value) return;
+  adaptingPreset.value = true;
+  adaptResult.value = '';
+  try {
+    const r = await adaptCurrentPresetInTavern();
+    adaptOk.value = r.ok;
+    adaptResult.value = r.message;
+    logInfo('预设适配', r.message);
+  } catch (e: any) {
+    adaptOk.value = false;
+    adaptResult.value = `适配失败：${e?.message || e}`;
+  } finally {
+    adaptingPreset.value = false;
+  }
+}
 
 // 大总结引导弹窗（直接调用 store 方法，store.requestSummaryGuidance）
 
@@ -814,6 +871,61 @@ async function triggerFloorSummary() {
       </div>
     </div>
 
+    <!-- 智脑设置：破限词 / 输出模式 / 预设适配（一行横排） -->
+    <div class="zhino-section zhino-icon-section">
+      <div class="zhino-section-title">
+        <svg class="zhino-section-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="3.2"/></svg>
+        智脑设置
+      </div>
+
+      <div class="zhino-toolbar">
+        <div class="zhino-tool">
+          <div class="zhino-tool-label">破限词</div>
+          <div class="zhino-seg">
+            <button :class="{ 'zhino-seg-on': jailbreakMode === 'legacy' }" @click="setJailbreakMode('legacy')">老模型</button>
+            <button :class="{ 'zhino-seg-on': jailbreakMode === 'flash' }" @click="setJailbreakMode('flash')">3.7 / 8F</button>
+          </div>
+        </div>
+
+        <div class="zhino-tool">
+          <div class="zhino-tool-label">输出模式</div>
+          <button
+            class="zhino-btn-sm"
+            :class="{ 'zhino-btn-mode-on': statePatchOn }"
+            @click="toggleStatePatchAll"
+          >{{ statePatchOn ? 'MUV 化 · 开' : 'MUV 化 · 关' }}</button>
+        </div>
+
+        <div class="zhino-tool">
+          <div class="zhino-tool-label">预设适配</div>
+          <button class="zhino-btn-sm" :disabled="adaptingPreset" @click="adaptPreset">
+            {{ adaptingPreset ? '适配中…' : '适配当前预设' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="zhino-mode-note">
+        输出模式：输出结构 MUV 化 —— 只输出变化的部分（更省 token、未提及的字段不会被改写，且输出被截断时前面的条目仍能保住）。<br>
+        预设适配：把智脑槽位条目插进「当前预设」的合适位置，生成一个「原名（智脑适配）」的新预设，不改动原预设。
+      </div>
+
+      <!-- patch 异常提示：只有真出问题时才出现 -->
+      <div v-if="recentPatchIssues.length" class="zhino-patch-warn">
+        <div class="zhino-patch-warn-title">⚠️ 最近有 {{ recentPatchIssues.length }} 轮出现补丁异常</div>
+        <div v-for="(it, i) in recentPatchIssues.slice(-3)" :key="i" class="zhino-patch-warn-row">
+          <b>{{ it.module }}</b>：{{ it.skipReasons.join('；') }}
+        </div>
+        <div class="zhino-mode-note" style="margin-top:4px">若反复出现，建议先关掉输出模式并反馈。</div>
+      </div>
+
+      <!-- 适配结果 -->
+      <div
+        v-if="adaptResult"
+        class="zhino-mode-note"
+        :style="{ color: adaptOk ? 'rgba(var(--zn-accent-rgb), 1)' : 'rgba(var(--zn-warn-rgb), 1)', opacity: 1, marginTop: '6px' }"
+      >{{ adaptResult }}</div>
+    </div>
+
     <!-- 已激活角色 -->
     <div class="zhino-section zhino-icon-section">
       <div class="zhino-section-title">
@@ -1196,6 +1308,95 @@ async function triggerFloorSummary() {
 }
 .zhino-btn-warn:hover:not(:disabled) {
   background: rgba(245, 158, 11, 0.12);
+}
+
+/* 破限词模式：当前选中的那一个 */
+.zhino-btn-mode-on {
+  border-color: rgba(var(--zn-accent-rgb), 0.45);
+  color: rgba(var(--zn-accent-rgb), 1);
+  background: rgba(var(--zn-accent-rgb), 0.12);
+}
+.zhino-btn-mode-on:hover {
+  background: rgba(var(--zn-accent-rgb), 0.18);
+  color: rgba(var(--zn-accent-rgb), 1);
+}
+.zhino-mode-note {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--zn-text-regular);
+  opacity: 0.72;
+}
+.zhino-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--zn-text-regular);
+  cursor: pointer;
+}
+.zhino-check-row input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  accent-color: rgb(var(--zn-accent-rgb));
+  cursor: pointer;
+}
+/* 智脑设置：一行横排的工具条 */
+.zhino-toolbar {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.zhino-tool {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.zhino-tool-label {
+  font-size: 11px;
+  color: var(--zn-text-regular);
+  opacity: 0.75;
+}
+.zhino-seg {
+  display: inline-flex;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.zhino-seg button {
+  padding: 4px 10px;
+  font-size: 11px;
+  border: 0;
+  background: var(--zn-bg-surface2);
+  color: var(--zn-text-regular);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.zhino-seg button + button {
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+.zhino-seg button.zhino-seg-on {
+  background: rgba(var(--zn-accent-rgb), 0.15);
+  color: rgba(var(--zn-accent-rgb), 1);
+}
+.zhino-patch-warn {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(var(--zn-warn-rgb), 0.3);
+  border-radius: 6px;
+  background: rgba(var(--zn-warn-rgb), 0.08);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.zhino-patch-warn-title {
+  font-weight: 600;
+  color: rgba(var(--zn-warn-rgb), 1);
+  margin-bottom: 4px;
+}
+.zhino-patch-warn-row {
+  color: var(--zn-text-regular);
+  opacity: 0.85;
 }
 
 .zhino-sub-control {

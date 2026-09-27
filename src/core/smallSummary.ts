@@ -20,6 +20,8 @@ import {
 } from './knowledgeGraph';
 import { getEmbedding } from './embedding';
 import { KnowledgeGraphDiffSchema } from '../utils/schemas';
+import { patchToGraphDiff } from './graphPatchBridge';
+import { parsePatchArray } from '../utils/stateDoc';
 import { z } from 'zod';
 import { logInfo, logWarn, logError } from '../utils/logger';
 import { buildBlacklistReminder } from '../utils/characterNames';
@@ -74,6 +76,23 @@ export interface PreviousRoundContext {
   items?: Array<{ name: string; owner?: string; location?: string; status?: string }>;
 }
 
+/** webpack 环境下 `require` 由运行时提供（项目未装 @types/node） */
+declare const require: (id: string) => any;
+
+/**
+ * 是否启用 patch 输出（灰度开关，缺省关 → 走旧的全量 JSON）。
+ * 惰性读 store，避开与 mainStore 的循环依赖；读不到一律按「关」处理。
+ */
+function isSmallSummaryPatchEnabled(): boolean {
+  try {
+    const mod = require('../stores/mainStore');
+    const store = mod.useMainStore ? mod.useMainStore() : null;
+    return store?.settings?.statePatchEnabled?.small_summary === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 构建小总结提示词：记录场景信息 + 图谱增量（含人物）+ 世界推进材料。
  * 提示词按统一结构排列：任务说明 → 记录规则 → 输入材料 → 图谱摘要 → 思考要求 → 输出格式。
@@ -86,6 +105,7 @@ function buildInstruction(
   worldProgressMaterial?: string,
   blacklistedNames?: string[],
   aiThinkingChain?: string,
+  usePatch = false,
 ): string {
   // 黑名单提醒：本次不要记录黑名单角色（图谱人物/在场/互动均不含）
   const blacklistReminder = buildBlacklistReminder(
@@ -248,6 +268,37 @@ function buildInstruction(
   lines.push('');
   lines.push('## 输出格式');
   lines.push('');
+  if (usePatch) {
+    lines.push('**分两段输出。**');
+    lines.push('');
+    lines.push('### 第一段：人话说明（**最多 3 行**，只写关键变化）');
+    lines.push('');
+    lines.push('变：<中文路径名> → <简述>');
+    lines.push('不变：其余字段');
+    lines.push('');
+    lines.push('### 第二段：增量补丁');
+    lines.push('');
+    lines.push('```json 代码块，数组，**紧凑单行输出、禁止缩进换行美化**。只写变化的部分；未提及 = 不变；零变更输出 `[]`。');
+    lines.push('顺序：先 loc，再 edge，再 char，最后 item 与 /world/present。');
+    lines.push('');
+    lines.push('```json');
+    lines.push('[{"op":"set","path":"/graph/loc/新地点名","value":{"brief":"≤60字描述","aliases":[]}},{"op":"set","path":"/graph/edge/{type}:{from}>{to}","value":{"type":"contains|connected","from":"起点","to":"终点","detail":"仅connected填"}},{"op":"set","path":"/graph/char/角色名","value":"所在地点名"},{"op":"set","path":"/graph/item/物品名","value":{"brief":"≤60字描述（不写数量）","quantity":"1把","owner":"静态所有权（仅易主时改）","location":"当前动态位置","status":"owned|held|worn|carried|placed|stored|lost","statusDetail":"位置细节","consumed":false}},{"op":"set","path":"/graph/item/物品名.单字段名","value":"该字段的新值"},{"op":"del","path":"/graph/item/物品名"},{"op":"set","path":"/world/present","value":["角色名"]}]');
+    lines.push('```');
+    lines.push('');
+    lines.push('### 路径只有这几种（禁止自创）');
+    lines.push('');
+    lines.push('- `/graph/loc/{地点名}` —— 地点节点，value 是对象；用正式名，别名放 aliases。');
+    lines.push('- `/graph/char/{角色名}` —— **人物位置：value 直接写地点名字符串**，如 `"月微居偏房"`。');
+    lines.push('- `/graph/item/{物品名}` —— 物品节点；**只改一个字段时必须写子路径** `/graph/item/{物品名}.{字段}`（如 `/graph/item/破陶罐.owner`），禁止重写整个物品。');
+    lines.push('  瞬时持有态降级（在场但正文没再写其持有方式的 held/worn/carried 物品）→ 三条子路径：`.status` 与 `.statusDetail` 置空串、`.location` 设为原持有者名。不在场的由代码端兜底。');
+    lines.push('- `/graph/edge/{type}:{from}>{to}` —— 地点关系边。');
+    lines.push('- `/world/present` —— 本轮实际出场并互动的角色（含' + userName + '）。');
+    lines.push('');
+    lines.push('### 铁律');
+    lines.push('');
+    lines.push('- 只改一个字段必须写子路径；未提及 = 不变；零变更输出 `[]`。');
+    lines.push('- location 只能用本轮新增或已有清单里的正式地名，禁止自创或父·子拼接。');
+  } else {
   lines.push('在 <thinking> 中按上述三步思考后，输出一段 ```json``` 代码块。');
   lines.push('**add 内顺序务必与思考顺序一致：先 locations（含 edges），再 characters，最后 items。**');
   lines.push('');
@@ -272,6 +323,7 @@ lines.push('      "items": [{"name":"物品名","brief":"≤60字基本描述（
   lines.push('  "interactingCharacters": ["角色名（含' + userName + '），只列出本轮出场并说话/动作/被直接互动的角色，不要求有位置证据"]');
   lines.push('}');
   lines.push('```');
+  }
 
   return lines.join('\n');
 }
@@ -313,6 +365,47 @@ function parseOutput(rawText: string): ParsedOutput {
   if (jsonText) {
     let parsed: any = null;
     try { parsed = JSON.parse(jsonText); } catch { /* ignore */ }
+    // ★ 宽容解析：输出被截断时也能救回前面的条目（防掉格式）
+    if (!parsed) {
+      const lenient = parsePatchArray(jsonText, '小总结');
+      if (lenient) parsed = lenient.ops;
+    }
+
+    // ★ patch 格式（数组）→ 用 bridge 翻译回 graphDiff，复用现有落库链路
+    if (Array.isArray(parsed)) {
+      const worldOps: any[] = [];
+      const graphOps: any[] = [];
+      for (const o of parsed) {
+        const p = String((o as any)?.path || '');
+        if (p === '/world/present' || p === '/world/interacting') worldOps.push(o);
+        else graphOps.push(o);
+      }
+
+      const { diff } = patchToGraphDiff(graphOps);
+
+      let interacting: string[] = [];
+      for (const o of worldOps) {
+        const isDel = /^(del|delete|remove)$/i.test(String((o as any)?.op || ''));
+        const v = isDel ? [] : (o as any)?.value;
+        if (Array.isArray(v)) {
+          interacting = v.map((s: any) => String(s).trim()).filter(Boolean);
+        }
+      }
+
+      const patchCharLocs: Array<{ name: string; location: string }> = [];
+      for (const ch of diff.add?.characters || []) {
+        if (!ch?.name) continue;
+        patchCharLocs.push({ name: String(ch.name), location: String(ch.location || '') });
+      }
+
+      return {
+        location: patchCharLocs[0]?.location || '',
+        presentCharacters: patchCharLocs.map((c) => c.name),
+        characterLocations: patchCharLocs,
+        graphDiff: isEmptyDiff(diff) ? null : diff,
+        interactingCharacters: interacting,
+      };
+    }
 
     if (parsed) {
       // 提取 graphDiff
@@ -505,6 +598,7 @@ export async function executeSmallSummary(
     kgOptions?.worldProgressMaterial,
     blacklistedNames,
     aiThinkingChain,
+    isSmallSummaryPatchEnabled(),
   );
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [

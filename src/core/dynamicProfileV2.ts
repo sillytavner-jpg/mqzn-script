@@ -15,6 +15,8 @@ import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { DynamicProfileV2Schema } from '../utils/schemas';
 import { logInfo } from '../utils/logger';
 import { formatThinkingChainForAnalysis } from '../utils/messageParser';
+import { patchToDynamicProfiles } from './castPatchBridge';
+import { parsePatchArray } from '../utils/stateDoc';
 
 // ====== 数据结构 =========
 
@@ -41,7 +43,21 @@ const ASSISTANT_PREFILL = JAILBREAK_TAIL;
 
 // ======== 提示词 ==========
 
-function buildDynamicProfileV2Instruction(userName: string, blacklistedNames?: string[]): string {
+/** webpack 环境下 `require` 由运行时提供（项目未装 @types/node） */
+declare const require: (id: string) => any;
+
+/** 是否启用 patch 输出（灰度开关，缺省关 → 走旧的文本格式） */
+function isPatchEnabled(): boolean {
+  try {
+    const mod = require('../stores/mainStore');
+    const store = mod.useMainStore ? mod.useMainStore() : null;
+    return store?.settings?.statePatchEnabled?.dynamic_profile === true;
+  } catch {
+    return false;
+  }
+}
+
+function buildDynamicProfileV2Instruction(userName: string, blacklistedNames?: string[], usePatch = false): string {
   // 黑名单提醒：本次不要为黑名单角色生成动态人设
   const blacklistReminder = buildBlacklistReminder(
     blacklistedNames,
@@ -82,29 +98,45 @@ function buildDynamicProfileV2Instruction(userName: string, blacklistedNames?: s
     '',
     '输出格式：',
     '',
-    '### 角色名',
-    '<factual_state>',
-    '身体状态：轻微疲倦',
-    '穿着：白色衬衫配深蓝长裙，头发随意扎起',
-    `已知信息：她知道${userName}答应了明天陪她去集市；她不知道${userName}今天被人跟踪了`,
-    `当前目标：等${userName}回来`,
-    '最近变化：比昨天放松了一些，开始主动找话题',
-    `变化原因：因为${userName}昨天主动留下来陪她聊天`,
-    '</factual_state>',
-    '',
-    '<dynamic_profile>',
-    '行为倾向：会主动找话题 = 想延长相处时间 | 不要理解为黏人或依赖',
-    '说话方式：偶尔会开玩笑 = 安全感增加后的放松 | 不要理解为轻浮',
-    '动作偏好：站得比以前近一点 = 信任增加 | 不要理解为暗示',
-    '禁止假设：',
-    `- 不要假设她知道${userName}被跟踪的事`,
-    `- 不要假设她知道小红给${userName}带了红领巾`,
-    '</dynamic_profile>',
-    '',
-    '===',
-    '',
-    '### 下一个角色名',
-    '..',
+    ...(usePatch
+      ? [
+          '**为每个角色输出一个补丁条目**（```json 代码块，数组，**紧凑单行输出、禁止缩进换行美化**）：',
+          '',
+          '```json',
+          `[{"op":"set","path":"/cast/角色名/factual","value":{"身体状态":"轻微疲倦","穿着":"白色衬衫配深蓝长裙，头发随意扎起","已知信息":"她知道${userName}答应了明天陪她去集市；她不知道${userName}今天被人跟踪了","当前目标":"等${userName}回来","最近变化":"比昨天放松了一些，开始主动找话题","变化原因":"因为${userName}昨天主动留下来陪她聊天"}},{"op":"set","path":"/cast/角色名/dynamic","value":{"行为倾向":"会主动找话题 = 想延长相处时间 | 不要理解为黏人或依赖","说话方式":"偶尔会开玩笑 = 安全感增加后的放松 | 不要理解为轻浮","动作偏好":"站得比以前近一点 = 信任增加 | 不要理解为暗示","禁止假设":["不要假设她知道${userName}被跟踪的事"]}}]`,
+          '```',
+          '',
+          '**路径只有这两种**：`/cast/{角色名}/factual`（事实层）、`/cast/{角色名}/dynamic`（动态层）。',
+          '- 每个角色最多两条（factual + dynamic）。',
+          '- **只输出本轮有变化的角色**（未提及 = 不变）。',
+          '- 全部无变化时输出空数组 `[]`。',
+          '- 与下面规则冲突时，以本段为准。',
+        ]
+      : [
+          '### 角色名',
+          '<factual_state>',
+          '身体状态：轻微疲倦',
+          '穿着：白色衬衫配深蓝长裙，头发随意扎起',
+          `已知信息：她知道${userName}答应了明天陪她去集市；她不知道${userName}今天被人跟踪了`,
+          `当前目标：等${userName}回来`,
+          '最近变化：比昨天放松了一些，开始主动找话题',
+          `变化原因：因为${userName}昨天主动留下来陪她聊天`,
+          '</factual_state>',
+          '',
+          '<dynamic_profile>',
+          '行为倾向：会主动找话题 = 想延长相处时间 | 不要理解为黏人或依赖',
+          '说话方式：偶尔会开玩笑 = 安全感增加后的放松 | 不要理解为轻浮',
+          '动作偏好：站得比以前近一点 = 信任增加 | 不要理解为暗示',
+          '禁止假设：',
+          `- 不要假设她知道${userName}被跟踪的事`,
+          `- 不要假设她知道小红给${userName}带了红领巾`,
+          '</dynamic_profile>',
+          '',
+          '===',
+          '',
+          '### 下一个角色名',
+          '..',
+        ]),
     '',
     `## 规则`,
     '',
@@ -200,7 +232,17 @@ function parseDynamicProfileV2Output(rawText: string): DynamicProfileV2[] {
   const cleanedForJson = text.replace(/<\/?think(?:ing)?>/gi, '').replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, '').trim();
   const jsonText = extractJson(cleanedForJson);
   if (jsonText) {
-    const jsonData = safeJsonParse(jsonText, DynamicProfileV2Schema);
+    let jsonData: any = safeJsonParse(jsonText, DynamicProfileV2Schema);
+
+    // ★ patch 格式（数组）→ 翻译成与全量相同的 profiles 形状，复用下面的 map 逻辑
+    if (!jsonData) {
+      const lenient = parsePatchArray(jsonText, '动态人设');
+      if (lenient) {
+        const { data: bridged } = patchToDynamicProfiles(lenient.ops as any);
+        if (bridged) jsonData = bridged;
+      }
+    }
+
     if (jsonData?.profiles?.length > 0) {
       const profiles: DynamicProfileV2[] = jsonData.profiles.map(p => ({
         characterName: p.characterName,
@@ -304,7 +346,7 @@ export async function executeDynamicProfileV2(
   const currentChars = scanCharacterNamesFromContent(combinedText, profileNames, characterEntries);
   const relevantProfiles = previousProfiles.filter(p => currentChars.includes(p.characterName));
 
-  const instruction = buildDynamicProfileV2Instruction(userName, blacklistedNames);
+  const instruction = buildDynamicProfileV2Instruction(userName, blacklistedNames, isPatchEnabled());
   const inputMaterial = buildInputMaterial(capturedContents, relevantProfiles, blacklistedNames);
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [

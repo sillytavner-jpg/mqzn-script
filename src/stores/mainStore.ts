@@ -22,6 +22,7 @@ import {
 } from '../core/knowledgeGraph';
 import type { PlotOutline, PlotCheckResult } from '../core/plotDirector';
 import type { WorldBookEntryInfo, WorldBookTagBinding } from '../core/worldBookTags';
+import type { StateAuditEntry } from '../utils/stateDoc';
 
 // ── 世界书蒸馏记录类型（原 core/worldBookDistill.ts 已整体删除，类型迁移至此） ──
 export interface DistillSection {
@@ -397,6 +398,9 @@ export interface ChatData {
   pendingUnresolved: PendingResolution[];
   // 角色黑名单：加入后该角色所有数据被清除，且不再被 AI 分析/扫描重建（软删除名单）
   blacklistedCharacters: string[];
+
+  /** 状态文档 patch 的审计日志（由 stateDoc.applyStatePatch 写入，保留最近 200 条） */
+  stateAuditLog: StateAuditEntry[];
 }
 
 // ========== 存储拆分：脚本变量（全局共享） ==========
@@ -462,7 +466,16 @@ export interface ScriptSettings {
     // API 库
     apiLibrary: ApiConfig[];
     apiAssignments: ApiAssignments;
+    /** 已废弃：自定义破限词入口已下线，字段保留仅为兼容旧数据（不再读写生效） */
     jailbreakOverrides: JailbreakPromptOverrides;
+    /** 破限词模式：legacy = 老模型 / flash = 3.7f · 3.8f */
+    jailbreakMode: 'legacy' | 'flash';
+    /**
+     * 状态文档 patch 灰度开关（按模块名开启）。
+     * 缺省 = 该模块走旧的全量 JSON 输出；置 true 才启用 patch 输出。
+     * 例：{ small_summary: true }
+     */
+    statePatchEnabled: Record<string, boolean>;
     schedulerMode: 'concurrent' | 'serial';
     // API 监听器（调试用，始终开启）
     apiMonitorEnabled: boolean;
@@ -600,6 +613,7 @@ const ChatDataSchema = z
     pendingUnresolved: z.array(z.any()).prefault([]),
     // 角色黑名单（软删除名单，名字用归一化形式存储）
     blacklistedCharacters: z.array(z.string()).prefault([]),
+    stateAuditLog: z.array(z.any()).prefault([]),
   })
   .prefault({});
 
@@ -668,6 +682,13 @@ const ScriptSettingsSchema = z
           head: z.string().optional(),
           tail: z.string().optional(),
         })).prefault({}),
+        jailbreakMode: z.string().prefault('legacy'), // 'legacy' | 'flash'
+        // 默认只开这三个：它们的输出量最大、实测收益最稳
+        statePatchEnabled: z.record(z.string(), z.boolean()).prefault({
+          small_summary: true,
+          grand_summary: true,
+          character_memory: true,
+        }),
         schedulerMode: z.string().prefault('concurrent'), // 'concurrent' | 'serial'
         apiMonitorEnabled: z.boolean().prefault(true),
         relationshipInjectionEnabled: z.boolean().prefault(true),

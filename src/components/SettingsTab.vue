@@ -3,16 +3,9 @@ import { ref, nextTick, reactive } from 'vue';
 import { useMainStore } from '../stores/mainStore';
 import { fetchAvailableModels } from '../utils/apiCaller';
 import { useIsMobile } from '../composables/useIsMobile';
-import { Modal, Collapsible } from './ui';
+import { Modal } from './ui';
 import RecallSettingsPanel from './RecallSettingsPanel.vue';
 import { logInfo, logError } from '../utils/logger';
-import {
-  JAILBREAK_PROMPT_TYPES,
-  getDefaultJailbreakPrompt,
-  normalizePromptText,
-  type JailbreakPromptField,
-  type JailbreakPromptOverride,
-} from '../utils/jailbreakPrompts';
 import {
   measureStorageUsage,
   formatBytes,
@@ -107,8 +100,6 @@ const apiDraft = ref({ id: '', name: '', url: '', key: '', model: '' });
 const apiModelList = ref<Record<string, string[]>>({});
 const apiModelLoading = ref<Record<string, boolean>>({});
 const apiModelError = ref<Record<string, string>>({});
-const showJailbreakSettings = ref(false);
-const jailbreakExpanded = ref<Record<string, boolean>>({});
 
 const ANALYSIS_TYPES: Array<{ key: string; label: string }> = [
   { key: 'grand_summary', label: '大总结' },
@@ -197,54 +188,6 @@ async function loadApiModels(id: string) {
   } finally {
     apiModelLoading.value = { ...apiModelLoading.value, [id]: false };
   }
-}
-
-function getJailbreakOverrides(): Record<string, JailbreakPromptOverride> {
-  return ((store.settings as any).jailbreakOverrides || {}) as Record<string, JailbreakPromptOverride>;
-}
-
-function hasJailbreakField(override: JailbreakPromptOverride | undefined, field: JailbreakPromptField): boolean {
-  return !!override && Object.prototype.hasOwnProperty.call(override, field);
-}
-
-function getJailbreakValue(typeKey: string, field: JailbreakPromptField): string {
-  const override = getJailbreakOverrides()[typeKey];
-  if (hasJailbreakField(override, field)) {
-    return normalizePromptText(override?.[field] ?? '');
-  }
-  return getDefaultJailbreakPrompt(typeKey)[field];
-}
-
-function updateJailbreakValue(typeKey: string, field: JailbreakPromptField, value: string) {
-  const normalized = normalizePromptText(value);
-  const defaults = getDefaultJailbreakPrompt(typeKey);
-  const overrides = { ...getJailbreakOverrides() };
-  const current = { ...(overrides[typeKey] || {}) };
-
-  if (normalized === defaults[field]) {
-    delete current[field];
-  } else {
-    current[field] = normalized;
-  }
-
-  if (!hasJailbreakField(current, 'head') && !hasJailbreakField(current, 'tail')) {
-    delete overrides[typeKey];
-  } else {
-    overrides[typeKey] = current;
-  }
-
-  store.updateSettings({ jailbreakOverrides: overrides } as any);
-}
-
-function resetJailbreakType(typeKey: string) {
-  const overrides = { ...getJailbreakOverrides() };
-  delete overrides[typeKey];
-  store.updateSettings({ jailbreakOverrides: overrides } as any);
-}
-
-function isJailbreakCustomized(typeKey: string): boolean {
-  const override = getJailbreakOverrides()[typeKey];
-  return hasJailbreakField(override, 'head') || hasJailbreakField(override, 'tail');
 }
 
 function setSchedulerMode(mode: 'concurrent' | 'serial') {
@@ -893,7 +836,6 @@ function executeSelectiveDelete() {
           <div class="zhino-section-header">
             <div class="zhino-section-title">API 库</div>
             <div class="zhino-section-actions">
-              <button class="zhino-btn-sm" @click="showJailbreakSettings = true">自定义破限词</button>
               <button class="zhino-btn-sm" @click="showApiLibrary = true">管理 API</button>
             </div>
           </div>
@@ -1243,50 +1185,6 @@ function executeSelectiveDelete() {
             </select>
           </div>
         </div>
-    </Modal>
-
-    <!-- 自定义破限词弹窗 -->
-    <Modal :visible="showJailbreakSettings" :is-mobile="isMobile" max-width="760px" title="自定义破限词" @close="showJailbreakSettings = false">
-      <div class="zhino-jailbreak-list">
-        <div class="zhino-jailbreak-note">
-          <code>&#123;&#123;user&#125;&#125;</code> 会在实际发送前替换为当前用户名（智脑人设名 / 酒馆用户名）。
-        </div>
-        <Collapsible
-          v-for="type in JAILBREAK_PROMPT_TYPES"
-          :key="type.key"
-          v-model="jailbreakExpanded[type.key]"
-          :title="type.label"
-          :count="isJailbreakCustomized(type.key) ? '已自定义' : '默认'"
-        >
-          <div class="zhino-jailbreak-toolbar">
-            <button
-              class="zhino-btn-sm"
-              :disabled="!isJailbreakCustomized(type.key)"
-              @click="resetJailbreakType(type.key)"
-            >
-              恢复默认
-            </button>
-          </div>
-          <label class="zhino-jailbreak-field">
-            <span class="zhino-jailbreak-label">头部</span>
-            <textarea
-              class="zhino-input zhino-jailbreak-textarea"
-              spellcheck="false"
-              :value="getJailbreakValue(type.key, 'head')"
-              @input="updateJailbreakValue(type.key, 'head', ($event.target as HTMLTextAreaElement).value)"
-            ></textarea>
-          </label>
-          <label class="zhino-jailbreak-field">
-            <span class="zhino-jailbreak-label">尾部</span>
-            <textarea
-              class="zhino-input zhino-jailbreak-textarea small"
-              spellcheck="false"
-              :value="getJailbreakValue(type.key, 'tail')"
-              @input="updateJailbreakValue(type.key, 'tail', ($event.target as HTMLTextAreaElement).value)"
-            ></textarea>
-          </label>
-        </Collapsible>
-      </div>
     </Modal>
 
     <!-- API 监听器日志弹窗 -->
@@ -2221,64 +2119,6 @@ function executeSelectiveDelete() {
 }
 .zhino-btn-delete:hover {
   background: rgba(255, 120, 120, 0.1);
-}
-
-.zhino-jailbreak-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.zhino-jailbreak-note {
-  padding: 8px 10px;
-  border: 1px solid var(--zn-border-light);
-  border-radius: 6px;
-  background: var(--zn-bg-surface2);
-  color: var(--zn-text-muted);
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.zhino-jailbreak-note code {
-  color: var(--zn-text-primary);
-  font-family: var(--zn-font-mono);
-}
-
-.zhino-jailbreak-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 8px;
-}
-
-.zhino-jailbreak-field {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin-bottom: 10px;
-}
-
-.zhino-jailbreak-field:last-child {
-  margin-bottom: 0;
-}
-
-.zhino-jailbreak-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--zn-text-regular);
-}
-
-.zhino-jailbreak-textarea {
-  width: 100%;
-  min-height: 180px;
-  resize: vertical;
-  font-family: var(--zn-font-mono);
-  font-size: 11px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-}
-
-.zhino-jailbreak-textarea.small {
-  min-height: 92px;
 }
 
 /* 导航分组标题 */

@@ -24,6 +24,9 @@ import { replaceUserReferences } from '../utils/textCleanup';
 import { logInfo } from '../utils/logger';
 import { isValidMainContent } from '../utils/messageParser';
 import { buildBlacklistReminder } from '../utils/characterNames';
+import { patchToDreamtalkParts, type DreamtalkPatchParts } from './dreamtalkPatchBridge';
+import { extractJson } from '../utils/jsonParse';
+import { parsePatchArray } from '../utils/stateDoc';
 
 // ========== 梦呓数据结构 v2 ==========
 
@@ -153,7 +156,21 @@ const ASSISTANT_PREFILL = JAILBREAK_TAIL;
 
 // ========== 梦呓分析指令 v2 ==========
 
-function buildDreamtalkInstruction(userName: string, playStyle?: string): string {
+/** webpack 环境下 `require` 由运行时提供（项目未装 @types/node） */
+declare const require: (id: string) => any;
+
+/** 是否启用 patch 输出（灰度开关，缺省关 → 走旧的 ---KEY--- 文本格式） */
+function isPatchEnabled(): boolean {
+  try {
+    const mod = require('../stores/mainStore');
+    const store = mod.useMainStore ? mod.useMainStore() : null;
+    return store?.settings?.statePatchEnabled?.dreamtalk === true;
+  } catch {
+    return false;
+  }
+}
+
+function buildDreamtalkInstruction(userName: string, playStyle?: string, usePatch = false): string {
   const typeDetectStep = playStyle
     ? [
         '## 游玩类型',
@@ -228,7 +245,21 @@ function buildDreamtalkInstruction(userName: string, playStyle?: string): string
     '',
     '## 输出格式',
     '',
-    '用 `---KEY---` 分隔，先输出基础信息，再按分支输出：',
+    ...(usePatch
+      ? [
+          '**先写最多 3 行人话说明**（只列关键变化），再输出增量补丁。',
+          '',
+          '```json 代码块，数组，**紧凑单行输出、禁止缩进换行美化**：',
+          '[{"op":"set","path":"/dream/playStyle","value":"不抢话"},{"op":"set","path":"/dream/userInfo","value":{"基本信息":"…","外貌特征":"…","背景设定":"…","关系设定":"…"}},{"op":"set","path":"/dream/personality","value":{"底色":"…","主色调":"…","点缀":"…","衍生":["行为→动机→性格"],"边界":"…"}},{"op":"set","path":"/dream/bodyContact","value":["{行为} = {真实含义} | {该行为专属的禁止误读}"]},{"op":"set","path":"/dream/speechStyle","value":["{行为} = {真实含义} | {该行为专属的禁止误读}"]},{"op":"set","path":"/dream/emotion","value":{"开心":"{表现} | {禁止误读}","生气":"{表现} | {禁止误读}"}},{"op":"set","path":"/dream/char/角色名","value":["靠近时: {互动行为} | {禁止误读}"]},{"op":"set","path":"/dream/roll","value":{"不喜欢":"{一句话}","喜欢":"{一句话}"}}]',
+          '```',
+          '',
+          '**路径只能是这 8 种**（禁止自创）：`/dream/playStyle`、`/dream/userInfo`、`/dream/personality`、`/dream/bodyContact`、`/dream/speechStyle`、`/dream/emotion`、`/dream/char/{角色名}`、`/dream/roll`。',
+          '- 抢话党才需要 `personality` 与 `char`；不抢话党可省略 `personality`。',
+          '- 行为行的写法与下面铁律一致（`行为 = 含义 | 禁止误读`）。',
+          '- 与下面反刻板/反极端化铁律同时生效。',
+        ]
+      : [
+          '用 `---KEY---` 分隔，先输出基础信息，再按分支输出：',
     '',
     '```',
     '[梦呓]',
@@ -283,6 +314,7 @@ function buildDreamtalkInstruction(userName: string, playStyle?: string): string
     '不喜欢: {一句话}',
     '喜欢: {一句话}',
     '```',
+        ]),
     '',
     '如果用户输入中包含性爱/亲密内容，在末尾：',
     '```',
@@ -661,7 +693,69 @@ function extractLabel(lines: string[], label: string): string {
 /**
  * 解析完整的梦呓输出（---KEY--- 分段）
  */
+/** 把 patch 转成的中间形状装配成 DreamtalkData（复用现有的行解析函数，零重写） */
+function buildDreamtalkFromParts(parts: DreamtalkPatchParts): DreamtalkData {
+  const base = createEmptyDreamtalk();
+  const parseEmotion = (v: string): EmotionEntry => {
+    const seg = String(v).split('|');
+    return { shows: (seg[0] || '').trim(), prevent: (seg[1] || '').trim() };
+  };
+  const toEntries = (lines: string[] | undefined) =>
+    (lines || []).map(parseEntryLine).filter(Boolean) as BehaviorEntry[];
+  const toCharEntries = (lines: string[] | undefined) =>
+    (lines || []).map(parseCharacterEntryLine).filter(Boolean) as BehaviorEntry[];
+
+  return {
+    ...base,
+    playStyle: parts.playStyle || base.playStyle,
+    userInfo: parts.userInfo
+      ? {
+          basic: parts.userInfo.basic || '',
+          appearance: parts.userInfo.appearance || '',
+          background: parts.userInfo.background || '',
+          relationship: parts.userInfo.relationship || '',
+        }
+      : base.userInfo,
+    personality: parts.personality
+      ? {
+          baseColor: parts.personality.baseColor || '',
+          mainColor: parts.personality.mainColor || '',
+          accent: parts.personality.accent || '',
+          derivations: parts.personality.derivations || [],
+          boundary: parts.personality.boundary || '',
+        }
+      : null,
+    bodyContact: parts.bodyContact ? { entries: toEntries(parts.bodyContact) } : base.bodyContact,
+    speechStyle: parts.speechStyle ? { entries: toEntries(parts.speechStyle) } : base.speechStyle,
+    emotionExpression: parts.emotion
+      ? Object.fromEntries(Object.entries(parts.emotion).map(([k, v]) => [k, parseEmotion(v)]))
+      : {},
+    characterInteractions: parts.characters
+      ? Object.entries(parts.characters).map(([name, lines]) => ({
+          characterName: name,
+          entries: toCharEntries(lines),
+        }))
+      : [],
+    rollDislikes: parts.roll?.dislikes ? [parts.roll.dislikes] : [],
+    rollLikes: parts.roll?.likes ? [parts.roll.likes] : [],
+    generatedAt: new Date().toISOString(),
+  };
+}
+
 function parseDreamtalkOutput(rawText: string): DreamtalkData {
+  // ★ patch 格式（JSON 数组）→ 转中间形状后复用下面的行解析
+  try {
+    const stripped = rawText.replace(/<\/?(?:think|thinking)>/gi, '');
+    const jsonText = extractJson(stripped);
+    if (jsonText) {
+      const lenient = parsePatchArray(jsonText, '梦呓');
+      if (lenient) {
+        const { parts } = patchToDreamtalkParts(lenient.ops as any);
+        if (parts) return buildDreamtalkFromParts(parts);
+      }
+    }
+  } catch { /* 落回文本解析 */ }
+
   let playStyle = '';
   let userInfo: DreamtalkUserInfo = { basic: '', appearance: '', background: '', relationship: '' };
   let personality: DreamtalkPersonality | null = null;
@@ -794,7 +888,7 @@ export async function executeDreamtalkAnalysis(
     throw new Error('没有可用的用户输入记录');
   }
 
-  const instruction = buildDreamtalkInstruction(userName, playStyle || undefined);
+  const instruction = buildDreamtalkInstruction(userName, playStyle || undefined, isPatchEnabled());
   const inputMaterial = buildDreamtalkMaterial(validUserInputs, userPersonaRaw, oldDreamtalk, blacklistedNames);
 
   const rawResult = await callGenerateRaw({

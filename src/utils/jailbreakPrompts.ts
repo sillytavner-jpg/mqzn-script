@@ -1,16 +1,23 @@
+/**
+ * 破限词的「默认生成」层。
+ *
+ * 现状：**自定义覆盖已下线** —— 破限词固定由「总览界面 → 破限词」的模式开关
+ * （legacy = 老模型 / flash = 3.7f·3.8f）决定，用户不能再逐类型改写。
+ * 原先的 applyJailbreakOverrideTo* 系列与「自定义破限词」弹窗已一并移除。
+ *
+ * 本文件现在只负责两件事：
+ *   ① brainHeadFor / JAILBREAK_PROMPT_TYPES —— 每个分析类型的默认 head / tail
+ *      （head 由 jailbreakIdentity.buildBrainHead 按当前模式生成）
+ *   ② parseJailbreakHead —— 把 head 文本拆成 ordered_prompts 块
+ *      （persona.ts 仍在用）
+ */
+
 import {
   buildBrainAccept,
   buildBrainHead,
   JAILBREAK_TAIL,
   type BrainRoleSpec,
 } from './jailbreakIdentity';
-
-export type JailbreakPromptField = 'head' | 'tail';
-
-export interface JailbreakPromptOverride {
-  head?: string;
-  tail?: string;
-}
 
 export interface JailbreakPromptType {
   key: string;
@@ -72,7 +79,7 @@ const JAILBREAK_ROLES: Record<string, { role: BrainRoleSpec; task: string; ack: 
   world_progress: { role: '前额叶', task: '推演场外行动', ack: '场外的事我来推' },
 };
 
-/** 按分析类型生成破限 head（身份框架 + 认可式应答） */
+/** 按分析类型生成破限 head（身份框架 + 认可式应答，内容随当前破限模式变化） */
 function brainHeadFor(key: string): string {
   const cfg = JAILBREAK_ROLES[key] || {
     role: '小左' as BrainRoleSpec,
@@ -235,11 +242,7 @@ export function normalizePromptText(text: string): string {
   return (text || '').replace(/\r\n/g, '\n');
 }
 
-export function fillJailbreakTemplate(text: string, userName: string): string {
-  const name = nameOf(userName);
-  return normalizePromptText(text).replace(/\{\{user\}\}/g, name);
-}
-
+/** 把 head 文本（[system]…[/system] / [assistant]…[/assistant] 分块）拆成 ordered_prompts */
 export function parseJailbreakHead(head: string): OrderedPrompt[] {
   const normalized = normalizePromptText(head).trim();
   if (!normalized) return [];
@@ -256,121 +259,4 @@ export function parseJailbreakHead(head: string): OrderedPrompt[] {
 
   if (messages.length > 0) return messages;
   return [{ role: 'system', content: normalized }];
-}
-
-function hasOwnField(override: JailbreakPromptOverride, field: JailbreakPromptField): boolean {
-  return Object.prototype.hasOwnProperty.call(override, field);
-}
-
-function findLastPromptIndex(prompts: Array<OrderedPrompt | 'user_input'>): number {
-  for (let i = prompts.length - 1; i >= 0; i--) {
-    if (prompts[i] !== 'user_input') return i;
-  }
-  return -1;
-}
-
-function hasHeadOverride(
-  analysisType: string | undefined,
-  overrides: Record<string, JailbreakPromptOverride> | undefined,
-): boolean {
-  if (!analysisType) return false;
-  const override = overrides?.[analysisType];
-  return !!override && hasOwnField(override, 'head');
-}
-
-/**
- * 清掉破限身份残留行（head 被用户覆盖时用）。
- * 匹配：身份框架句、任务指派句、以及「<角色>：明白了」应答行。
- */
-const JAILBREAK_IDENTITY_LINE_RE =
-  /一颗专业小说作家的大脑|你接下来要扮演(小左|小右|小爱|前额叶)|^(小左|小右|小爱|前额叶)\s*[:：]\s*明白了/;
-
-function stripJailbreakLines(text: string): string {
-  const normalized = normalizePromptText(text);
-  return normalized
-    .split('\n')
-    .filter((line) => !JAILBREAK_IDENTITY_LINE_RE.test(line))
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function stripJailbreakNameFromTail(text: string): string {
-  return normalizePromptText(text)
-    .replace(/^(小左|小右|小爱|前额叶)\s*[:：]\s*明白了[。.！!]?\s*/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-export function applyJailbreakOverrideToOrderedPrompts(
-  orderedPrompts: Array<OrderedPrompt | 'user_input'>,
-  analysisType: string | undefined,
-  overrides: Record<string, JailbreakPromptOverride> | undefined,
-  userName: string,
-): Array<OrderedPrompt | 'user_input'> {
-  const type = getJailbreakPromptType(analysisType);
-  if (!type || !analysisType) return orderedPrompts;
-
-  const override = overrides?.[analysisType];
-  if (!override || (!hasOwnField(override, 'head') && !hasOwnField(override, 'tail'))) {
-    return orderedPrompts;
-  }
-
-  const next = [...orderedPrompts];
-
-  if (hasOwnField(override, 'head')) {
-    const headMessages = parseJailbreakHead(fillJailbreakTemplate(override.head ?? '', userName));
-    if (type.headPromptCount > 0) {
-      next.splice(0, Math.min(type.headPromptCount, next.length), ...headMessages);
-    } else if (headMessages.length > 0) {
-      next.unshift(...headMessages);
-    }
-
-    for (let i = headMessages.length; i < next.length; i++) {
-      const item = next[i];
-      if (item === 'user_input') break;
-      const cleaned = stripJailbreakLines(item.content);
-      if (!cleaned) {
-        next.splice(i, 1);
-        i--;
-      } else {
-        next[i] = { ...item, content: cleaned };
-      }
-    }
-
-    if (!hasOwnField(override, 'tail')) {
-      const lastPromptIndex = findLastPromptIndex(next);
-      const lastPrompt = lastPromptIndex >= 0 ? next[lastPromptIndex] : undefined;
-      if (lastPrompt !== 'user_input' && lastPrompt?.role === 'assistant') {
-        const cleanedTail = stripJailbreakNameFromTail(lastPrompt.content);
-        if (cleanedTail) next[lastPromptIndex] = { role: 'assistant', content: cleanedTail };
-        else next.splice(lastPromptIndex, 1);
-      }
-    }
-  }
-
-  if (hasOwnField(override, 'tail')) {
-    const tail = fillJailbreakTemplate(override.tail ?? '', userName).trim();
-    const lastPromptIndex = findLastPromptIndex(next);
-    const lastPrompt = lastPromptIndex >= 0 ? next[lastPromptIndex] : undefined;
-    const shouldReplaceTail = lastPrompt !== 'user_input' && lastPrompt?.role === 'assistant';
-
-    if (shouldReplaceTail) {
-      if (tail) next[lastPromptIndex] = { role: 'assistant', content: tail };
-      else next.splice(lastPromptIndex, 1);
-    } else if (tail) {
-      next.push({ role: 'assistant', content: tail });
-    }
-  }
-
-  return next;
-}
-
-export function applyJailbreakOverrideToUserInput(
-  userInput: string,
-  analysisType: string | undefined,
-  overrides: Record<string, JailbreakPromptOverride> | undefined,
-): string {
-  if (!hasHeadOverride(analysisType, overrides)) return userInput;
-  return stripJailbreakLines(userInput);
 }

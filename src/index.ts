@@ -2034,7 +2034,22 @@ $(() => {
             });
           }
 
-          const settled = await Promise.allSettled(tasks.map(task => task.promise));
+          // 诊断：记录每个子任务的实际耗时。
+          // 判据：总耗时 ≈ 最长者 → 真并发；≈ 各任务之和 → 实际串行了。
+          const chainT0 = Date.now();
+          const settled = await Promise.allSettled(
+            tasks.map(async (task) => {
+              const subT0 = Date.now();
+              const v = await task.promise;
+              logInfo('大总结链', `${task.name} 耗时 ${Date.now() - subT0}ms`);
+              return v;
+            }),
+          );
+          logInfo(
+            '大总结链',
+            `并发启动 ${tasks.length} 个任务，总耗时 ${Date.now() - chainT0}ms` +
+            `（≈最长者=并发；≈各任务之和=串行）`,
+          );
           const failed: Array<{ name: string; reason: any }> = [];
           for (let i = 0; i < settled.length; i++) {
             const task = tasks[i];
