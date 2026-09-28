@@ -84,14 +84,18 @@ const recentPatchIssues = computed(() => getRecentPatchIssues(store.chatData));
 const adaptingPreset = ref(false);
 const adaptResult = ref('');
 const adaptOk = ref(false);
+/** 每条槽位最终落在哪 —— 点开可核对 */
+const adaptDetails = ref<Array<{ name: string; target: string; confident: boolean }>>([]);
 async function adaptPreset() {
   if (adaptingPreset.value) return;
   adaptingPreset.value = true;
   adaptResult.value = '';
+  adaptDetails.value = [];
   try {
     const r = await adaptCurrentPresetInTavern();
     adaptOk.value = r.ok;
     adaptResult.value = r.message;
+    adaptDetails.value = (r.details || []).map((d) => ({ name: d.name, target: d.target, confident: d.confident }));
     logInfo('预设适配', r.message);
   } catch (e: any) {
     adaptOk.value = false;
@@ -909,6 +913,11 @@ async function triggerFloorSummary() {
         预设适配：把智脑槽位条目插进「当前预设」的合适位置，生成一个「原名（智脑适配）」的新预设，不改动原预设。
       </div>
 
+      <!-- ⚠️ 输出标签要求：智脑靠这两个标签切分正文，预设里对不上就解析不了 -->
+      <div class="zhino-tag-warn">
+        ⚠️ 预设里的<b>时间标签必须是 &lt;time&gt;&lt;/time&gt;</b>、<b>正文标签必须是 &lt;content&gt;&lt;/content&gt;</b>，请自行去预设里确认。
+      </div>
+
       <!-- patch 异常提示：只有真出问题时才出现 -->
       <div v-if="recentPatchIssues.length" class="zhino-patch-warn">
         <div class="zhino-patch-warn-title">⚠️ 最近有 {{ recentPatchIssues.length }} 轮出现补丁异常</div>
@@ -924,6 +933,19 @@ async function triggerFloorSummary() {
         class="zhino-mode-note"
         :style="{ color: adaptOk ? 'rgba(var(--zn-accent-rgb), 1)' : 'rgba(var(--zn-warn-rgb), 1)', opacity: 1, marginTop: '6px' }"
       >{{ adaptResult }}</div>
+
+      <!-- 插入明细：每条槽位落在哪，可折叠 -->
+      <details v-if="adaptDetails.length" class="zhino-adapt-detail">
+        <summary>插入明细（{{ adaptDetails.length }} 条）</summary>
+        <div v-for="(d, i) in adaptDetails" :key="i" class="zhino-adapt-row">
+          <span class="zhino-adapt-name">{{ d.name }}</span>
+          <span class="zhino-adapt-arrow">→</span>
+          <span :style="d.confident ? undefined : { color: 'rgba(var(--zn-warn-rgb), 1)' }">{{ d.target }}</span>
+        </div>
+        <div class="zhino-mode-note" style="margin-top:4px">
+          黄色 = 该组没找到锚点，用了兜底位置，可能需要手动挪一下。
+        </div>
+      </details>
     </div>
 
     <!-- 已激活角色 -->
@@ -1327,6 +1349,31 @@ async function triggerFloorSummary() {
   color: var(--zn-text-regular);
   opacity: 0.72;
 }
+/* 预设适配的「插入明细」（折叠） */
+.zhino-adapt-detail {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--zn-text-regular);
+  opacity: 0.85;
+}
+.zhino-adapt-detail > summary {
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.8;
+}
+.zhino-adapt-row {
+  display: flex;
+  gap: 6px;
+  padding: 1px 0 1px 12px;
+}
+.zhino-adapt-name {
+  flex: 0 0 auto;
+}
+.zhino-adapt-arrow {
+  flex: 0 0 auto;
+  opacity: 0.5;
+}
 .zhino-check-row {
   display: flex;
   align-items: center;
@@ -1379,6 +1426,17 @@ async function triggerFloorSummary() {
 .zhino-seg button.zhino-seg-on {
   background: rgba(var(--zn-accent-rgb), 0.15);
   color: rgba(var(--zn-accent-rgb), 1);
+}
+/* 输出标签要求提示（时间 / 正文标签） */
+.zhino-tag-warn {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px solid rgba(var(--zn-warn-rgb), 0.28);
+  border-radius: 6px;
+  background: rgba(var(--zn-warn-rgb), 0.07);
+  font-size: 11px;
+  line-height: 1.6;
+  color: rgba(var(--zn-warn-rgb), 0.95);
 }
 .zhino-patch-warn {
   margin-top: 10px;

@@ -50,6 +50,16 @@ export interface NormalizedItem {
   id: string;
   name: string;
   enabled: boolean;
+  /**
+   * 是否在 `prompt_order` 里**真正有位置**。
+   *
+   * ⚠️ 这个字段救过一次大坑：文件结构的预设里存在「在 prompts 里、但不在 order 里」的条目
+   * （实测 `智脑-Z(3.78f特调)` 有 13 条这种，包括 `3.1p世界书结束`『历史开始』等**关键锚点**）。
+   * 归一化时它们被补到 items 末尾，规则层就会"以为"锚点存在，
+   * 但写回时 `order.indexOf` 找不到 → 整组被甩到预设最后。
+   * **所以：定位锚点只用 `inOrder=true` 的条目；存在性判断才不管这个标志。**
+   */
+  inOrder: boolean;
   /** 原始条目对象 */
   raw: any;
 }
@@ -81,7 +91,40 @@ export interface SlotGroup {
     afterNameKeywords?: string[];
     beforeIdentifiers?: string[];
     beforeNameKeywords?: string[];
-    fallback: 'early' | 'after-charinfo' | 'before-history' | 'after-history' | 'end';
+    /**
+     * 多个候选命中时取哪个位置：
+     * - `true`（默认）= 取**插入位置最靠后**的候选 —— 适合「贴区段末尾」的锚点，
+     *   如「世界书结束」「历史结束」「NSFW 规则之后」。
+     * - `false` = 取**最靠前**的候选 —— 适合「贴区段起点之前」的锚点，
+     *   如「思维链之前」。
+     *
+     * ⚠️ 这条曾经踩过大坑：`before 关键词:'思维链'` 在预设里会命中
+     * 「思维链开始 / 思维链 / 思维链结束」三个条目，若按"取最靠后"就会插到
+     * **思维链结束之后**（错），而正确语义是贴在**思维链区起点之前**。
+     */
+    preferLast?: boolean;
+    /**
+     * 锚定到**同一批要插入的另一个智脑槽位**（传槽位 identifier，如 `zhino_dreamtalk`）。
+     *
+     * 用途：主人要求这几条的位置**固定可预期**，不跟着各预设的花式命名跑：
+     * - NSFW 隔离层 → 梦呓下方
+     * - 入场引导   → 场外动态后面
+     * - 剧情导演   → 入场引导后面
+     *
+     * 生效前提：被依赖的组必须排在**它前面**（`ZHINO_GROUPS` 的顺序即处理顺序），
+     * 这样写回时前一组已经插好了，`order.indexOf` 能找到它。
+     */
+    afterSlot?: string;
+    beforeSlot?: string;
+    /**
+     * `true` = **系统 identifier 锚点优先**：只要 identifier 候选命中，就完全忽略名称关键词候选。
+     *
+     * 用于「关键词太容易误命中」的组。例如 tail 组的「思维链」，
+     * 实测会命中 `plug_love` 的名字「🔌NSFW总开关，包含nsfw指导，**nsfw思维链**」——
+     * 而 `think_open` 这种系统锚点是确定无疑的，应当压倒启发式关键词。
+     */
+    systemFirst?: boolean;
+    fallback: 'early' | 'after-charinfo' | 'before-history' | 'after-history' | 'late' | 'end';
   };
 }
 
@@ -102,10 +145,13 @@ const VAR_KEYS = [
   'relationship_profiles',
   'memory_chain',
   'dreamtalk',
+  // ⚠️ 这里**故意没有** context_summary（隐藏楼摘要）：
+  // 它在智脑里没有数据源（`index.ts` 的 slotTexts 从未赋值，`contextReplacement.ts` 的注入函数也没接线），
+  // 插进预设只会得到一条永远为空的条目，所以不再适配它。
+  // 但 `slotInjection.ts` 里**保留了它的 tag 定义** —— 那是为了清理**旧版预设里已存在的残留标记**。
   'grand_summary',
   'world_graph',
   'world_state',
-  'context_summary',
   'plot_guidance',
   'world_entry_hint',
 ];
@@ -119,7 +165,6 @@ const NAMES: Record<string, string> = {
   grand_summary: '🧠智脑 · 剧情大总结',
   world_graph: '🧠智脑 · 场景图谱',
   world_state: '🧠智脑 · 场外动态',
-  context_summary: '🧠智脑 · 隐藏楼摘要',
   plot_guidance: '🧠智脑 · 剧情导演',
   world_entry_hint: '🧠智脑 · 入场引导',
 };
@@ -148,7 +193,22 @@ export const ZHINO_NSFW_SLOT: ZhinoSlot = {
   direct: true,
 };
 
-/** 六个分组（顺序 = 组在预设里的相对先后） */
+/**
+ * 七个分组（**数组顺序 = 处理顺序**，也是被 `afterSlot` 依赖的前提）。
+ *
+ * 最终布局（主人 2026-09-28 定）：
+ * ```
+ *   靠前            plug_zhino（变量定义）
+ *   世界书结束 ─┐
+ *              ├ 玩家人格 / 动态人设 / 关系档案 / 记忆链 / 梦呓
+ *              └ NSFW 隔离层            ← 紧跟梦呓下方
+ *   历史开始  ──  剧情大总结
+ *   chatHistory
+ *              场景图谱 / 场外动态
+ *              入场引导                  ← 紧跟场外动态后面
+ *              剧情导演                  ← 紧跟入场引导后面
+ * ```
+ */
 export const ZHINO_GROUPS: SlotGroup[] = [
   {
     id: 'define',
@@ -156,21 +216,38 @@ export const ZHINO_GROUPS: SlotGroup[] = [
     slots: [ZHINO_DEFINE_SLOT],
     anchor: {
       afterIdentifiers: ['var_init'],
-      afterNameKeywords: ['变量清零'],
+      afterNameKeywords: ['变量初始化', '变量清零'],
       beforeIdentifiers: ['core_rules'],
+      beforeNameKeywords: ['核心创作规则', '核心规则'],
       fallback: 'early',
     },
   },
   {
     id: 'char-info',
-    label: '角色信息区（世界书结束之后）',
+    label: '角色信息区（世界书 / 情景之后）',
     slots: ['user_persona', 'dynamic_profile', 'relationship_profiles', 'memory_chain', 'dreamtalk'].map(makeSlot),
     anchor: {
       // 只认「角色信息区」锚点。**不要**把 chatHistory 列进来 ——
       // 它在「历史开始」之后，会让整组越过历史区边界（实测踩过）。
       afterIdentifiers: ['worldInfoAfter', 'worldInfoBefore'],
-      afterNameKeywords: ['世界书结束', '界书结束', '世界书（角色定义之后）'],
+      // ⚠️ 只写「世界书结束」，**不要**写「界书结束」——
+      // 后者会命中「📌3.7/8f界书结束」（3.7/8F 破限那套的配套条目，在预设尾部），
+      // 取最靠后就把整组甩到尾部去了。
+      afterNameKeywords: ['世界书结束', '世界书（角色定义之后）', '世界书（角色定义之前）'],
       fallback: 'after-charinfo',
+    },
+  },
+  {
+    // ★ 固定位置：梦呓下方（不再跟随各预设的 NSFW 规则命名，位置可预期）
+    id: 'nsfw-isolation',
+    label: 'NSFW 隔离层（梦呓下方）',
+    slots: [ZHINO_NSFW_SLOT],
+    anchor: {
+      afterSlot: 'zhino_dreamtalk',
+      // 万一梦呓没插（极端情况）→ 退回跟随 NSFW 规则
+      afterIdentifiers: ['plug_love', 'nsfw'],
+      afterNameKeywords: ['NSFW', 'nsfw', '色情', '性爱', '限制级', 'R18'],
+      fallback: 'late',
     },
   },
   {
@@ -178,39 +255,40 @@ export const ZHINO_GROUPS: SlotGroup[] = [
     label: '历史区之前（大总结）',
     slots: [makeSlot('grand_summary')],
     anchor: {
+      // ⚠️ 关键词必须精确：「聊天记录」这种宽词会同时命中「聊天记录开始」与
+      // 「聊天记录结束」，取最靠后就会跑到 chatHistory **之后**去。
       beforeIdentifiers: ['chatHistory'],
-      beforeNameKeywords: ['历史开始', '聊天记录'],
-      afterIdentifiers: ['worldInfoAfter'],
+      beforeNameKeywords: ['聊天记录开始', '历史开始'],
       fallback: 'before-history',
     },
   },
   {
     id: 'after-history',
-    label: '历史区之后（图谱 / 场外 / 摘要）',
-    slots: ['world_graph', 'world_state', 'context_summary'].map(makeSlot),
+    label: '历史区之后（图谱 / 场外动态）',
+    slots: ['world_graph', 'world_state'].map(makeSlot),
     anchor: {
       afterIdentifiers: ['chatHistory'],
-      afterNameKeywords: ['历史结束'],
+      afterNameKeywords: ['历史结束', '聊天记录结束', '故事结束'],
       fallback: 'after-history',
     },
   },
   {
-    id: 'nsfw-isolation',
-    label: 'NSFW 隔离层（跟随 NSFW 规则）',
-    slots: [ZHINO_NSFW_SLOT],
+    // ★ 固定位置：场外动态后面
+    id: 'entry-hint',
+    label: '入场引导（场外动态后面）',
+    slots: [makeSlot('world_entry_hint')],
     anchor: {
-      afterIdentifiers: ['plug_love'],
-      afterNameKeywords: ['NSFW指导', 'NSFW 指导'],
+      afterSlot: 'zhino_world_state',
       fallback: 'end',
     },
   },
   {
-    id: 'tail',
-    label: '尾部（导演 / 入场引导）',
-    slots: ['plot_guidance', 'world_entry_hint'].map(makeSlot),
+    // ★ 固定位置：入场引导后面
+    id: 'plot-guidance',
+    label: '剧情导演（入场引导后面）',
+    slots: [makeSlot('plot_guidance')],
     anchor: {
-      beforeIdentifiers: ['output_format', 'think_open'],
-      beforeNameKeywords: ['输出格式', '思维链'],
+      afterSlot: 'zhino_world_entry_hint',
       fallback: 'end',
     },
   },
@@ -245,14 +323,14 @@ export function normalizePreset(preset: any): NormalizedPreset | null {
       const id = idOf(e);
       if (!id || seen.has(id)) continue;
       const p = byId.get(id) || {};
-      items.push({ id, name: String(p.name || ''), enabled: e.enabled !== false, raw: p });
+      items.push({ id, name: String(p.name || ''), enabled: e.enabled !== false, inOrder: true, raw: p });
       seen.add(id);
     }
-    // order 里没有、但 prompts 里存在的，补到末尾
+    // order 里没有、但 prompts 里存在的，补到末尾（inOrder=false，不可作锚点）
     for (const p of preset.prompts) {
       const id = idOf(p);
       if (id && !seen.has(id)) {
-        items.push({ id, name: String(p.name || ''), enabled: p.enabled !== false, raw: p });
+        items.push({ id, name: String(p.name || ''), enabled: p.enabled !== false, inOrder: false, raw: p });
         seen.add(id);
       }
     }
@@ -265,7 +343,7 @@ export function normalizePreset(preset: any): NormalizedPreset | null {
     for (const p of preset.prompts) {
       const id = idOf(p);
       if (!id) continue;
-      items.push({ id, name: String(p.name || ''), enabled: p.enabled !== false, raw: p });
+      items.push({ id, name: String(p.name || ''), enabled: p.enabled !== false, inOrder: true, raw: p });
     }
     return { items, kind: 'api', raw: preset };
   }
@@ -275,31 +353,65 @@ export function normalizePreset(preset: any): NormalizedPreset | null {
 
 // ========== 规则层 ==========
 
-function indexOfItem(np: NormalizedPreset, id: string): number {
+/** 任意位置查找（含「在 prompts 但不在 order」的条目）—— 用于「是否已存在」判断 */
+function indexOfAny(np: NormalizedPreset, id: string): number {
   return np.items.findIndex((it) => it.id === id);
 }
 
-function findByKeyword(np: NormalizedPreset, keywords: string[]): string | undefined {
-  for (const it of np.items) {
-    if (keywords.some((k) => it.name.includes(k))) return it.id;
-  }
-  return undefined;
+/**
+ * 查找**在 order 里真正有位置**的条目下标 —— 用于锚点定位。
+ * 返回 -1 = 不存在**或**没有位置（都不能作为插入参照）。
+ */
+function indexOfItem(np: NormalizedPreset, id: string): number {
+  const i = np.items.findIndex((it) => it.id === id);
+  return i >= 0 && np.items[i].inOrder ? i : -1;
+}
+
+/** 返回**所有**名称命中该关键词的「有位置」条目下标（需要"最靠前/最靠后"的取舍空间） */
+function allIndexesByKeyword(np: NormalizedPreset, kw: string): number[] {
+  const out: number[] = [];
+  np.items.forEach((it, i) => {
+    if (it.inOrder && it.name.includes(kw)) out.push(i);
+  });
+  return out;
+}
+
+/** 尾部系统条目（Agent 框架 / 破限收尾）—— 不该被当成「区段末尾」的落点 */
+function isTailSystemItem(id: string): boolean {
+  if (/^agent/i.test(id)) return true;
+  return ['output_contract', 'cot_hijack', 'jb_tail', 'input_emphasis', 'output_format'].includes(id);
+}
+
+/** 从「有位置」的条目里，从后往前跳过尾部系统件，返回下标 */
+function lastNonSystemIndex(pool: NormalizedItem[]): number {
+  let i = pool.length - 1;
+  while (i > 0 && isTailSystemItem(pool[i].id)) i--;
+  return i;
 }
 
 function resolveFallback(np: NormalizedPreset, mode: SlotGroup['anchor']['fallback']): { after?: string; before?: string } {
-  const n = np.items.length;
+  // ⚠️ 兜底也必须落在「order 里有位置」的条目旁边，否则写回时同样会甩到最后
+  const pool = np.items.filter((it) => it.inOrder);
+  const n = pool.length;
   if (n === 0) return {};
   switch (mode) {
-    case 'early':
-      return { after: np.items[Math.min(3, n - 1)].id };
+    case 'early': {
+      // 优先落在身份声明（main）之后，其次第一条之后。
+      // 旧实现写死 `items[3]` —— 遇到条目数少于 4 或前几条是别的结构时位置很怪。
+      const mi = pool.findIndex((it) => it.id === 'main');
+      return { after: pool[mi >= 0 ? mi : 0].id };
+    }
     case 'after-charinfo':
     case 'before-history':
-      return { after: np.items[Math.max(0, Math.floor(n * 0.6))].id };
+      return { after: pool[Math.max(0, Math.floor(n * 0.6))].id };
     case 'after-history':
-      return { after: np.items[Math.max(0, n - 2)].id };
+      return { after: pool[Math.max(0, n - 2)].id };
+    case 'late':
+      // 靠后，但跳过尾部系统件（NSFW 隔离层的兜底）
+      return { after: pool[Math.max(0, lastNonSystemIndex(pool) - 2)].id };
     case 'end':
     default:
-      return { after: np.items[n - 1].id };
+      return { after: pool[lastNonSystemIndex(pool)].id };
   }
 }
 
@@ -315,42 +427,66 @@ export function planZhinoInsertions(preset: any): InsertionPlanItem[] {
   const plan: InsertionPlanItem[] = [];
   if (!np) return plan;
 
-  for (const group of ZHINO_GROUPS) {
-    const existing = group.slots.some((s) => indexOfItem(np, s.identifier) >= 0);
+  /** 本轮已排定的智脑槽位（供 afterSlot / beforeSlot 依赖 —— 被依赖组必须排在前面） */
+  const slotPlan = new Set<string>();
 
-    const candidates: Array<{ id: string; tag: string; mode: 'after' | 'before' }> = [];
+  for (const group of ZHINO_GROUPS) {
+    const existing = group.slots.some((s) => indexOfAny(np, s.identifier) >= 0);
+    const preferLast = group.anchor.preferLast !== false;
+
+    // ★ 槽位依赖优先：主人指定的固定相对位置（如「NSFW 隔离层紧跟梦呓」），
+    //   命中就完全不再看其他锚点 —— 位置固定可预期，不跟着各预设的花式命名跑。
+    let slotDep: { pos: number; after?: string; before?: string; tag: string } | undefined;
+    const depId = group.anchor.afterSlot || group.anchor.beforeSlot;
+    if (depId && (indexOfItem(np, depId) >= 0 || slotPlan.has(depId))) {
+      const isAfter = !!group.anchor.afterSlot;
+      slotDep = isAfter
+        ? { pos: 0, after: depId, tag: `紧跟「${slotNameById(depId)}」之后` }
+        : { pos: 0, before: depId, tag: `紧跟「${slotNameById(depId)}」之前` };
+    }
+
+    interface Cand { pos: number; after?: string; before?: string; tag: string }
+    const sysCands: Cand[] = [];
+    const kwCands: Cand[] = [];
+
     for (const id of group.anchor.afterIdentifiers || []) {
-      if (indexOfItem(np, id) >= 0) candidates.push({ id, tag: `系统锚点 after:${id}`, mode: 'after' });
+      const i = indexOfItem(np, id);
+      if (i >= 0) sysCands.push({ pos: i + 1, after: id, tag: `系统锚点 after:${id}` });
     }
     for (const id of group.anchor.beforeIdentifiers || []) {
-      if (indexOfItem(np, id) >= 0) candidates.push({ id, tag: `系统锚点 before:${id}`, mode: 'before' });
+      const i = indexOfItem(np, id);
+      if (i >= 0) sysCands.push({ pos: i, before: id, tag: `系统锚点 before:${id}` });
     }
+    // 名称关键词：**收集全部命中**，再按 preferLast 取舍
+    // （`思维链` 会命中 开始/主体/结束 三条，只取第一条是不够的）
     for (const kw of group.anchor.afterNameKeywords || []) {
-      const hit = findByKeyword(np, [kw]);
-      if (hit) candidates.push({ id: hit, tag: `名称 after:「${kw}」`, mode: 'after' });
+      for (const i of allIndexesByKeyword(np, kw)) {
+        kwCands.push({ pos: i + 1, after: np.items[i].id, tag: `名称 after:「${kw}」` });
+      }
     }
     for (const kw of group.anchor.beforeNameKeywords || []) {
-      const hit = findByKeyword(np, [kw]);
-      if (hit) candidates.push({ id: hit, tag: `名称 before:「${kw}」`, mode: 'before' });
-    }
-
-    let bestPos = -1;
-    let insertAfter: string | undefined;
-    let insertBefore: string | undefined;
-    let matchedBy = '';
-    for (const c of candidates) {
-      const idx = indexOfItem(np, c.id);
-      if (idx < 0) continue;
-      const pos = c.mode === 'after' ? idx + 1 : idx;
-      if (pos > bestPos) {
-        bestPos = pos;
-        insertAfter = c.mode === 'after' ? c.id : undefined;
-        insertBefore = c.mode === 'before' ? c.id : undefined;
-        matchedBy = c.tag;
+      for (const i of allIndexesByKeyword(np, kw)) {
+        kwCands.push({ pos: i, before: np.items[i].id, tag: `名称 before:「${kw}」` });
       }
     }
 
-    const confident = bestPos >= 0;
+    // 置信度分层：systemFirst 的组，系统锚点一旦命中就完全忽略关键词
+    const candidates = group.anchor.systemFirst && sysCands.length > 0
+      ? sysCands
+      : [...sysCands, ...kwCands];
+
+    let chosen: Cand | undefined = slotDep;
+    if (!slotDep) {
+      for (const c of candidates) {
+        if (!chosen) { chosen = c; continue; }
+        if (preferLast ? c.pos > chosen.pos : c.pos < chosen.pos) chosen = c;
+      }
+    }
+
+    let insertAfter = chosen?.after;
+    let insertBefore = chosen?.before;
+    let matchedBy = chosen?.tag || '';
+    const confident = !!chosen;
     if (!confident) {
       const fb = resolveFallback(np, group.anchor.fallback);
       insertAfter = fb.after;
@@ -367,20 +503,76 @@ export function planZhinoInsertions(preset: any): InsertionPlanItem[] {
         matchedBy: existing ? '已存在，跳过' : matchedBy,
         confident: existing ? true : confident,
       });
+      // 登记给后面的组当锚点用（afterSlot / beforeSlot）
+      slotPlan.add(slot.identifier);
     }
   }
 
   return plan;
 }
 
+/** 按槽位 identifier 找显示名（供 `紧跟「xxx」之后` 这类提示用） */
+function slotNameById(id: string): string {
+  for (const g of ZHINO_GROUPS) {
+    const s = g.slots.find((x) => x.identifier === id);
+    if (s) return s.name;
+  }
+  return id;
+}
+
 // ========== 应用层（按原结构写回） ==========
+
+/** 一条槽位最终落到哪（供 UI 展示，便于人工核对） */
+export interface InsertionDetail {
+  identifier: string;
+  name: string;
+  /** 落点描述，如「🔀西式表达」之后 */
+  target: string;
+  matchedBy: string;
+  confident: boolean;
+}
 
 export interface AdaptResult {
   preset: PresetJson;
   inserted: string[];
   skipped: string[];
+  /** 清理掉的**已废弃**槽位（如隐藏楼摘要） */
+  removed: string[];
   /** 识别到的结构类型（调试/提示用） */
   kind: 'file' | 'api';
+  /** 每条新插入槽位的落点明细 */
+  details: InsertionDetail[];
+}
+
+/**
+ * **已废弃**的槽位：适配时从预设里清掉（旧的适配产物可能还留着）。
+ *
+ * 隐藏楼摘要在智脑里没有数据源（`index.ts` 的 slotTexts 从未赋值、
+ * `contextReplacement.ts` 的注入函数也没接线），插进预设只会得到一条永远为空的条目。
+ * 注意：`slotInjection.ts` 里**仍然保留**它的 tag 定义 —— 那是为了清理残留标记，别一起删。
+ */
+const DEPRECATED_SLOT_IDS = ['zhino_context_summary'];
+
+/** 从预设里移除已废弃的槽位条目（同时清 `prompts` 与 `prompt_order`） */
+function removeDeprecatedSlots(next: PresetJson, kind: 'file' | 'api'): string[] {
+  const removed: string[] = [];
+  if (!Array.isArray(next.prompts)) return removed;
+  const list = next.prompts as any[];
+  const order = kind === 'file' ? (next.prompt_order?.[0]?.order as any[] | undefined) : undefined;
+
+  for (const dead of DEPRECATED_SLOT_IDS) {
+    let hit = false;
+    if (Array.isArray(order)) {
+      for (let i = order.length - 1; i >= 0; i--) {
+        if (idOf(order[i]) === dead) { order.splice(i, 1); hit = true; }
+      }
+    }
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (idOf(list[i]) === dead) { list.splice(i, 1); hit = true; }
+    }
+    if (hit) removed.push(dead);
+  }
+  return removed;
 }
 
 /** 文件结构的新条目字段（照抄星光 v0.8.1 模板） */
@@ -426,17 +618,19 @@ export function applyZhinoInsertions(preset: any, plan: InsertionPlanItem[]): Ad
   const skipped: string[] = [];
 
   if (!np) {
-    return { preset: preset as PresetJson, inserted, skipped, kind: 'file' };
+    return { preset: preset as PresetJson, inserted, skipped, removed: [], kind: 'file', details: [] };
   }
 
   const next = JSON.parse(JSON.stringify(preset)) as PresetJson;
   const kind = np.kind;
+  // 先清废弃槽位（旧适配产物里可能还留着隐藏楼摘要那条空条目）
+  const removed = removeDeprecatedSlots(next, kind);
 
   for (const group of ZHINO_GROUPS) {
     const items = plan.filter((p) => p.groupId === group.id);
     if (items.length === 0) continue;
 
-    const allExist = group.slots.every((s) => indexOfItem(np, s.identifier) >= 0);
+    const allExist = group.slots.every((s) => indexOfAny(np, s.identifier) >= 0);
     if (allExist) {
       skipped.push(...group.slots.map((s) => s.identifier));
       continue;
@@ -494,7 +688,53 @@ export function applyZhinoInsertions(preset: any, plan: InsertionPlanItem[]): Ad
     }
   }
 
-  return { preset: next, inserted, skipped, kind };
+  return { preset: next, inserted, skipped, removed, kind, details: describeInsertions(next, kind, inserted, plan) };
+}
+
+/**
+ * 算出「每条新槽位最终落在哪」。
+ * 跳过同一批插入的其他智脑条目，这样同组的 5 条会显示**同一个**参照物，便于核对。
+ */
+function describeInsertions(
+  next: PresetJson,
+  kind: 'file' | 'api',
+  inserted: string[],
+  plan: InsertionPlanItem[],
+): InsertionDetail[] {
+  const ids: string[] = kind === 'file'
+    ? ((next.prompt_order?.[0]?.order || []) as any[]).map((e) => idOf(e))
+    : ((next.prompts || []) as any[]).map((p) => idOf(p));
+
+  const nameById = new Map<string, string>();
+  for (const p of (next.prompts || []) as any[]) nameById.set(idOf(p), String(p.name || ''));
+
+  const zhinoSet = new Set(ZHINO_GROUPS.flatMap((g) => g.slots.map((s) => s.identifier)));
+
+  return inserted.map((id) => {
+    const i = ids.indexOf(id);
+    const item = plan.find((x) => x.identifier === id);
+    let target: string;
+    if (item?.insertAfter && zhinoSet.has(item.insertAfter)) {
+      // ★ 槽位依赖：直接显示被依赖的槽位名（如「梦呓」之后），不要把整组跳过
+      target = `「${nameById.get(item.insertAfter) || item.insertAfter}」之后`;
+    } else if (item?.insertBefore && zhinoSet.has(item.insertBefore)) {
+      target = `「${nameById.get(item.insertBefore) || item.insertBefore}」之前`;
+    } else if (i >= 0) {
+      // 跳过同一批插入的其他智脑条目，让同组的多条显示同一个参照物
+      let k = i - 1;
+      while (k >= 0 && zhinoSet.has(ids[k])) k--;
+      target = k >= 0 ? `「${nameById.get(ids[k]) || ids[k]}」之后` : '(最前)';
+    } else {
+      target = '(未找到)';
+    }
+    return {
+      identifier: id,
+      name: nameById.get(id) || id,
+      target,
+      matchedBy: item?.matchedBy || '',
+      confident: item?.confident !== false,
+    };
+  });
 }
 
 // ========== 一键适配酒馆当前预设 ==========
@@ -505,6 +745,8 @@ export interface AdaptTavernResult {
   inserted?: string[];
   skipped?: string[];
   newName?: string;
+  /** 每条槽位最终落在哪（UI 核对用） */
+  details?: InsertionDetail[];
 }
 
 /**
@@ -540,9 +782,9 @@ export async function adaptCurrentPresetInTavern(): Promise<AdaptTavernResult> {
   }
 
   const plan = planZhinoInsertions(usePreset);
-  const { preset, inserted, skipped } = applyZhinoInsertions(usePreset, plan);
+  const { preset, inserted, skipped, removed, details } = applyZhinoInsertions(usePreset, plan);
 
-  if (inserted.length === 0) {
+  if (inserted.length === 0 && removed.length === 0) {
     return { ok: false, message: '当前预设已包含全部智脑条目，无需适配', skipped };
   }
 
@@ -557,11 +799,19 @@ export async function adaptCurrentPresetInTavern(): Promise<AdaptTavernResult> {
     return { ok: false, message: `写入预设失败：${e?.message || e}`, inserted };
   }
 
+  const weak = details.filter((d) => !d.confident).length;
+  const parts = [
+    `新插入 ${inserted.length} 条`,
+    `跳过 ${skipped.length} 条`,
+    removed.length > 0 ? `清理废弃槽位 ${removed.length} 条` : '',
+    weak > 0 ? `其中 ${weak} 条靠兜底定位` : '',
+  ].filter(Boolean);
   return {
     ok: true,
-    message: `已生成预设「${newName}」：新插入 ${inserted.length} 条，跳过 ${skipped.length} 条（结构：${np.kind === 'file' ? '预设文件' : '酒馆助手 API'}）。去预设列表切过去即可。`,
+    message: `已生成预设「${newName}」：${parts.join('，')}（结构：${np.kind === 'file' ? '预设文件' : '酒馆助手 API'}）。去预设列表切过去即可。`,
     inserted,
     skipped,
+    details,
     newName,
   };
 }
