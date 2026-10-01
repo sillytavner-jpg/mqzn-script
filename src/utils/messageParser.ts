@@ -54,10 +54,21 @@ export interface MessageParserTags {
   /** 注释形式的思维链成对标记 */
   commentChainPairs: ReadonlyArray<readonly [string, string]>;
   /**
-   * 正文之外的结构性块标签。仅在「整条消息没有 <content> 标签、走兜底」时剥掉，
+   * 正文之外的结构性块标签。仅在「整条消息没有正文标签、走兜底」时剥掉，
    * 避免变量更新／剧情选项／时间结算／防截断尾巴被当成叙事。
    */
   structureTags: readonly string[];
+  /**
+   * 正文标签名（不含尖括号），如 'content' → `<content>…</content>`。
+   * 多个标签**任一命中即读取**；同时命中多个时按出现顺序拼接。
+   * 由「预设适配」弹窗按玩家预设自定义（默认 ['content']）。
+   */
+  contentTags: readonly string[];
+  /**
+   * 时间标签名（不含尖括号），如 'time' → `<time>…</time>`。
+   * 多个标签任一命中即取（取最靠前的一个）。默认 ['time']。
+   */
+  timeTags: readonly string[];
 }
 
 export const DEFAULT_MESSAGE_PARSER_TAGS: MessageParserTags = {
@@ -88,6 +99,8 @@ export const DEFAULT_MESSAGE_PARSER_TAGS: MessageParserTags = {
     'meow_FM',
     'plot_outline',
   ],
+  contentTags: ['content'],
+  timeTags: ['time'],
 };
 
 /** 思维链开头的裸特征（无标签、用于识别被截断的思维链） */
@@ -102,9 +115,12 @@ let CHAIN_HEADS: readonly string[] = [];
 let CHAIN_RESIDUE_RE: RegExp = /$^/;
 let STRUCTURE_BLOCK_RE: RegExp = /$^/;
 let STRUCTURE_BARE_RE: RegExp = /$^/;
+/** 正文块：`<content>…</content>`（标签名可配置） */
+let CONTENT_BLOCK_RE: RegExp = /$^/;
+/** 时间块：`<time>…</time>`（标签名可配置） */
+let TIME_BLOCK_RE: RegExp = /$^/;
 
 const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
-const TIME_BLOCK_RE = /<time>[\s\S]*?<\/time>/gi;
 
 /** 正则元字符转义（用于把标签名拼进正则） */
 function escapeRe(text: string): string {
@@ -155,6 +171,39 @@ function rebuildTagTables(): void {
   STRUCTURE_BARE_RE = structAlt
     ? new RegExp(`<\\/?(?:${structAlt})\\b[^>]*>`, 'gi')
     : /$^/;
+
+  // ⚠️ 这里**不能用 `\b`**：玩家可能填中文标签（如「正文」），而 JS 的 `\b` 只认 ASCII 词字符，
+  //    `<正文>` 会被判成"无边界"而匹配失败。改用「后跟空白 / `/` / `>`」的显式断言。
+  const contentAlt = tags.contentTags.map(escapeRe).join('|');
+  CONTENT_BLOCK_RE = contentAlt
+    ? new RegExp(`<(${contentAlt})(?=[\\s/>])[^>]*>([\\s\\S]*?)<\\/\\1>`, 'gi')
+    : /$^/;
+
+  const timeAlt = tags.timeTags.map(escapeRe).join('|');
+  TIME_BLOCK_RE = timeAlt
+    ? new RegExp(`<(${timeAlt})(?=[\\s/>])[^>]*>[\\s\\S]*?<\\/\\1>`, 'gi')
+    : /$^/;
+}
+
+/**
+ * 找到「最早的正文标签开标签」下标（多个正文标签任一命中即算，取最靠前的那个）。
+ * 注意：与旧实现一致，用 `<name` 前缀匹配（宽松），以兼容 `<content style=...>` 这类带属性写法。
+ */
+function contentOpenIndexOf(text: string, from = 0): number {
+  let best = -1;
+  for (const tag of activeTags.contentTags) {
+    const i = indexOfCI(text, `<${tag}`, from);
+    if (i >= 0 && (best < 0 || i < best)) best = i;
+  }
+  return best;
+}
+
+/** 取出最早出现的时间块内容（标签名可配置） */
+function firstTimeBlockText(text: string): string | null {
+  for (const m of text.matchAll(TIME_BLOCK_RE)) {
+    return m[0].replace(/^<[^>]*>/, '').replace(/<\/[^>]*>$/, '').trim();
+  }
+  return null;
 }
 
 rebuildTagTables();
@@ -172,6 +221,61 @@ export function configureMessageParser(patch: Partial<MessageParserTags>): void 
 /** 读取当前生效的标签配置 */
 export function getMessageParserTags(): MessageParserTags {
   return activeTags;
+}
+
+/** 玩家在「预设适配」弹窗里填的三类标签（全局设置里存的就是这个形状） */
+export interface CustomOutputTags {
+  /** 思维链标签（追加到内置默认之上） */
+  thinking?: readonly string[];
+  /** 正文标签 */
+  content?: readonly string[];
+  /** 时间标签 */
+  time?: readonly string[];
+}
+
+/**
+ * 清洗用户填写的标签：去掉可能顺手写上的尖括号／方括号／斜杠与空白，去重。
+ * 用户填 `<content>`、`[thinking]`、`content` 都会被归一成 `content`。
+ */
+function sanitizeTagNames(list?: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of list || []) {
+    const name = String(raw || '')
+      .trim()
+      .replace(/^[<[/\s]+/, '')
+      .replace(/[>\]]+$/, '')
+      .trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(name);
+  }
+  return out;
+}
+
+/**
+ * 应用「预设适配」弹窗里玩家填的标签。
+ *
+ * 语义：**追加**（内置默认 + 玩家自定义），**同类任一命中即读取** ——
+ * 所以留空 = 完全走内置默认（兼容星光预设与 [metacognition] 那套），
+ * 填了也不会把默认标签弄丢，只是多认几套写法。
+ *
+ * 每次调用都从 DEFAULT 重建，重复调用不会累积。
+ */
+export function applyCustomOutputTags(custom?: CustomOutputTags | null): void {
+  const thinking = sanitizeTagNames(custom?.thinking);
+  const content = sanitizeTagNames(custom?.content);
+  const time = sanitizeTagNames(custom?.time);
+  activeTags = {
+    ...DEFAULT_MESSAGE_PARSER_TAGS,
+    angleChainTags: [...DEFAULT_MESSAGE_PARSER_TAGS.angleChainTags, ...thinking],
+    bracketChainTags: [...DEFAULT_MESSAGE_PARSER_TAGS.bracketChainTags, ...thinking],
+    contentTags: [...DEFAULT_MESSAGE_PARSER_TAGS.contentTags, ...content],
+    timeTags: [...DEFAULT_MESSAGE_PARSER_TAGS.timeTags, ...time],
+  };
+  rebuildTagTables();
 }
 
 /**
@@ -232,8 +336,8 @@ export function parseAssistantMessage(messageText: string): ParsedAssistantMessa
   }
 
   // 2) 残缺形态：只有闭合标记，标记之前的内容就是思维链
-  //    仅在闭合标记出现在 <content> 之前时才认（避免误吞正文）
-  const contentOpenIdx0 = indexOfCI(body, '<content');
+  //    仅在闭合标记出现在正文标签之前时才认（避免误吞正文）
+  const contentOpenIdx0 = contentOpenIndexOf(body);
   let loneIdx = -1;
   let loneTok = '';
   for (const tok of CHAIN_LONE_CLOSERS) {
@@ -250,7 +354,7 @@ export function parseAssistantMessage(messageText: string): ParsedAssistantMessa
     body = body.slice(loneIdx + loneTok.length);
   }
 
-  // 2.5) 截断的思维链：整条消息从思维链开头起、既无闭合标记也无 <content>
+  // 2.5) 截断的思维链：整条消息从思维链开头起、既无闭合标记也无正文标签
   //      （生成被中断，正文压根没写出来）→ 全部归思维链，正文判空
   if (contentOpenIdx0 < 0 && loneIdx < 0) {
     const head = body.replace(/^\s+/, '').toLowerCase();
@@ -262,16 +366,19 @@ export function parseAssistantMessage(messageText: string): ParsedAssistantMessa
   }
 
   // 3) 取正文
-  const contentOpenIdx = indexOfCI(body, '<content');
+  const contentOpenIdx = contentOpenIndexOf(body);
   let content: string;
   if (contentOpenIdx >= 0) {
-    const matches = Array.from(body.matchAll(/<content\b[^>]*>([\s\S]*?)<\/content>/gi));
-    content = matches.map(m => m[1].trim()).filter(Boolean).join('\n\n');
-    // <content> 之前的残留（时间块除外）= 思维链尾巴，兜底收走
+    const matches = Array.from(body.matchAll(CONTENT_BLOCK_RE))
+      .map(m => ({ idx: m.index ?? 0, text: (m[2] || '').trim() }))
+      .filter(x => x.text)
+      .sort((a, b) => a.idx - b.idx);
+    content = matches.map(m => m.text).join('\n\n');
+    // 正文标签之前的残留（时间块除外）= 思维链尾巴，兜底收走
     const pre = body.slice(0, contentOpenIdx);
     if (!isBlankAfterResidue(pre)) chainParts.push(pre);
   } else {
-    // 无 <content> 标签：整条消息兜底当正文，但先剥掉正文之外的结构性块
+    // 无正文标签：整条消息兜底当正文，但先剥掉正文之外的结构性块
     // （变量更新／剧情选项／时间结算／防截断尾巴），否则会被当成叙事喂给分析
     content = stripStructureBlocks(body);
   }
@@ -283,10 +390,10 @@ export function parseAssistantMessage(messageText: string): ParsedAssistantMessa
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  // 5) 前置 <time> 时间信息
-  const timeMatch = raw.match(/<time>([\s\S]*?)<\/time>/i);
-  if (timeMatch) {
-    content = `[时间 ${timeMatch[1].trim()}]\n${content}`;
+  // 5) 前置时间信息（时间标签名可配置）
+  const timeText = firstTimeBlockText(raw);
+  if (timeText) {
+    content = `[时间 ${timeText}]\n${content}`;
   }
 
   // 6) 归一化思维链

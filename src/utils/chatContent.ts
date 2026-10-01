@@ -109,6 +109,24 @@ export function readAssistantExtractedContentAtFloor(aiFloor: number): string | 
   return extractContentFromMessage(getMessageText(messages[0]));
 }
 
+/**
+ * 读第0层「开场白」正文。
+ *
+ * ⚠️ 与 `readAssistantContentAtFloor` 的关键区别：**不做 200 字门槛校验**。
+ * 前端卡（带界面 / 让玩家填表）的开场白常常只有几十字，走常规通道会被
+ * `isValidMainContent` 当成「正文回空」丢掉；但它往往是整张卡唯一的世界观底账，
+ * 第一次小总结需要用它与首轮正文合并做图谱。
+ */
+export function readOpeningFloorContent(fallback?: CapturedContent[]): string {
+  const messages = getChatMessagesSafe(0, { role: 'assistant' });
+  if (messages && messages.length > 0 && !isIgnoredMessageKind(messages[0])) {
+    const parsed = parseAssistantMessage(getMessageText(messages[0]));
+    if (parsed.content.trim()) return parsed.content.trim();
+  }
+  const cached = (fallback || []).find(c => c.messageId === 0 && c.content && c.content.trim());
+  return cached?.content.trim() || '';
+}
+
 export function readAssistantContentsInRange(
   startFloor: number,
   endFloor: number,

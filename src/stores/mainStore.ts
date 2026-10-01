@@ -471,11 +471,29 @@ export interface ScriptSettings {
     /** 破限词模式：legacy = 老模型 / flash = 3.7f · 3.8f */
     jailbreakMode: 'legacy' | 'flash';
     /**
-     * 状态文档 patch 灰度开关（按模块名开启）。
+     * 状态文档 patch 灰度开关（按模块名开启）—— 即 UI 上的「输出模式：MUV 化」。
      * 缺省 = 该模块走旧的全量 JSON 输出；置 true 才启用 patch 输出。
      * 例：{ small_summary: true }
+     *
+     * ⚠️ A5.x 起**默认全关**（实测收益不稳定，降级为「实验性功能」按需开启）。
+     * 存量数据里的旧默认三件套由 index.ts 用 `muvDefaultOffApplied` 做一次性清空。
      */
     statePatchEnabled: Record<string, boolean>;
+    /** 内部标记：MUV 默认改关的一次性迁移是否已执行 */
+    muvDefaultOffApplied: boolean;
+    /**
+     * 预设输出标签覆盖（**全局**，不属于单个聊天）。
+     * 玩家在「预设适配」弹窗里按自己的预设填；**空数组 = 用内置默认**。
+     * 读取语义为「同类标签任一命中即生效」（见 messageParser 的 applyCustomOutputTags）。
+     */
+    outputTags: {
+      /** 思维链标签名（追加到内置默认之上） */
+      thinking: string[];
+      /** 正文标签名，默认 content → `<content>…</content>` */
+      content: string[];
+      /** 时间标签名，默认 time → `<time>…</time>` */
+      time: string[];
+    };
     schedulerMode: 'concurrent' | 'serial';
     // API 监听器（调试用，始终开启）
     apiMonitorEnabled: boolean;
@@ -683,12 +701,19 @@ const ScriptSettingsSchema = z
           tail: z.string().optional(),
         })).prefault({}),
         jailbreakMode: z.string().prefault('legacy'), // 'legacy' | 'flash'
-        // 默认只开这三个：它们的输出量最大、实测收益最稳
-        statePatchEnabled: z.record(z.string(), z.boolean()).prefault({
-          small_summary: true,
-          grand_summary: true,
-          character_memory: true,
-        }),
+        // MUV 化（输出结构 patch）**默认全关**：实测收益不稳定，降级为「实验性功能」。
+        // 存量数据里那份「默认三件套」由 index.ts 做一次性清空（见 muvDefaultOffApplied）。
+        statePatchEnabled: z.record(z.string(), z.boolean()).prefault({}),
+        // MUV 默认改关的一次性迁移标记
+        muvDefaultOffApplied: z.boolean().prefault(false),
+        // 预设输出标签覆盖（全局；空数组 = 用内置默认）
+        outputTags: z
+          .object({
+            thinking: z.array(z.string()).prefault([]),
+            content: z.array(z.string()).prefault([]),
+            time: z.array(z.string()).prefault([]),
+          })
+          .prefault({ thinking: [], content: [], time: [] }),
         schedulerMode: z.string().prefault('concurrent'), // 'concurrent' | 'serial'
         apiMonitorEnabled: z.boolean().prefault(true),
         relationshipInjectionEnabled: z.boolean().prefault(true),
@@ -5870,6 +5895,56 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     });
   }
 
+  // ── 批量总结的三个可勾选项 ──
+  // 事件总结 + 角色记忆总结 = 原有的一套（同一条大总结流水线）；
+  // 图谱总结是独立的补跑流水线（逐层补小总结），两者可任意组合。
+  // 默认只勾「事件 + 角色记忆」；图谱按建议单独跑（一次 20 层左右更稳）。
+  const batchDoEvent = ref(true);
+  const batchDoMemory = ref(true);
+  const batchDoGraph = ref(false);
+  /**
+   * 图谱总结：忽略「已有小总结」的续接规则，强制把范围内全部楼层重发一遍。
+   * （图谱被清空时会**自动**忽略，这个开关是给「图谱还在但想重跑某段」用的）
+   */
+  const batchGraphIgnoreExisting = ref(false);
+
+  /** 批量图谱总结进度（独立于大总结进度；一批 = 一次请求 = 一份图谱） */
+  const batchGraphProgress = reactive({
+    status: 'idle' as 'idle' | 'running' | 'done' | 'cancelled' | 'paused',
+    currentBatch: 0,
+    totalBatches: 0,
+    totalMessages: 0,
+    currentBatchFloorStart: undefined as number | undefined,
+    currentBatchFloorEnd: undefined as number | undefined,
+    currentBatchCount: undefined as number | undefined,
+    startFloor: 0,
+    endFloor: 0,
+    batchSize: 20,
+    summarizedBatches: 0,
+    committedFloor: undefined as number | undefined,
+    skippedFloors: 0,
+    errors: [] as Array<{ batch: number; message: string; retries: number }>,
+  });
+
+  function resetBatchGraphProgress() {
+    Object.assign(batchGraphProgress, {
+      status: 'idle',
+      currentBatch: 0,
+      totalBatches: 0,
+      totalMessages: 0,
+      currentBatchFloorStart: undefined,
+      currentBatchFloorEnd: undefined,
+      currentBatchCount: undefined,
+      startFloor: 0,
+      endFloor: 0,
+      batchSize: 20,
+      summarizedBatches: 0,
+      committedFloor: undefined,
+      skippedFloors: 0,
+      errors: [],
+    });
+  }
+
   // ========== API 重试弹窗 ==========
 
   /** 当前重试状态（null = 无重试进行中） */
@@ -6500,6 +6575,12 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     batchSize,
     batchProgress,
     resetBatchProgress,
+    batchDoEvent,
+    batchDoMemory,
+    batchDoGraph,
+    batchGraphIgnoreExisting,
+    batchGraphProgress,
+    resetBatchGraphProgress,
     // 大总结引导弹窗
     showSummaryGuidance,
     summaryPendingFloors,

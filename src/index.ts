@@ -39,6 +39,7 @@ import { buildWorldGraphInjection, injectWorldGraphIntoCompletion, removeWorldGr
 import { getHiddenFloorsFromChat } from './core/floorVisibility';
 import { buildRelationshipInjection, injectRelationshipProfiles, removeRelationshipInjection, updateRelationshipWorldbookCacheFromLore } from './core/relationshipAnalysis';
 import {
+  applyCustomOutputTags,
   countContentTextLength,
   isValidMainContent,
   MIN_VALID_CONTENT_TEXT_LENGTH,
@@ -76,6 +77,7 @@ import {
   readDreamtalkPair,
   readLatestAssistantContent,
   readLatestUserInputBefore,
+  readOpeningFloorContent,
   readPendingSummaryContents,
   readRecentAssistantContents,
 } from './utils/chatContent';
@@ -302,6 +304,42 @@ function fuzzyMatchKeyword(keyword: string, text: string): boolean {
   return false;
 }
 
+/**
+ * 把全局设置里「预设适配」填的自定义输出标签应用到解析器。
+ * 留空 / 读不到 → 完全走内置默认（兼容星光预设与 [metacognition] 那套）。
+ */
+function applyOutputTagsFromSettings(
+  tags?: { thinking?: string[]; content?: string[]; time?: string[] } | null,
+): void {
+  applyCustomOutputTags(tags || undefined);
+}
+
+/**
+ * MUV 化（输出结构 patch）默认改关的一次性迁移。
+ *
+ * 只清空「恰好等于旧默认三件套」的那份配置（= 从没手动调过的人）；
+ * 玩家自己挑过模块组合的保留不动，不会被误伤。
+ */
+function migrateMuvDefaultOff(store: ReturnType<typeof useMainStore>): void {
+  const s: any = store.settings;
+  if (!s || s.muvDefaultOffApplied) return;
+  const cur: Record<string, boolean> = s.statePatchEnabled || {};
+  const LEGACY_DEFAULT: Record<string, boolean> = {
+    small_summary: true,
+    grand_summary: true,
+    character_memory: true,
+  };
+  const keys = Object.keys(cur);
+  const isLegacyDefault = keys.length === 3 && keys.every(k => LEGACY_DEFAULT[k] === cur[k]);
+  store.updateSettings({
+    statePatchEnabled: isLegacyDefault ? {} : cur,
+    muvDefaultOffApplied: true,
+  } as any);
+  if (isLegacyDefault) {
+    logInfo('输出模式', 'MUV 化默认已改为关（实验性功能），可在「总览 · 智脑设置」按需开启');
+  }
+}
+
 $(() => {
   const pinia = createPinia();
 
@@ -318,6 +356,10 @@ $(() => {
     styleHandle = teleportStyle();
     app.mount($app[0]);
     const store = useMainStore(pinia);
+    // 输出标签：把「预设适配」弹窗里玩家填的标签喂给解析器（留空 = 内置默认）
+    applyOutputTagsFromSettings(store.settings.outputTags);
+    // MUV 化默认改关（一次性迁移）
+    migrateMuvDefaultOff(store);
     if (options.captureFloorZero !== false && getCurrentChatIdSafe()) {
       store.captureFloorZero();
     }
@@ -621,8 +663,10 @@ $(() => {
     aiThinkingChain?: string,
   ) {
     if (!store.settings.captureEnabled || !store.settings.smallSummaryEnabled) return;
-    // 第0层是开场白/玩家填写信息界面，自动流程不触发小总结，避免浪费API。
-    // 如需为开场白建图谱，可去「总览」手动点击「为开场白生成图谱」。
+    // 第0层是开场白/玩家填写信息界面，**不单独做字数识别、也不单独触发小总结** ——
+    // 前端卡的开场白往往只有几十字，达不到正文门槛，单独跑一次只会白烧 API。
+    // 它的正确归宿：等玩家玩完第一轮（AI 首次回复）时，与首轮正文**合并**做第一次小总结。
+    // 如需给一场没跑过小总结的旧聊天补开场白图谱，可去「总览」手动点「为开场白生成图谱」。
     if (aiFloor <= 0) return;
     // dedupeKey 传 aiFloor 字符串：重roll同楼层时取消队列里等待中的旧任务（旧正文），
     // 让基于新swipe正文的小总结替换它；不同楼层则各自独立 FIFO 排队，不再被丢弃。
@@ -658,6 +702,25 @@ $(() => {
           }
         : undefined;
 
+      // ★ 第一次小总结：把第0层开场白一并总结。
+      //   判定 = 本轮之前没有任何小总结记录（重 roll 首轮时也算），且确实是开局那一两轮
+      //   （`aiFloor <= 3` 覆盖「0 开场白 / 1 玩家 / 2 AI」与「0 开场白 / 1 AI」两种楼层结构），
+      //   避免玩家玩到几十楼才开智脑时，把一个早已过时的开场白硬塞进当轮材料。
+      let openingMaterial = '';
+      try {
+        const earlierSummaries = (store.chatData.smallSummaries || []).filter(
+          r => (r.floorRange?.end ?? r.floorRange?.start ?? -1) < aiFloor,
+        );
+        if (earlierSummaries.length === 0 && aiFloor <= 3) {
+          openingMaterial = readOpeningFloorContent(store.chatData.capturedContents);
+          if (openingMaterial) {
+            logInfo('小总结', `首次小总结并入第0层开场白（${countContentTextLength(openingMaterial)} 字）`);
+          }
+        }
+      } catch (e) {
+        logWarn('小总结', '开场白材料读取失败，降级不带', String(e));
+      }
+
       // 上一轮在场角色 + 物品快照，作为本轮小总结判重上下文
       let previousContext: PreviousRoundContext | undefined;
       try {
@@ -687,6 +750,7 @@ $(() => {
         userText, aiText, userFloor, aiFloor, allNames, store.getUserName(), kgOptions, characterEntries, previousContext,
         store.getBlacklistedCharacters(),
         aiThinkingChain,
+        openingMaterial,
       );
       if (!isCapturedContentCurrent(store, aiFloor, aiText)) {
         logWarn('小总结', `分析完成时来源已变化，丢弃过期结果: 楼层 ${aiFloor}`);

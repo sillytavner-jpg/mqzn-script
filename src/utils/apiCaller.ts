@@ -244,7 +244,15 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
     if (err?.name === 'AbortError') throw err;
     recordApiFailure();
     logError('API调用', 'fetch失败（CORS或网络问题）', String(err.message || err));
-    const netErr = new Error(`网络请求失败: ${err.message || err}\n提示：如果酒馆通过HTTPS加载，API也需要HTTPS；本地API可能需要配置CORS。`);
+    // ⚠️ 这条文案会显示在右上角的重试浮层里 —— 必须**自带请求地址**，
+    //    否则用户只知道"失败了"，不知道是哪个 API 挂了，也没法自己排查。
+    const netErr = new Error(
+      `网络请求失败：${err.message || err}\n`
+      + `请求地址：${apiUrl}\n`
+      + '可能原因：① 地址不通（服务未启动 / 端口写错）② 服务端未开启 CORS '
+      + '③ HTTPS 页面调用 HTTP 接口被浏览器拦截（本地 API 常见）④ 网络中断，或被中转站掐断连接。\n'
+      + '注意：这是浏览器层的连接失败，不是 API 返回的错误码；完整请求记录见「总览 → API 监听」。',
+    );
     recordFailAndThrow('', `网络请求失败: ${err.message || err}`, netErr);
   }
 

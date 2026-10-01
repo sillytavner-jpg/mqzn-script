@@ -26,7 +26,7 @@ import { createEmptyKnowledgeGraph, applyKnowledgeGraphDiff } from '../core/know
 import { cleanCharacterAliases } from '../utils/characterNames';
 import { isValidMainContent } from '../utils/messageParser';
 import { getRecentPatchIssues } from '../utils/stateDoc';
-import { adaptCurrentPresetInTavern } from '../core/presetAdapter';
+import PresetAdaptDialog from './PresetAdaptDialog.vue';
 import BatchSummaryPanel from './BatchSummaryPanel.vue';
 import SchedulerPanel from './SchedulerPanel.vue';
 import { useIsMobile } from '../composables/useIsMobile';
@@ -80,30 +80,8 @@ function toggleStatePatchAll() {
 // patch 异常提示：只展示最近一小时内「丢过条目 / 输出被截断」的轮次
 const recentPatchIssues = computed(() => getRecentPatchIssues(store.chatData));
 
-// ── 预设适配：把智脑槽位条目一键插进「当前使用的预设」──
-const adaptingPreset = ref(false);
-const adaptResult = ref('');
-const adaptOk = ref(false);
-/** 每条槽位最终落在哪 —— 点开可核对 */
-const adaptDetails = ref<Array<{ name: string; target: string; confident: boolean }>>([]);
-async function adaptPreset() {
-  if (adaptingPreset.value) return;
-  adaptingPreset.value = true;
-  adaptResult.value = '';
-  adaptDetails.value = [];
-  try {
-    const r = await adaptCurrentPresetInTavern();
-    adaptOk.value = r.ok;
-    adaptResult.value = r.message;
-    adaptDetails.value = (r.details || []).map((d) => ({ name: d.name, target: d.target, confident: d.confident }));
-    logInfo('预设适配', r.message);
-  } catch (e: any) {
-    adaptOk.value = false;
-    adaptResult.value = `适配失败：${e?.message || e}`;
-  } finally {
-    adaptingPreset.value = false;
-  }
-}
+// ── 预设适配：独立弹窗（① 插入智脑条目 ② 填输出标签）──
+const showPresetDialog = ref(false);
 
 // 大总结引导弹窗（直接调用 store 方法，store.requestSummaryGuidance）
 
@@ -892,7 +870,7 @@ async function triggerFloorSummary() {
         </div>
 
         <div class="zhino-tool">
-          <div class="zhino-tool-label">输出模式</div>
+          <div class="zhino-tool-label">输出模式<span class="zhino-tool-tag">（实验性功能）</span></div>
           <button
             class="zhino-btn-sm"
             :class="{ 'zhino-btn-mode-on': statePatchOn }"
@@ -901,21 +879,14 @@ async function triggerFloorSummary() {
         </div>
 
         <div class="zhino-tool">
-          <div class="zhino-tool-label">预设适配</div>
-          <button class="zhino-btn-sm" :disabled="adaptingPreset" @click="adaptPreset">
-            {{ adaptingPreset ? '适配中…' : '适配当前预设' }}
-          </button>
+          <div class="zhino-tool-label">预设适配<span class="zhino-tool-tag">（插入条目 / 填标签）</span></div>
+          <button class="zhino-btn-sm" @click="showPresetDialog = true">预设适配…</button>
         </div>
       </div>
 
       <div class="zhino-mode-note">
-        输出模式：输出结构 MUV 化 —— 只输出变化的部分（更省 token、未提及的字段不会被改写，且输出被截断时前面的条目仍能保住）。<br>
-        预设适配：把智脑槽位条目插进「当前预设」的合适位置，生成一个「原名（智脑适配）」的新预设，不改动原预设。
-      </div>
-
-      <!-- ⚠️ 输出标签要求：智脑靠这两个标签切分正文，预设里对不上就解析不了 -->
-      <div class="zhino-tag-warn">
-        ⚠️ 预设里的<b>时间标签必须是 &lt;time&gt;&lt;/time&gt;</b>、<b>正文标签必须是 &lt;content&gt;&lt;/content&gt;</b>，请自行去预设里确认。
+        输出模式：输出结构 MUV 化（<b>实验性功能，默认关</b>）—— 只输出变化的部分（更省 token、未提及的字段不会被改写，且输出被截断时前面的条目仍能保住）。<br>
+        预设适配：把智脑槽位条目插进「当前预设」的合适位置，生成一个「原名（智脑适配）」的新预设；同时可填你预设里的<b>思维链 / 正文 / 时间标签</b>，让智脑读懂你的预设。不改动原预设。
       </div>
 
       <!-- patch 异常提示：只有真出问题时才出现 -->
@@ -926,27 +897,9 @@ async function triggerFloorSummary() {
         </div>
         <div class="zhino-mode-note" style="margin-top:4px">若反复出现，建议先关掉输出模式并反馈。</div>
       </div>
-
-      <!-- 适配结果 -->
-      <div
-        v-if="adaptResult"
-        class="zhino-mode-note"
-        :style="{ color: adaptOk ? 'rgba(var(--zn-accent-rgb), 1)' : 'rgba(var(--zn-warn-rgb), 1)', opacity: 1, marginTop: '6px' }"
-      >{{ adaptResult }}</div>
-
-      <!-- 插入明细：每条槽位落在哪，可折叠 -->
-      <details v-if="adaptDetails.length" class="zhino-adapt-detail">
-        <summary>插入明细（{{ adaptDetails.length }} 条）</summary>
-        <div v-for="(d, i) in adaptDetails" :key="i" class="zhino-adapt-row">
-          <span class="zhino-adapt-name">{{ d.name }}</span>
-          <span class="zhino-adapt-arrow">→</span>
-          <span :style="d.confident ? undefined : { color: 'rgba(var(--zn-warn-rgb), 1)' }">{{ d.target }}</span>
-        </div>
-        <div class="zhino-mode-note" style="margin-top:4px">
-          黄色 = 该组没找到锚点，用了兜底位置，可能需要手动挪一下。
-        </div>
-      </details>
     </div>
+
+    <PresetAdaptDialog :visible="showPresetDialog" :is-mobile="isMobile" @close="showPresetDialog = false" />
 
     <!-- 已激活角色 -->
     <div class="zhino-section zhino-icon-section">
@@ -1349,31 +1302,6 @@ async function triggerFloorSummary() {
   color: var(--zn-text-regular);
   opacity: 0.72;
 }
-/* 预设适配的「插入明细」（折叠） */
-.zhino-adapt-detail {
-  margin-top: 6px;
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--zn-text-regular);
-  opacity: 0.85;
-}
-.zhino-adapt-detail > summary {
-  cursor: pointer;
-  user-select: none;
-  opacity: 0.8;
-}
-.zhino-adapt-row {
-  display: flex;
-  gap: 6px;
-  padding: 1px 0 1px 12px;
-}
-.zhino-adapt-name {
-  flex: 0 0 auto;
-}
-.zhino-adapt-arrow {
-  flex: 0 0 auto;
-  opacity: 0.5;
-}
 .zhino-check-row {
   display: flex;
   align-items: center;
@@ -1404,6 +1332,11 @@ async function triggerFloorSummary() {
   font-size: 11px;
   color: var(--zn-text-regular);
   opacity: 0.75;
+}
+.zhino-tool-tag {
+  font-size: 10px;
+  color: var(--zn-text-muted);
+  opacity: 0.8;
 }
 .zhino-seg {
   display: inline-flex;

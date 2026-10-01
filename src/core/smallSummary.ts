@@ -106,6 +106,9 @@ function buildInstruction(
   blacklistedNames?: string[],
   aiThinkingChain?: string,
   usePatch = false,
+  openingMaterial = '',
+  /** 多轮合并材料（批量图谱总结）：提供时**取代** [用户输入]/[AI回复] 两个区块 */
+  multiRoundMaterial = '',
 ): string {
   // 黑名单提醒：本次不要记录黑名单角色（图谱人物/在场/互动均不含）
   const blacklistReminder = buildBlacklistReminder(
@@ -225,14 +228,35 @@ function buildInstruction(
     '',
     '## 输入材料',
     '',
-    '[用户输入]',
-    userInput || '（无用户输入，这是开场白）',
-    '',
-    // 思维链锚点：小总结只做图谱（地点/物品/人物），"谁拿着东西/谁在哪"全靠认人，必须给锚点。
-    // 标签里已写明草稿性内容尚未发生，防止把"构思草稿"里的地点物品当成已发生状态录入图谱。
-    ...(aiThinkingChainBlock ? [aiThinkingChainBlock, ''] : []),
-    '[AI回复]',
-    aiResponse,
+    // ── 多轮合并材料（批量图谱总结）──
+    // 一整批楼层的材料一次性给出，规则里的"本轮"要按"这批材料整体"来理解，
+    // 否则 AI 会把每一楼当成独立一轮，同一件物品反复 add。
+    ...(multiRoundMaterial
+      ? [
+          multiRoundMaterial,
+        ]
+      : [
+          // 第一次小总结：把第0层开场白与首轮正文合并 —— 前端卡的开场白常常很短
+          // （字数过不了常规门槛），却是整张卡的世界观底账，单独放过就永远补不回来了。
+          // 但开场白里夹带的是"设定说明 / 填表引导"，不是已发生的事，得明确压住。
+          ...(openingMaterial
+            ? [
+                '[开场白 · 角色卡开局（世界观底账与场景前提。其中的设定说明、系统提示、填表引导，'
+                + '以及"将要发生"的预告都**不是已发生事件**，不要据此录入地点/物品/人物位置；'
+                + '只有真实叙事段落里的场景与人物才按常规规则录入）]',
+                openingMaterial,
+                '',
+              ]
+            : []),
+          '[用户输入]',
+          userInput || '（无用户输入，这是开场白）',
+          '',
+          // 思维链锚点：小总结只做图谱（地点/物品/人物），"谁拿着东西/谁在哪"全靠认人，必须给锚点。
+          // 标签里已写明草稿性内容尚未发生，防止把"构思草稿"里的地点物品当成已发生状态录入图谱。
+          ...(aiThinkingChainBlock ? [aiThinkingChainBlock, ''] : []),
+          '[AI回复]',
+          aiResponse,
+        ]),
   ];
 
   // 对策4：世界推进挪到 AI 回复后，独立成区（不混主线正文）
@@ -520,6 +544,25 @@ export interface SmallSummaryKgOptions {
   worldProgressMaterial?: string;
 }
 
+/** executeSmallSummary 的可选项（主要给「批量图谱总结」用） */
+export interface SmallSummaryOptions {
+  /**
+   * 多轮合并材料：提供时**取代** `[用户输入]` / `[AI回复]` 两个区块，
+   * 一次总结整批楼层，产出一份图谱。
+   */
+  multiRoundMaterial?: string;
+  /** 输出 token 上限覆盖（批量时材料成倍变多，默认 3072 容易被截断） */
+  maxTokens?: number;
+  /** 中止信号：透传给 fetch，让「停止总结」能真正掐断正在进行的请求 */
+  abortSignal?: AbortSignal;
+  /**
+   * 失败时直接抛错。
+   * 默认行为是吞掉错误、返回一条 `status: 'failed'` 的记录（自动流程靠它记账），
+   * 但批量场景必须抛出来，否则外层重试永远触发不了、把失败当成成功写库。
+   */
+  throwOnError?: boolean;
+}
+
 export async function executeSmallSummary(
   userInput: string,
   aiResponse: string,
@@ -532,8 +575,16 @@ export async function executeSmallSummary(
   previousContext?: PreviousRoundContext,
   blacklistedNames?: string[],
   aiThinkingChain?: string,
+  /** 第一次小总结时并入的第0层开场白正文（之后各轮传空即可） */
+  openingMaterial?: string,
+  options?: SmallSummaryOptions,
 ): Promise<SmallSummaryResult> {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+  // 多轮合并材料（批量图谱总结）：一整批楼层一次性总结，取代单轮的「用户输入 + 正文」
+  const multiRoundMaterial = options?.multiRoundMaterial?.trim() || '';
+  /** 本轮实际喂给 AI 的材料全文（多轮时是多层拼接） */
+  const materialText = multiRoundMaterial || ((userInput || '') + '\n' + aiResponse);
 
   // 构建图谱精简清单段：embedding 召回 top-K 已有条目；空图谱给"首次全 add"提示
   let kgDigest = '';
@@ -548,7 +599,7 @@ export async function executeSmallSummary(
       kgDigest = '（暂无已有图谱条目，本次正文出现的地点/物品均走 add）';
     } else {
       try {
-        const query = ((userInput || '') + '\n' + (aiResponse || '') + '\n' + (kgOptions.worldProgressMaterial || '')).slice(0, 2000);
+        const query = (materialText + '\n' + (kgOptions.worldProgressMaterial || '')).slice(0, 2000);
         let queryEmb: number[] | null = null;
         if (kgOptions.embeddingEnabled && kgOptions.embeddingApiKey) {
           try {
@@ -599,6 +650,8 @@ export async function executeSmallSummary(
     blacklistedNames,
     aiThinkingChain,
     isSmallSummaryPatchEnabled(),
+    openingMaterial || '',
+    multiRoundMaterial,
   );
 
   const orderedPrompts: Array<{ role: 'system' | 'user' | 'assistant'; content: string } | 'user_input'> = [
@@ -611,12 +664,13 @@ export async function executeSmallSummary(
   try {
     const rawResult = await callGenerateRaw({
       user_input: instruction,
-      _monitorLabel: '小总结',
+      _monitorLabel: multiRoundMaterial ? '批量图谱' : '小总结',
       _analysisType: 'small_summary',
       _temperature: 0.5,
-      _maxTokens: 3072,
+      _maxTokens: options?.maxTokens || 3072,
       max_chat_history: 0,
       ordered_prompts: orderedPrompts,
+      ...(options?.abortSignal ? { _abortSignal: options.abortSignal } : {}),
     });
 
     const parsed = parseOutput(rawResult || '');
@@ -624,8 +678,7 @@ export async function executeSmallSummary(
     // 角色名兜底：如果解析未得到角色，用前端扫描补充
     let characters = parsed.presentCharacters;
     if (characters.length === 0 && allCharacterNames.length > 0) {
-      const fullText = (userInput || '') + '\n' + aiResponse;
-      characters = scanCharacterNamesFromContent(fullText, allCharacterNames, characterEntries);
+      characters = scanCharacterNamesFromContent(materialText, allCharacterNames, characterEntries);
     }
 
     const record: SmallSummaryRecord = {
@@ -646,6 +699,9 @@ export async function executeSmallSummary(
     return { record, graphDiff: parsed.graphDiff || undefined, characterLocations: parsed.characterLocations };
   } catch (error: any) {
     logError('小总结', `失败: #${floorStart}~${floorEnd}`, String(error));
+    // 批量场景：把错误抛给调用方，让它走自己的重试 / 停止逻辑
+    //（默认吞错返回 failed 记录会让外层重试永远触发不了，把失败当成成功写库）
+    if (options?.throwOnError) throw error;
     return {
       record: {
         id,

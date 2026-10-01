@@ -744,7 +744,7 @@ onUnmounted(() => {
   top: 12px;
   right: 12px;
   z-index: var(--zn-z-toast);
-  max-width: 360px;
+  max-width: 420px;
   background: var(--zn-card-bg);
   border: 1px solid rgba(var(--zn-warn-rgb), 0.3);
   border-radius: var(--zn-radius);
@@ -758,14 +758,19 @@ onUnmounted(() => {
 .zhino-retry-toast-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
 .zhino-retry-toast-body { flex: 1; min-width: 0; }
 .zhino-retry-toast-title { font-size: 13px; font-weight: 600; color: rgba(var(--zn-warn-rgb), 0.9); }
+/* ⚠️ 这里**不能**用 nowrap + ellipsis：网络错误文案带多行提示（含请求地址），
+   单行截断会让用户只看到前半句、查不出原因。改为换行 + 限高滚动。 */
 .zhino-retry-toast-error {
   font-size: 11px;
+  line-height: 1.55;
   color: rgba(var(--zn-danger-rgb), 0.75);
   margin-top: 4px;
   font-family: var(--zn-font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 8.5em;
+  overflow-y: auto;
+  user-select: text;
 }
 .zhino-retry-toast-actions { margin-top: 8px; display: flex; justify-content: flex-end; }
 .zhino-retry-stop-btn {
