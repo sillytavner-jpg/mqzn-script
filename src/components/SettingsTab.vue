@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, reactive } from 'vue';
+import { ref, nextTick, reactive, computed } from 'vue';
 import { useMainStore } from '../stores/mainStore';
 import { fetchAvailableModels } from '../utils/apiCaller';
 import { useIsMobile } from '../composables/useIsMobile';
@@ -195,26 +195,62 @@ function setSchedulerMode(mode: 'concurrent' | 'serial') {
 }
 
 
-// 数据管理
+// ─── 数据管理：导出分组 + 导入模式 ───
+
+/** 导出内容勾选项（key 必须与 store 的 EXPORT_SCOPE_FIELDS 对齐） */
+const exportScopeOptions = [
+  { key: 'globalSettings', label: '全局设置', hint: '人格 / API 库 / 各项偏好' },
+  { key: 'timeline', label: '时光轴', hint: '大总结与事件时间线' },
+  { key: 'characterMemory', label: '角色记忆', hint: '角色记忆 + 设定档案' },
+  { key: 'graph', label: '知识图谱', hint: '地点 / 物品 / 人物' },
+  { key: 'characterRegistry', label: '角色库', hint: '角色名注册表 + 黑名单' },
+  { key: 'dynamicProfile', label: '动态人设', hint: '' },
+  { key: 'relationship', label: '关系档案', hint: '' },
+  { key: 'items', label: '物品库', hint: '' },
+  { key: 'dreamtalk', label: '梦呓 / NSFW', hint: '' },
+  { key: 'worldProgress', label: '世界推进', hint: '含推演记录' },
+  { key: 'plotDirector', label: '剧情导演', hint: '剧情大纲' },
+  { key: 'worldBook', label: '世界书配置', hint: '条目绑定与勾选' },
+];
+
+const exportScopes = reactive<Record<string, boolean>>({});
+function resetExportScopes(preset: 'default' | 'all' | 'none') {
+  for (const o of exportScopeOptions) {
+    exportScopes[o.key] = preset === 'all'
+      ? true
+      : preset === 'none'
+        ? false
+        : (store.DEFAULT_EXPORT_SCOPES as string[]).includes(o.key);
+  }
+}
+resetExportScopes('default');
+
+const exportScopeCount = computed(() => exportScopeOptions.filter(o => exportScopes[o.key]).length);
+
 function exportData() {
-  const warnings: string[] = [];
-  if ((store.scriptData.personas || []).length === 0) {
-    warnings.push('当前没有用户人格数据（personas 为空）。');
+  const chosen = exportScopeOptions.filter(o => exportScopes[o.key]).map(o => o.key);
+  if (chosen.length === 0) {
+    try { window.toastr?.warning('至少勾选一项导出内容', '导出'); } catch (_) { /* ignore */ }
+    return;
   }
-  if (store.getAllCharacterNames().length === 0) {
-    warnings.push('当前没有角色数据（角色库为空）。');
-  }
-  if (warnings.length > 0) {
-    if (!confirm('⚠️ 导出提醒：\n\n' + warnings.join('\n') + '\n\n导出文件可能不完整，是否继续？')) return;
-  }
-  const data = store.exportAllData();
+  const data = store.exportAllData(chosen);
   const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `zhino_data_${new Date().toISOString().slice(0, 10)}.json`;
+  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  a.download = `zhino_data_${ts}.json`;
   a.click();
   URL.revokeObjectURL(url);
+  logInfo('存储', `导出数据（${chosen.length} 项）`, chosen.join(', '));
+  try { window.toastr?.success(`已导出 ${chosen.length} 项内容`, '导出成功', { timeOut: 3000 }); } catch (_) { /* ignore */ }
+}
+
+/** 导入模式：restore = 同一聊天的备份还原；migrate = 继承旧聊天数据到新聊天 */
+const importMode = ref<'restore' | 'migrate'>('restore');
+function startImport(mode: 'restore' | 'migrate') {
+  importMode.value = mode;
+  fileInput.value?.click();
 }
 
 // 文件选择导入
@@ -222,6 +258,7 @@ function handleFileImport(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) return;
+  const mode = importMode.value;
   const reader = new FileReader();
   reader.onload = (e) => {
     const content = e.target?.result as string;
@@ -235,9 +272,27 @@ function handleFileImport(event: Event) {
           return;
         }
       }
-      store.importAllData(content);
-      logInfo('存储', '数据导入成功');
-      try { window.toastr?.success('数据导入成功', '✅ 导入成功', { timeOut: 3000 }); } catch(_) {}
+      // 继承模式：把即将重置的东西说清楚再动手
+      if (mode === 'migrate') {
+        const ok = confirm(
+          '即将以「继承到新聊天」方式导入\n\n'
+          + '【保留】大总结（时光轴）、角色记忆、知识图谱、动态人设、关系档案、物品库、角色库\n'
+          + '【重置】楼层游标、小总结记录、图谱版本、世界推进记录、正文捕获\n\n'
+          + '重置原因：这些字段绑定的是旧聊天的楼层号，带进新聊天会导致\n'
+          + '大总结 / 梦呓 / 动态人设 / 世界推进不再触发，图谱注入为空。\n\n'
+          + '确认继续？',
+        );
+        if (!ok) { input.value = ''; return; }
+      }
+      store.importAllData(content, { mode });
+      logInfo('存储', mode === 'migrate' ? '数据继承导入成功' : '数据恢复导入成功');
+      try {
+        window.toastr?.success(
+          mode === 'migrate' ? '已继承旧聊天数据（楼层游标已重置）' : '数据导入成功',
+          '✅ 导入成功',
+          { timeOut: 4000 },
+        );
+      } catch (_) { /* ignore */ }
     } catch (err: any) {
       logError('存储', '导入失败', String(err));
       const msg = err?.message || String(err);
@@ -1002,17 +1057,43 @@ function executeSelectiveDelete() {
 
         <!-- 导入导出 + 数据删除 -->
         <div class="zhino-section">
-          <div class="zhino-section-title">本地数据</div>
+          <div class="zhino-section-title">本地数据 · 导出</div>
+
+          <!-- 导出内容勾选 -->
+          <div class="zhino-scope-grid">
+            <label
+              v-for="o in exportScopeOptions"
+              :key="o.key"
+              class="zhino-scope-item"
+              :title="o.hint || o.label"
+            >
+              <input type="checkbox" v-model="exportScopes[o.key]" />
+              <span class="zhino-scope-label">{{ o.label }}</span>
+            </label>
+          </div>
+
           <div class="zhino-btn-row">
-            <button class="zhino-btn-sm" @click="exportData">导出数据</button>
-            <input
-              ref="fileInput"
-              type="file"
-              accept=".json"
-              style="display:none"
-              @change="handleFileImport"
-            />
-            <button class="zhino-btn-sm" @click="fileInput?.click()">导入数据</button>
+            <button class="zhino-btn-sm" @click="resetExportScopes('default')">常用</button>
+            <button class="zhino-btn-sm" @click="resetExportScopes('all')">全选</button>
+            <button class="zhino-btn-sm" @click="resetExportScopes('none')">清空</button>
+            <button class="zhino-btn-sm zhino-btn-save" @click="exportData">导出所选（{{ exportScopeCount }} 项）</button>
+          </div>
+
+          <div class="zhino-section-title" style="margin-top:14px">本地数据 · 导入</div>
+          <div class="zhino-import-hint">
+            <div><b>恢复备份</b> —— 同一个聊天的备份还原，按文件内容覆盖（楼层游标保持不变）</div>
+            <div><b>继承到新聊天</b> —— 把旧聊天的记忆搬到当前聊天，自动重置楼层游标与楼层绑定记录</div>
+          </div>
+          <input
+            ref="fileInput"
+            type="file"
+            accept=".json"
+            style="display:none"
+            @change="handleFileImport"
+          />
+          <div class="zhino-btn-row">
+            <button class="zhino-btn-sm" @click="startImport('restore')">恢复备份</button>
+            <button class="zhino-btn-sm zhino-btn-save" @click="startImport('migrate')">继承到新聊天</button>
             <button class="zhino-btn-sm zhino-btn-danger" @click="showDeletePanel = !showDeletePanel; resetDeletePanel()">数据删除</button>
           </div>
 
@@ -1258,6 +1339,50 @@ function executeSelectiveDelete() {
 </template>
 
 <style scoped>
+/* ── 导出分组勾选（本地数据） ── */
+.zhino-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  gap: 6px 10px;
+  margin-bottom: 10px;
+}
+
+.zhino-scope-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--zn-text-regular);
+  cursor: pointer;
+  user-select: none;
+}
+
+.zhino-scope-item input[type='checkbox'] {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--zn-primary);
+  cursor: pointer;
+}
+
+.zhino-scope-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zhino-import-hint {
+  margin-bottom: 8px;
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--zn-text-muted);
+}
+
+.zhino-import-hint b {
+  color: var(--zn-text-regular);
+}
+
 .zhino-settings-layout {
   display: flex;
   flex-direction: row;

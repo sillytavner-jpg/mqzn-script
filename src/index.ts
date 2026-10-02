@@ -2015,12 +2015,44 @@ $(() => {
     }
   }
 
+  /**
+   * 第一次大总结：把第0层开场白并入待总结材料。
+   *
+   * 开场白常常短于 200 字（前端卡尤其），过不了 `capturedContents` 的正文门槛，
+   * 但它往往含整张卡的世界观前提 —— 只补**第一次**，之后各轮不再重复。
+   * 注意只做临时数组的拼接，**不写回** `chatData.capturedContents`（避免污染持久化数据）。
+   */
+  function withOpeningFloorContent(
+    contents: CapturedContent[],
+    store: ReturnType<typeof useMainStore>,
+  ): CapturedContent[] {
+    // 已有大总结 → 不是第一次，原样返回
+    if ((store.chatData.summaries || []).length > 0) return contents;
+    // 材料里已经有第0层（长开场白能过门槛、已在 capturedContents 里）→ 不重复加
+    if (contents.some(c => c.messageId === 0)) return contents;
+
+    const opening = readOpeningFloorContent(store.chatData.capturedContents);
+    if (!opening) return contents;
+
+    logInfo('大总结', `首次大总结并入第0层开场白（${countContentTextLength(opening)} 字）`);
+    return [
+      {
+        messageId: 0,
+        content: '[开场白 · 角色卡开局（设定与场景前提；其中的说明文字 / 系统提示 / 填表引导不是已发生事件，'
+          + '不要当作剧情事件录入时间线）]\n' + opening,
+        capturedAt: new Date().toISOString(),
+        swipeCount: 0,
+      },
+      ...contents,
+    ];
+  }
+
   async function executeSummaryChain(store: ReturnType<typeof useMainStore>) {
     store.setSummaryInProgress(true);
     logInfo('大总结', '触发大总结');
 
     // 获取待总结内容（排除最新 N 条不总结的 AI 回复）
-    const pendingContents = readPendingSummaryContents(
+    let pendingContents = readPendingSummaryContents(
       store.lastSummaryAtMessageId,
       store.settings.preserveRecentFloors,
       store.chatData.capturedContents,
@@ -2030,6 +2062,11 @@ $(() => {
       store.setSummaryInProgress(false);
       return;
     }
+
+    // ★ 第一次大总结：把第0层开场白一并纳入。
+    //   短开场白过不了 capturedContents 的 200 字门槛，但它常含整张卡的世界观前提；
+    //   只补第一次，之后各轮不再重复（把小总结 / 角色记忆那两条链路也一并覆盖）。
+    pendingContents = withOpeningFloorContent(pendingContents, store);
 
     let retryOutcome: 'success' | 'failed' = 'failed'; // 默认失败，成功路径显式置 success
     try {

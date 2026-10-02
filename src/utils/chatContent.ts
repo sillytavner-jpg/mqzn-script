@@ -118,7 +118,13 @@ export function readAssistantExtractedContentAtFloor(aiFloor: number): string | 
  * 第一次小总结需要用它与首轮正文合并做图谱。
  */
 export function readOpeningFloorContent(fallback?: CapturedContent[]): string {
-  const messages = getChatMessagesSafe(0, { role: 'assistant' });
+  // 先按楼层号 0 读；个别酒馆/扩展版本对 falsy 的 `0` 有「当成空参数」的坑，
+  // 再退回字符串 '0' 兜一次（两种写法在正常版本上都返回同一个结果，开销可忽略）。
+  const byNumber = getChatMessagesSafe(0, { role: 'assistant' });
+  const messages = (byNumber && byNumber.length > 0)
+    ? byNumber
+    : getChatMessagesSafe('0', { role: 'assistant' });
+
   if (messages && messages.length > 0 && !isIgnoredMessageKind(messages[0])) {
     const parsed = parseAssistantMessage(getMessageText(messages[0]));
     if (parsed.content.trim()) return parsed.content.trim();

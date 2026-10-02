@@ -1,4 +1,11 @@
 import { klona } from 'klona';
+import {
+  ALL_EXPORT_SCOPES,
+  DEFAULT_EXPORT_SCOPES,
+  applyMigrationReset,
+  applyScopedChatData,
+  pickChatDataByScopes,
+} from '../utils/dataScope';
 import type { DreamtalkData } from '../core/dreamtalk';
 import type { WorldProgressCandidate, WorldProgressRecord } from '../core/worldProgress';
 import type { DynamicProfileV2 } from '../core/dynamicProfileV2';
@@ -1018,6 +1025,8 @@ function slimChatDataForPersist(data: any): any {
   }
   return copy;
 }
+
+// 数据导出 / 导入的分组表与迁移重置，见 utils/dataScope.ts（纯函数、可单测）
 
 function writeChatMetadataCurrent(chatId: string, data: any): void {
   const ctx = getSillyTavernContext();
@@ -6073,8 +6082,36 @@ const versions = chatData.value.knowledgeGraphVersions || [];
 
   // ========== 数据管理 ==========
 
-  function exportAllData(): string {
-    return JSON.stringify({ _exportVersion: 'A5.0.5', scriptData: klona(scriptData.value), chatData: slimChatDataForPersist(chatData.value) }, null, 2);
+  // 分组表 EXPORT_SCOPE_FIELDS / ALL_EXPORT_SCOPES / DEFAULT_EXPORT_SCOPES，
+  // 以及 applyMigrationReset / applyScopedChatData 均已提到**模块级导出**
+  // （纯数据操作，便于单测与复用，见文件上方「数据导出 / 导入：分组与迁移重置」）
+
+  /**
+   * 导出智脑数据。
+   * @param scopes 要导出的分组；不传 = 全部导出（老行为，保证向后兼容）
+   */
+  function exportAllData(scopes?: string[]): string {
+    const list = Array.isArray(scopes) && scopes.length > 0 ? scopes : ALL_EXPORT_SCOPES;
+    const scopeSet = new Set(list);
+
+    const payload: any = {
+      _exportVersion: 'A5.2.9',
+      _exportScope: ALL_EXPORT_SCOPES.filter(s => scopeSet.has(s)),
+      _sourceChatId: chatData.value.chatId || '',
+      _exportedAt: new Date().toISOString(),
+    };
+
+    if (scopeSet.has('globalSettings')) {
+      payload.scriptData = klona(scriptData.value);
+    }
+
+    const chatScopes = ALL_EXPORT_SCOPES.filter(s => s !== 'globalSettings' && scopeSet.has(s));
+    if (chatScopes.length > 0) {
+      // 先瘦身（capturedContents 置空、userInputRecords 精简），再按分组裁剪
+      payload.chatData = pickChatDataByScopes(slimChatDataForPersist(chatData.value), chatScopes);
+    }
+
+    return JSON.stringify(payload, null, 2);
   }
 
   /** 导入前预检：对比当前数据与导入数据，返回警告列表（空数组=无风险） */
@@ -6082,6 +6119,11 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     const warnings: string[] = [];
     try {
       const parsed = JSON.parse(jsonStr);
+      // 带 _exportScope = 「按内容导出」的文件，导入时只覆盖这些分组、其余保持不变，
+      // 不存在"会被清空"的风险 → 直接放行，不打扰用户
+      if (Array.isArray(parsed._exportScope) && parsed._exportScope.length > 0) {
+        return warnings;
+      }
       // personas 空数据风险
       if (parsed.scriptData) {
         const importedScript = ScriptSettingsSchema.parse(parsed.scriptData);
@@ -6112,9 +6154,21 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     return warnings;
   }
 
-  function importAllData(jsonStr: string) {
+  /**
+   * 导入智脑数据。
+   *
+   * @param options.mode `restore`（默认）= 作为**同一聊天**的备份还原，楼层游标照旧；
+   *                     `migrate` = 把旧聊天的记忆**继承到新聊天**，会重置楼层绑定字段
+   *                     （否则游标悬空 → 大小总结/梦呓/世界推进都不再触发）。
+   */
+  function importAllData(jsonStr: string, options?: { mode?: 'restore' | 'migrate' }) {
+    const mode: 'restore' | 'migrate' = options?.mode === 'migrate' ? 'migrate' : 'restore';
     try {
       const parsed = JSON.parse(jsonStr);
+      // 老文件没有 _exportScope → 视为全量，保持旧行为
+      const scopes: string[] = Array.isArray(parsed._exportScope) ? parsed._exportScope : [];
+      const hasScope = scopes.length > 0;
+      const includeGlobal = !hasScope || scopes.includes('globalSettings');
 
       // ===== DEBUG: 导入前快照 =====
       const preImportCharCount = getAllCharacterNames().length;
@@ -6127,7 +6181,7 @@ const versions = chatData.value.knowledgeGraphVersions || [];
         message: `导入前快照: 角色数=${preImportCharCount}, personas=${preImportPersonasCount}, 当前chatId=${currentChatId}`,
       });
 
-      if (parsed.scriptData) {
+      if (parsed.scriptData && includeGlobal) {
         const importedScript = ScriptSettingsSchema.parse(parsed.scriptData);
         pushCodeLog({
           id: _codeLogIdCounter++,
@@ -6180,9 +6234,34 @@ const versions = chatData.value.knowledgeGraphVersions || [];
           });
         }
 
+        // ── 组装新的聊天数据 ──
+        //   有 _exportScope（新格式）→ 以**当前数据为基底**、只覆盖勾选的分组，
+        //     这样"只导出图谱"再导入不会把大总结/角色记忆清掉。
+        //   无 _exportScope（老文件）→ 整体替换，保持既有行为。
+        let nextChat: any;
+        if (hasScope) {
+          nextChat = klona(chatData.value);
+          applyScopedChatData(nextChat, importedChat, scopes);
+        } else {
+          nextChat = importedChat;
+        }
+
+        // 继承模式：重置楼层绑定字段（游标、小总结、图谱版本、世界推进记录、正文捕获）
+        if (mode === 'migrate') {
+          applyMigrationReset(nextChat);
+          pushCodeLog({
+            id: _codeLogIdCounter++,
+            timestamp: new Date().toISOString(),
+            module: '存储',
+            level: 'info',
+            message: '继承模式：已重置楼层游标与楼层绑定记录（小总结 / 图谱版本 / 世界推进记录 / 正文捕获 / 大总结楼层号）',
+          });
+        }
+
+        nextChat.chatId = currentChatId;
+
         // ===== DEBUG: 设置 chatData 后的角色数 =====
-        chatData.value = importedChat;
-        chatData.value.chatId = currentChatId;
+        chatData.value = nextChat;
 
         const afterSetCount = getAllCharacterNames().length;
         const afterSetNames = getAllCharacterNames();
@@ -6605,6 +6684,8 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     exportAllData,
     checkImportData,
     importAllData,
+    ALL_EXPORT_SCOPES,
+    DEFAULT_EXPORT_SCOPES,
     importChatData,
     clearChatData,
     clearAllData,
