@@ -198,3 +198,46 @@ export function stripResidualSlotMarkers(content: string): string {
   }
   return next;
 }
+
+/**
+ * 最后一道保险：把 messages 里**还没被消费**的槽位标记删掉，并记名上报。
+ *
+ * 正常路径下 `applySlotInjections` 已经处理过了，这里只是防漏网
+ * （标记一旦进了 prompt，模型会学着在回复里输出它，用户看到的就是
+ * 「标签出现在提示词里、但智脑没注入内容」）。
+ *
+ * @returns 被清理的消息条数
+ */
+export function purgeResidualSlots(messages: SillyTavern.SendingMessage[]): number {
+  if (!Array.isArray(messages) || messages.length === 0) return 0;
+
+  const hitKeys = new Set<ZhinoSlotKey>();
+  let cleanedMessages = 0;
+
+  for (const msg of messages) {
+    const content = (msg as any)?.content;
+    if (typeof content !== 'string' || !content.includes('<!--')) continue;
+
+    // 先记录残留的是哪些槽位（用于上报，即使后面清理失败也有线索）
+    for (const key of SLOT_KEYS) {
+      if (slotRegex(ZHINO_SLOT_TAGS[key]).test(content)) hitKeys.add(key);
+    }
+
+    const next = stripResidualSlotMarkers(content);
+    if (next !== content) {
+      (msg as any).content = next;
+      cleanedMessages++;
+    }
+  }
+
+  if (hitKeys.size > 0) {
+    logWarn(
+      '槽位注入',
+      `兜底清理：${cleanedMessages} 条消息里残留了 ${hitKeys.size} 个槽位标记 → `
+      + `${Array.from(hitKeys).map(k => ZHINO_SLOT_LABELS[k]).join('、')}。`
+      + '正常不该出现，若反复发生请带上这条日志反馈',
+    );
+  }
+
+  return cleanedMessages;
+}

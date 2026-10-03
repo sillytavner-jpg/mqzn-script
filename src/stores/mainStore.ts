@@ -659,12 +659,12 @@ const ScriptSettingsSchema = z
     settings: z
       .object({
         personaEnabled: z.boolean().prefault(true),
-        dynamicProfileEnabled: z.boolean().prefault(true),
+        dynamicProfileEnabled: z.boolean().prefault(false),
         dynamicProfileInterval: z.coerce.number().prefault(2), // 动态人设触发间隔（每 N 轮对话，默认2；每个AI回复为一轮，开场白第0层单独算一轮）
         captureEnabled: z.boolean().prefault(true),
         smallSummaryEnabled: z.boolean().prefault(true),
         memoryActivationEnabled: z.boolean().prefault(true),
-        dreamtalkEnabled: z.boolean().prefault(true),
+        dreamtalkEnabled: z.boolean().prefault(false),
         summaryInjectionEnabled: z.boolean().prefault(true),
         itemRecallEnabled: z.boolean().prefault(true),
         summaryInterval: z.coerce.number().prefault(10),
@@ -757,8 +757,8 @@ const ScriptSettingsSchema = z
         characterMemoryEnabled: z.boolean().prefault(true),
         characterMemoryInterval: z.coerce.number().prefault(10),
         dreamtalkInterval: z.coerce.number().prefault(10),
-        dynamicProfileInjectionEnabled: z.boolean().prefault(true),
-        dreamtalkInjectionEnabled: z.boolean().prefault(true),
+        dynamicProfileInjectionEnabled: z.boolean().prefault(false),
+        dreamtalkInjectionEnabled: z.boolean().prefault(false),
         worldProgressInjectionEnabled: z.boolean().prefault(true),
         plotGuidanceInjectionEnabled: z.boolean().prefault(true),
         nsfwIsolationEnabled: z.boolean().prefault(true),

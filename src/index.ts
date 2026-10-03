@@ -65,7 +65,7 @@ import {
 } from './core/worldProgress';
 import { buildDynamicGuidanceInjection, buildPlotGuidanceInjection, injectPlotGuidance, executePlotCheck, removePlotInjection, shouldTriggerPlotCheck, advanceOutlineStage } from './core/plotDirector';
 
-import { applySlotInjections, findPresentSlots, type ZhinoSlotKey } from './core/slotInjection';
+import { applySlotInjections, findPresentSlots, purgeResidualSlots, type ZhinoSlotKey } from './core/slotInjection';
 import { hydrateSelectedWorldBookEntries } from './core/worldBookSelection';
 import {
   countPendingAssistantContents,
@@ -1682,9 +1682,14 @@ $(() => {
 
     // --- 槽位填充：把本轮收集到的文本写进预设标记的位置 ---
     // 预设里有标记的模块走槽位；没标记的模块已在上面走各自的原逻辑（锚点/depth）
+    // applySlotInjections 内部已记录「哪个槽位本轮无数据、标记已清除」
     if (presentSlots.size > 0) {
       applySlotInjections(completion.messages, slotTexts);
     }
+    // 最后一道保险：无论上面走了哪条分支，都不能把槽位标记留在 prompt 里 ——
+    // 标记一旦进了 prompt，模型会学着模仿输出，表现出来就是
+    // 「提示词里出现了标签、但智脑没有注入内容」。
+    purgeResidualSlots(completion.messages);
 
     // 重置真实聊天消息标记
     store._isRealChatMessage = false;
