@@ -1196,6 +1196,10 @@ $(() => {
     // 等 CHAT_COMPLETION_SETTINGS_READY 触发时消息已组装完。
     // 因此 MVU 轮还要额外调用 stripZhinoInjectionsFromCompletion 清洗 messages。
     if (isMvuExtraAnalysis()) {
+      // ⚠️ 本轮是 MVU 额外解析轮 → 下面整段注入（含槽位）全部跳过。
+      //    这条日志必须有：此前这里 return 不留任何痕迹，
+      //    用户看到「槽位没被替换」却查不出原因。
+      logInfo('槽位注入', '本轮判定为 MVU 额外解析轮：跳过槽位注入，并清理已注入的智脑标签块');
       // 清洗 generate_data.messages 里已注入的智脑标签块，
       // fetch 在 emit 之后才发（openai.js:3055 JSON.stringify(generate_data)），
       // 改 messages.content 能生效。
@@ -1216,6 +1220,22 @@ $(() => {
     // 未命中的模块保持原逻辑（兼容没用新机制的预设）。详见 core/slotInjection.ts
     // ═══════════════════════════════════════════════════════════
     const presentSlots = findPresentSlots(completion.messages);
+
+    // 诊断：一次看清「槽位为什么没生效」—— 消息规模 / 含标记的消息条数 / 识别到的槽位数。
+    // （此前扫描不到槽位时是静默返回的，用户完全无从查起）
+    try {
+      const diagMsgs: any[] = Array.isArray(completion.messages) ? completion.messages : [];
+      const zhinoMsgs = diagMsgs.filter(m => typeof m?.content === 'string' && m.content.includes('ZHINO_'));
+      logInfo(
+        '槽位注入',
+        `探测：消息 ${diagMsgs.length} 条｜含 ZHINO_ 的 ${zhinoMsgs.length} 条｜识别到槽位 ${presentSlots.size} 个`,
+      );
+      if (zhinoMsgs.length > 0 && presentSlots.size === 0) {
+        const sample = String(zhinoMsgs[0].content).replace(/\s+/g, ' ').slice(0, 160);
+        logWarn('槽位注入', `⚠️ 消息里有 ZHINO_ 但一个槽位都没识别到（role=${zhinoMsgs[0].role}），样本：${sample}`);
+      }
+    } catch { /* 诊断本身失败不影响主流程 */ }
+
     const slotTexts: Partial<Record<ZhinoSlotKey, string>> = {};
 
     const activatedEventNames = new Set<string>();
