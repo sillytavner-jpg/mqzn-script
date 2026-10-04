@@ -1315,14 +1315,15 @@ function executeSelectiveDelete() {
           v-for="entry in store.codeLogs"
           :key="entry.id"
           class="zhino-codelog-entry"
-          :class="`zhino-codelog-entry--${entry.level}`"
+          :class="[`zhino-codelog-entry--${entry.level}`, { 'is-expanded': expandedId === entry.id }]"
           @click="toggleExpand(entry.id)"
         >
           <div class="zhino-codelog-row">
             <span class="zhino-codelog-time">{{ formatCodeLogTime(entry.timestamp) }}</span>
             <span class="zhino-codelog-module">{{ entry.module }}</span>
+            <!-- 展开时 message 换行显示全文（默认单行省略，保持列表紧凑） -->
             <span class="zhino-codelog-msg">{{ entry.message }}</span>
-            <span v-if="entry.detail" class="zhino-codelog-chevron">{{ expandedId === entry.id ? '▾' : '▸' }}</span>
+            <span class="zhino-codelog-chevron">{{ expandedId === entry.id ? '▾' : '▸' }}</span>
           </div>
           <div v-if="expandedId === entry.id && entry.detail" class="zhino-codelog-detail">
             <pre class="zhino-codelog-pre">{{ entry.detail }}</pre>
@@ -2046,6 +2047,21 @@ function executeSelectiveDelete() {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+  /* 展开后长日志要能选中复制（排查靠它） */
+  user-select: text;
+}
+
+/* ⚠️ 展开态：日志内容常常很长（API 错误、槽位样本等），
+   单行省略会让人看不到关键信息 —— 展开时改为换行显示全文。 */
+.zhino-codelog-entry.is-expanded .zhino-codelog-row {
+  align-items: flex-start;
+}
+
+.zhino-codelog-entry.is-expanded .zhino-codelog-msg {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: visible;
+  text-overflow: clip;
 }
 
 .zhino-codelog-chevron {
