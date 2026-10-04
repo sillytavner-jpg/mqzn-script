@@ -31,7 +31,7 @@ import {
   hideSummaryFloors,
 } from './core/floorVisibility';
 import { enqueueAnalysis, clearSchedulerQueue } from './core/backgroundQueue';
-import { embedTimelineEvents, embedCharacterMemories, getEmbedding, rerankCandidates } from './core/embedding';
+import { embedTimelineEvents, embedCharacterMemories, getEmbedding, rerankCandidates, cosineSimilarity } from './core/embedding';
 import { executeSmallSummary, type SmallSummaryKgOptions, type PreviousRoundContext } from './core/smallSummary';
 import { applyKnowledgeGraphDiff, createEmptyKnowledgeGraph, embedKnowledgeGraphNodes, hasMissingEmbedding, buildStableId } from './core/knowledgeGraph';
 import type { KnowledgeGraph } from './core/knowledgeGraph';
@@ -1412,7 +1412,7 @@ $(() => {
               for (const k of trigKeywords) {
                 const parenMatch = k.match(/^(.+?)\((.+?)\)$/);
                 const variants = parenMatch ? [parenMatch[1], parenMatch[2]] : [k];
-                const hitU = variants.some((v: string) => fuzzyMatchKeywordUser(v, lastUserInputLower));
+                const hitU = variants.some((v: string) => fuzzyMatchKeyword(v, lastUserInputLower));
                 const hitA = variants.some((v: string) => fuzzyMatchKeyword(v, scanTextLower));
                 if (hitU) anyUserHit = true;
                 if (hitU && hitA) weightedKwSum += 1.0;
@@ -1422,7 +1422,7 @@ $(() => {
               const kwCount = trigKeywords.filter(k => {
                 const parenMatch = k.match(/^(.+?)\((.+?)\)$/);
                 const variants = parenMatch ? [parenMatch[1], parenMatch[2]] : [k];
-                return variants.some((v: string) => fuzzyMatchKeywordUser(v, lastUserInputLower) || fuzzyMatchKeyword(v, scanTextLower));
+                return variants.some((v: string) => fuzzyMatchKeyword(v, lastUserInputLower) || fuzzyMatchKeyword(v, scanTextLower));
               }).length;
 
               const shouldInject = (charHit && kwCount >= 1) || (!charHit && kwCount >= 2);
