@@ -899,6 +899,14 @@ $(() => {
         return;
       }
 
+      // ⚠️ 第0层 = 角色卡开场白。它本来就短（前端卡常只有几十字），
+      //    智脑已把它的内容归到「第一次小总结」里合并处理（readOpeningFloorContent，
+      //    那条路径不走 200 字门槛）。这里若再按正文门槛判"回空"，
+      //    每开一个新聊天就会弹一次警告 + 清数据。
+      if (messageId === 0) {
+        return;
+      }
+
       // 只跳过明确不需要捕获的类型
       if (type === 'quiet' || type === 'command' || type === 'extension') {
         return;
@@ -1093,6 +1101,10 @@ $(() => {
   eventOn(tavern_events.MESSAGE_SWIPED, messageId => {
     const store = useMainStore(pinia);
     if (!store.settings.captureEnabled) return;
+
+    // 同 MESSAGE_RECEIVED：第0层是开场白，不参与正文回空判定
+    // （重 roll 开场白时同样不该弹「正文回空拦截」）
+    if (messageId === 0) return;
 
     setTimeout(() => {
       const extractedContent = readAssistantExtractedContentAtFloor(messageId);
