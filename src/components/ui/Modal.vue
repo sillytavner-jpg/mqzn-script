@@ -34,7 +34,10 @@
 import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 
 defineOptions({ name: 'Modal' });
-withDefaults(defineProps<{
+// ⚠️ 必须赋给 const props —— 下面的 watch / onMounted 要读 props.visible。
+//    此前漏了赋值，导致每次组件求值都抛 `ReferenceError: props is not defined`，
+//    错误刷屏还会掩盖真正的问题（看起来像"槽位注入坏了"）。
+const props = withDefaults(defineProps<{
   visible: boolean;
   title?: string;
   isMobile?: boolean;

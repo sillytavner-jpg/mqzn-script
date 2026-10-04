@@ -114,9 +114,16 @@ export async function callGenerateRaw(params: GenerateRawParams): Promise<string
         store.clearApiRetry();
         throw err;
       }
+      // 标记为「重试也没用」的错误（如内容被过滤拦截 / 输出被截断）——
+      // 同样的请求再发一次结果不会变，只会白等三轮
+      if ((err as any)?._noRetry) {
+        store.clearApiRetry();
+        logError('API调用', '该错误重试无意义，直接放弃', err?.message || String(err || ''));
+        throw err;
+      }
       if (attempt >= maxRetries) {
         store.clearApiRetry();
-        logError('API调用', `重试${maxRetries}次后放弃`, errMsg);
+        logError('API调用', `重试${maxRetries}次后放弃`, err?.message || String(err || ''));
         throw err;
       }
     }
@@ -283,8 +290,67 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
 
   const rawContent = data?.choices?.[0]?.message?.content;
   if (!rawContent) {
+    // ⚠️ 以前这里一律报「返回格式异常」，但空 content 其实有好几种完全不同的原因，
+    //    误报会让用户以为是自己配置错了。现在按 finish_reason 分开说。
+    const finishReason = String(data?.choices?.[0]?.finish_reason || '');
+    const completionTokens = Number(data?.usage?.completion_tokens || 0);
+
+    // ① 被供应商的内容审核拦截：模型其实生成了内容（completion_tokens > 0），
+    //    但审核把它换成了空串，并给出一个"被拦"的 finish_reason。
+    //    这不是格式问题，**重试也没用**（同样的内容还会被拦）。
+    //
+    // ⚠️ finish_reason 是**服务端**打的标记（OpenAI 规范字段），智脑只读不猜。
+    //    不同渠道的写法不一样，所以这里收一份白名单：
+    //      content_filter      —— OpenAI 官方 / 多数中转站（最常见的写法）
+    //      safety / SAFETY     —— Google Gemini 原生
+    //      prohibited_content  —— Gemini 1.5+ 的 PROHIBITED_CONTENT
+    //      recitation / blocklist / spii / image_safety —— 其他审核类原因
+    //    （统一 toLowerCase 比较，兼容下划线与驼峰）
+    const FILTER_FINISH_REASONS = [
+      'content_filter', 'safety', 'prohibited_content', 'blocked',
+      'recitation', 'blocklist', 'spii', 'image_safety',
+    ];
+    if (FILTER_FINISH_REASONS.includes(finishReason.toLowerCase())) {
+      // 只陈述事实（谁拦的、拦了多少），不给处置建议 —— 建议交给用户自己判断
+      const filteredErr = new Error(
+        `API 内容被过滤拦截（finish_reason: ${finishReason || 'content_filter'}）\n`
+        + `模型：${modelName}｜请求地址：${apiUrl}\n`
+        + (completionTokens > 0 ? `模型已生成 ${completionTokens} tokens，但被服务端安全审核拦下，内容未返回。` : ''),
+      );
+      (filteredErr as any)._noRetry = true;
+      logError(
+        'API调用',
+        `内容被过滤拦截（content_filter）model=${modelName} completion_tokens=${completionTokens}`,
+        JSON.stringify(data).slice(0, 500),
+      );
+      recordFailAndThrow(
+        JSON.stringify(data).slice(0, 500),
+        // 摘要里带上已生成的 token 数：让人一眼看出"模型其实写了，是被拦掉的"
+        `内容被过滤拦截（${finishReason}，模型 ${modelName}${completionTokens > 0 ? `，已生成 ${completionTokens} tokens 但未返回` : ''}）`,
+        filteredErr,
+      );
+    }
+
+    // ② 输出被 max_tokens 截断
+    if (finishReason === 'length') {
+      const lenErr = new Error(
+        `API 输出被长度上限截断（finish_reason: ${finishReason || 'length'}）\n`
+        + `模型：${modelName}｜请求地址：${apiUrl}\n`
+        + `输出 token 用尽仍未产出完整内容（completion_tokens：${completionTokens}）。`,
+      );
+      (lenErr as any)._noRetry = true;
+      logError('API调用', `输出被截断（length）model=${modelName}`, JSON.stringify(data).slice(0, 300));
+      recordFailAndThrow(JSON.stringify(data).slice(0, 300), '输出被长度上限截断（length）', lenErr);
+    }
+
+    // ③ 其他空响应：把 finish_reason / token 数一并带上，别只说"格式异常"
     logError('API调用', '返回结构异常', JSON.stringify(data).slice(0, 500));
-    const structErr = new Error(`API返回格式异常，未找到 choices[0].message.content`);
+    const structErr = new Error(
+      'API 返回了空内容（未找到 choices[0].message.content）\n'
+      + `模型：${modelName}｜请求地址：${apiUrl}\n`
+      + `finish_reason：${finishReason || '(缺失)'}｜completion_tokens：${completionTokens}`,
+    );
+    // 这种多半是渠道抖动 → 允许重试（不设 _noRetry）
     recordFailAndThrow(JSON.stringify(data).slice(0, 500), '返回结构异常，未找到 choices[0].message.content', structErr);
   }
 

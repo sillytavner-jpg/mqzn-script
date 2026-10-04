@@ -1682,13 +1682,14 @@ $(() => {
 
     // --- 槽位填充：把本轮收集到的文本写进预设标记的位置 ---
     // 预设里有标记的模块走槽位；没标记的模块已在上面走各自的原逻辑（锚点/depth）
-    // applySlotInjections 内部已记录「哪个槽位本轮无数据、标记已清除」
+    // applySlotInjections 内部已记录「哪个槽位本轮无数据、标记已清除」。
+    // ⚠️ 这里**故意不包 try/catch**：注入过程出问题必须让异常直接冒出来，
+    //    否则会变成静默失败 —— 连"到底注没注入"都查不出来，比标记残留更难排查。
     if (presentSlots.size > 0) {
       applySlotInjections(completion.messages, slotTexts);
     }
-    // 最后一道保险：无论上面走了哪条分支，都不能把槽位标记留在 prompt 里 ——
-    // 标记一旦进了 prompt，模型会学着模仿输出，表现出来就是
-    // 「提示词里出现了标签、但智脑没有注入内容」。
+    // 兜底清理：只负责收拾"漏网"的残留标记，且会 logWarn 点名是哪些槽位
+    //（不吞错、有反馈，纯属最后一道扫尾）
     purgeResidualSlots(completion.messages);
 
     // 重置真实聊天消息标记
