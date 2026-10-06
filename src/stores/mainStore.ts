@@ -6,6 +6,7 @@ import {
   applyScopedChatData,
   pickChatDataByScopes,
 } from '../utils/dataScope';
+import { clampFloorCursors, migrateFloorReferences } from '../utils/floorMigration';
 import type { DreamtalkData } from '../core/dreamtalk';
 import type { WorldProgressCandidate, WorldProgressRecord } from '../core/worldProgress';
 import type { DynamicProfileV2 } from '../core/dynamicProfileV2';
@@ -6502,6 +6503,63 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     return /claude/i.test(model);
   }
 
+  // ========== 删楼后的楼层引用迁移 ==========
+
+  /**
+   * 删除楼层后迁移全部「楼层号」引用（游标 / 覆盖区间 / 捕获记录 / 图谱版本…）。
+   *
+   * 酒馆删楼会把被删楼层之后的编号整体前移，不迁移的后果：
+   * 游标悬空 → 大总结 / 小总结 / 梦呓 / 动态人设 / 世界推进 / 剧情导演**全部不再触发**。
+   *
+   * @param deletedIndexes 被删楼层号（基于**删除前**的编号，可由楼层指纹差分得到）
+   * @returns 迁移到的游标数量
+   */
+  function migrateFloorRefsAfterDeletion(deletedIndexes: number[]): number {
+    const moved = migrateFloorReferences(chatData.value, deletedIndexes);
+    if (moved > 0) {
+      doPersist();
+      rebuildAssembled();
+      pushCodeLog({
+        id: _codeLogIdCounter++,
+        timestamp: new Date().toISOString(),
+        module: '存储',
+        level: 'info',
+        message: `删楼后迁移了 ${moved} 个楼层游标（删除 ${deletedIndexes.length} 层）`,
+      });
+    }
+    return moved;
+  }
+
+  /**
+   * 兜底：楼层指纹快照缺失时（例如刚刷新页面就删楼），无法算出删了哪几层，
+   * 只能把越界游标钳制到最后楼层，至少避免「游标永久悬空 → 功能停摆」。
+   *
+   * @returns 被钳制的游标数量
+   */
+  function clampFloorCursorsToLastFloor(): number {
+    let lastId = -1;
+    try {
+      lastId = getLastMessageId();
+    } catch {
+      return 0;
+    }
+    if (lastId < 0) return 0;
+
+    const clamped = clampFloorCursors(chatData.value, lastId);
+    if (clamped > 0) {
+      doPersist();
+      rebuildAssembled();
+      pushCodeLog({
+        id: _codeLogIdCounter++,
+        timestamp: new Date().toISOString(),
+        module: '存储',
+        level: 'warn',
+        message: `无法定位被删楼层，已将 ${clamped} 个越界游标钳制到 #${lastId}`,
+      });
+    }
+    return clamped;
+  }
+
   return {
     // 原始数据
     scriptData,
@@ -6694,6 +6752,9 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     // 模型检测
     getCurrentModel,
     isClaudeModel,
+    // 删楼后的楼层引用迁移
+    migrateFloorRefsAfterDeletion,
+    clampFloorCursorsToLastFloor,
     // 运行状态
     summaryInProgress,
     dreamtalkInProgress,

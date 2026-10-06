@@ -26,9 +26,13 @@ import {
 } from './core/summary';
 import { mergeWorldProgressIntoSummary } from './core/memoryMerge';
 import {
+  clearFloorSignatureCache,
+  diffDeletedFloorIndexes,
   ensureRecentFloorsVisible as ensureRecentFloorsVisibleCore,
   getCapturedContentMessageIds,
   hideSummaryFloors,
+  reapplyHiddenFloors,
+  snapshotFloorSignatures,
 } from './core/floorVisibility';
 import { enqueueAnalysis, clearSchedulerQueue } from './core/backgroundQueue';
 import { embedTimelineEvents, embedCharacterMemories, getEmbedding, rerankCandidates, cosineSimilarity } from './core/embedding';
@@ -36,7 +40,6 @@ import { executeSmallSummary, type SmallSummaryKgOptions, type PreviousRoundCont
 import { applyKnowledgeGraphDiff, createEmptyKnowledgeGraph, embedKnowledgeGraphNodes, hasMissingEmbedding, buildStableId } from './core/knowledgeGraph';
 import type { KnowledgeGraph } from './core/knowledgeGraph';
 import { buildWorldGraphInjection, injectWorldGraphIntoCompletion, removeWorldGraphInjection } from './core/worldGraphInject';
-import { getHiddenFloorsFromChat } from './core/floorVisibility';
 import { buildRelationshipInjection, injectRelationshipProfiles, removeRelationshipInjection, updateRelationshipWorldbookCacheFromLore } from './core/relationshipAnalysis';
 import {
   applyCustomOutputTags,
@@ -1100,6 +1103,14 @@ $(() => {
   // 否则旧 swipe/swipe 带入的地点/角色边会残留在最新图谱里。
   eventOn(tavern_events.MESSAGE_SWIPED, messageId => {
     const store = useMainStore(pinia);
+
+    // 重roll / 切 swipe 会重建消息区，TauriTavern 下隐藏楼层的页面外观可能丢失
+    // （chat 数据里的 is_system 仍在，刷新可恢复）→ 延后重贴一次，并刷新楼层指纹快照
+    setTimeout(() => {
+      reapplyHiddenFloors().catch(() => {});
+      snapshotFloorSignatures();
+    }, 800);
+
     if (!store.settings.captureEnabled) return;
 
     // 同 MESSAGE_RECEIVED：第0层是开场白，不参与正文回空判定
@@ -2654,6 +2665,23 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
     }
   }
 
+  // 楼层被删除：迁移智脑的楼层引用（游标 / 覆盖区间 / 捕获记录 / 图谱版本…）+ 重贴隐藏外观
+  // ⚠️ 酒馆的 MESSAGE_DELETED 事件不带楼层号，只能靠楼层指纹差分推断删了哪几层；
+  //    快照缺失（刚刷新就删楼）时退化为「游标钳制」，至少不让总结/梦呓/世界推进永久停摆。
+  eventOn(tavern_events.MESSAGE_DELETED, () => {
+    const store = useMainStore(pinia);
+    setTimeout(() => {
+      const deletedIndexes = diffDeletedFloorIndexes();
+      if (deletedIndexes.length > 0) {
+        store.migrateFloorRefsAfterDeletion(deletedIndexes);
+      } else {
+        store.clampFloorCursorsToLastFloor();
+      }
+      reapplyHiddenFloors().catch(() => {});
+      snapshotFloorSignatures();
+    }, 300);
+  });
+
   // ========== 聊天切换时重载 ==========
 
   reloadOnChatChange();
@@ -2668,6 +2696,9 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
     removeNsfwInjection();
     removeRelationshipInjection();
     removePlotInjection();
+    // 楼层指纹跨聊天没有意义，清掉避免误判；切换完成后再采一次快照
+    clearFloorSignatureCache();
+    setTimeout(() => snapshotFloorSignatures(), 1200);
     logInfo('系统', '聊天切换，已释放注入句柄');
   });
 
@@ -2690,6 +2721,9 @@ function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: a
     $app?.remove();
     styleHandle?.destroy();
   });
+
+  // 首次加载后采一次楼层指纹快照（供删楼差分推断使用）
+  setTimeout(() => snapshotFloorSignatures(), 1500);
 
   logInfo('系统', '明月秋青脚本已加载');
 });
