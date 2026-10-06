@@ -835,7 +835,10 @@ $(() => {
                 (c: any) => c.name && c.name.trim() !== userNameNorm,
               );
             }
-            nextGraph = applyKnowledgeGraphDiff(baseGraph, graphDiff);
+            nextGraph = applyKnowledgeGraphDiff(baseGraph, graphDiff, {
+              // 防合并守卫：已确立的独立角色不得再被吸收成别名（AI 认错人会把两人并成一人）
+              reservedCharacterNames: store.collectReservedCharacterNames(),
+            });
           } else if (shouldReplaceGraph || hasCharacterLocationUpdate) {
             // 没有 graphDiff 但属于替换/位置变化场景 → 用楼层前图谱提交一版状态
             nextGraph = JSON.parse(JSON.stringify(baseGraph));

@@ -25,7 +25,7 @@ import { formatThinkingChainForAnalysis } from '../utils/messageParser';
 
 // 破限身份（参考星光预设）：小右 主理本任务
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead('小右', '写角色小传');
+  return buildBrainHead('小右', '写角色小传', 'character_profile');
 }
 
 function buildMoralAttack(_userName: string): string {

@@ -19,7 +19,7 @@ import { parsePatchArray } from '../utils/stateDoc';
 
 // 破限身份（参考星光预设）：小左 主理本任务
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead('小左', '理时间线');
+  return buildBrainHead('小左', '理时间线', 'grand_summary');
 }
 
 function buildMoralAttack(_userName: string): string {

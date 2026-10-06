@@ -145,7 +145,7 @@ export function createEmptyDreamtalk(): DreamtalkData {
 
 // 破限身份（参考星光预设）：小右 主理本任务
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead('小右', '读玩家行为');
+  return buildBrainHead('小右', '读玩家行为', 'dreamtalk');
 }
 
 function buildMoralAttack(_userName: string): string {

@@ -24,7 +24,7 @@ import { parsePatchArray } from '../utils/stateDoc';
 
 // 破限身份（参考星光预设）：角色记忆由小左（事实）+ 小右（情感关系）同时登场
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead(['小左', '小右'], '记角色记忆');
+  return buildBrainHead(['小左', '小右'], '记角色记忆', 'character_memory');
 }
 
 function buildMoralAttack(_userName: string): string {

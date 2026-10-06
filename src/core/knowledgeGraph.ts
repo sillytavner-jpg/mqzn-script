@@ -16,6 +16,7 @@
 
 import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { KnowledgeGraphDiffSchema } from '../utils/schemas';
+import { stripReservedAliases } from '../utils/characterNames';
 import { charBigramSimilarity, cosineSimilarity, getBatchEmbeddings, type EmbeddingSettings } from './embedding';
 import { logInfo, logWarn } from '../utils/logger';
 
@@ -615,13 +616,30 @@ function parseLegacyState(raw: string | undefined): { status?: GraphItemStatus; 
 
 // ========== 增量合并 ==========
 
+/** applyKnowledgeGraphDiff 的可选守卫参数 */
+export interface ApplyGraphDiffOptions {
+  /**
+   * 已确立的独立角色主名 key 集合（characterReservedKey 口径）。
+   * 防「AI 认错人合并」：AI 输出的 aliases 里若含其它独立角色的主名，就不并入该节点。
+   * 本系统以名字字符串为主键，一旦被吸收成别名，该角色既不可见也建不了（2026-10-06 玩家反馈）。
+   * 不传 = 不做守卫（保持旧行为）。
+   */
+  reservedCharacterNames?: Set<string>;
+}
+
 /**
  * 将 AI 输出的 diff 应用到图谱，返回新图谱（深拷贝，不污染撤回栈引用）。
  * - add：按 buildStableId(name) 去重，同名已存在→合并字段（update 语义），否则新增
  * - update：按 id 改单字段（白名单）
  * - delete：按 id 过滤地点/物品 + 清理引用被删节点的边
+ *
+ * opts.reservedCharacterNames 提供时，角色别名的吸收会走「独立角色不得被吞并」守卫。
  */
-export function applyKnowledgeGraphDiff(graph: KnowledgeGraph, diff: KnowledgeGraphDiff): KnowledgeGraph {
+export function applyKnowledgeGraphDiff(
+  graph: KnowledgeGraph,
+  diff: KnowledgeGraphDiff,
+  opts?: ApplyGraphDiffOptions,
+): KnowledgeGraph {
   const next: KnowledgeGraph = JSON.parse(JSON.stringify(graph));
 
   // 名称 → 地点 id 映射（含别名），用于 resolve edges/belongTo
@@ -721,15 +739,18 @@ export function applyKnowledgeGraphDiff(graph: KnowledgeGraph, diff: KnowledgeGr
       : resolveByNameOrAlias(next.characters, new Map([...next.characters.map(c => [c.id, c.id] as const), ...Array.from(charLookupToName.entries()).map(([k, v]) => [k, buildStableId(v)] as const)]), ch.name, ch.aliases || []);
     if (existing) {
       if (ch.location) existing.location = ch.location;
-      const aliases = mergeAliasFromIncoming(existing.name, ch.name, ch.aliases || []);
+      // 防合并守卫：AI 若把「已是独立角色」的名字写进 aliases，这里拦掉（避免两人被吸成一人）
+      const safeIncoming = stripReservedAliases(ch.aliases, existing.name, opts?.reservedCharacterNames).kept;
+      const aliases = mergeAliasFromIncoming(existing.name, ch.name, safeIncoming);
       if (aliases.length) existing.aliases = mergeUnique(existing.aliases || [], aliases);
       rememberChar(existing);
     } else {
+      const safeAliases = stripReservedAliases(ch.aliases, ch.name, opts?.reservedCharacterNames).kept;
       const newNode: GraphCharacter = {
         id,
         name: ch.name,
         location: ch.location || '',
-        aliases: ch.aliases?.length ? [...ch.aliases] : undefined,
+        aliases: safeAliases.length ? [...safeAliases] : undefined,
       };
       next.characters.push(newNode);
       rememberChar(newNode);

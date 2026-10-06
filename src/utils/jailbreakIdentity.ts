@@ -100,26 +100,44 @@ const FLASH_OUTPUT_CONTRACT = [
  */
 let cachedStore: any = null;
 
-function readMode(): JailbreakMode {
+/**
+ * 解析某个分析类型当前生效的破限模式。
+ *
+ * 优先级：
+ *   ① `settings.jailbreakModeByType[analysisType]`（API 库管理 → 分析类型分配里逐条指定）
+ *   ② `settings.jailbreakMode`（全局默认，由「全部切换」总开关写）
+ *   ③ 'legacy'
+ *
+ * 不传 analysisType 时只看全局默认 —— 保留旧调用点的语义。
+ */
+function readMode(analysisType?: string): JailbreakMode {
   try {
     if (!cachedStore) {
       const mod = require('../stores/mainStore');
       cachedStore = mod.useMainStore ? mod.useMainStore() : null;
     }
-    return cachedStore?.settings?.jailbreakMode === 'flash' ? 'flash' : 'legacy';
+    const settings = cachedStore?.settings;
+    if (analysisType) {
+      const picked = settings?.jailbreakModeByType?.[analysisType];
+      if (picked === 'flash' || picked === 'legacy') return picked;
+    }
+    return settings?.jailbreakMode === 'flash' ? 'flash' : 'legacy';
   } catch {
     return 'legacy';
   }
 }
 
-/** 当前生效的破限词模式 */
-export function getJailbreakMode(): JailbreakMode {
-  return readMode();
+/**
+ * 当前生效的破限词模式。
+ * @param analysisType 分析类型 key（如 'small_summary'）；省略 = 全局默认
+ */
+export function getJailbreakMode(analysisType?: string): JailbreakMode {
+  return readMode(analysisType);
 }
 
-/** 当前是否 flash 模式（= 需要投放尾部破限） */
-export function isFlashMode(): boolean {
-  return readMode() === 'flash';
+/** 指定分析类型是否 flash 模式（= 需要投放尾部破限） */
+export function isFlashMode(analysisType?: string): boolean {
+  return readMode(analysisType) === 'flash';
 }
 
 /**
@@ -127,9 +145,10 @@ export function isFlashMode(): boolean {
  * 最后一条 assistant（prefill）之前，位置对应预设里的 jb_tail + output_contract。
  *
  * legacy 模式下返回空串（调用方据此跳过注入）。
+ * @param analysisType 分析类型 key，用于取该类型自己的破限模式
  */
-export function buildFlashTail(): string {
-  if (readMode() !== 'flash') return '';
+export function buildFlashTail(analysisType?: string): string {
+  if (readMode(analysisType) !== 'flash') return '';
   return [FLASH_RESTATE, '', FLASH_OUTPUT_CONTRACT].join('\n');
 }
 
@@ -154,12 +173,14 @@ function toRoleList(spec: BrainRoleSpec): readonly BrainRole[] {
  *
  * @param role 本任务由四部分中的哪一位（或哪几位同时）主理
  * @param task 交给它做的事，口语化短句，如「整理数据」「理时间线」
+ * @param analysisType 分析类型 key —— 用于取该类型单独指定的破限模式；
+ *                     省略则用全局默认（保持旧调用点行为）
  */
-export function buildBrainHead(role: BrainRoleSpec, task: string): string {
+export function buildBrainHead(role: BrainRoleSpec, task: string, analysisType?: string): string {
   const roleText = toRoleList(role).join('和');
   const taskLine = `你接下来要扮演${roleText}帮我${task}，明白了吗`;
 
-  if (readMode() === 'flash') {
+  if (readMode(analysisType) === 'flash') {
     return [
       JAILBREAK_RESET_MARK,
       FLASH_IDENTITY,

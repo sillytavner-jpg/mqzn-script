@@ -46,19 +46,7 @@ const charCardName = computed(() => {
   return '—';
 });
 
-// ── 破限词模式切换 ──
-// legacy = 老模型（身份框架 + 认可式）
-// flash  = 3.7f / 3.8f（尾部额外压一条「输出契约」，压制开场白与确认语）
-type JailbreakMode = 'legacy' | 'flash';
-const jailbreakMode = computed<JailbreakMode>(() => {
-  const m = (store.settings as any).jailbreakMode;
-  return m === 'flash' ? 'flash' : 'legacy';
-});
-function setJailbreakMode(mode: JailbreakMode) {
-  if (jailbreakMode.value === mode) return;
-  store.updateSettings({ jailbreakMode: mode } as any);
-  logInfo('破限词', `已切换到「${mode === 'flash' ? '3.7 / 8F 破限' : '老模型破限'}」`);
-}
+// ── 破限词已移入「设置 → API 库管理 → 分析类型分配」逐条指定（总览不再提供开关）──
 
 // ── 输出模式：输出结构 MUV 化（一个总开关）──
 // 默认启用三个输出量最大的模块（与 mainStore 的 prefault 保持一致）
@@ -656,7 +644,9 @@ async function triggerOpeningGraph() {
                 (c: any) => c.name && c.name.trim() !== userNameNorm,
               );
             }
-            nextGraph = applyKnowledgeGraphDiff(baseGraph, graphDiff);
+            nextGraph = applyKnowledgeGraphDiff(baseGraph, graphDiff, {
+              reservedCharacterNames: store.collectReservedCharacterNames(),
+            });
           }
           store.commitKnowledgeGraph(nextGraph, 0);
           logInfo('知识图谱', '开场白图谱已生成');
@@ -770,7 +760,9 @@ async function triggerFloorSummary() {
                 (c: any) => c.name && c.name.trim() !== userNameNorm,
               );
             }
-            nextGraph = applyKnowledgeGraphDiff(baseGraph, graphDiff);
+            nextGraph = applyKnowledgeGraphDiff(baseGraph, graphDiff, {
+              reservedCharacterNames: store.collectReservedCharacterNames(),
+            });
           }
           store.commitKnowledgeGraph(nextGraph, floor);
           logInfo('知识图谱', `第${floor}层小总结已生成`);
@@ -853,7 +845,7 @@ async function triggerFloorSummary() {
       </div>
     </div>
 
-    <!-- 智脑设置：破限词 / 输出模式 / 预设适配（一行横排） -->
+    <!-- 智脑设置：输出模式 / 预设适配（一行横排） -->
     <div class="zhino-section zhino-icon-section">
       <div class="zhino-section-title">
         <svg class="zhino-section-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="3.2"/></svg>
@@ -861,14 +853,6 @@ async function triggerFloorSummary() {
       </div>
 
       <div class="zhino-toolbar">
-        <div class="zhino-tool">
-          <div class="zhino-tool-label">破限词</div>
-          <div class="zhino-seg">
-            <button :class="{ 'zhino-seg-on': jailbreakMode === 'legacy' }" @click="setJailbreakMode('legacy')">老模型</button>
-            <button :class="{ 'zhino-seg-on': jailbreakMode === 'flash' }" @click="setJailbreakMode('flash')">3.7 / 8F</button>
-          </div>
-        </div>
-
         <div class="zhino-tool">
           <div class="zhino-tool-label">输出模式<span class="zhino-tool-tag">（实验性功能）</span></div>
           <button

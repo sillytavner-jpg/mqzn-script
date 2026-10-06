@@ -55,7 +55,7 @@ export interface PlotCheckResult {
 
 // 破限身份（参考星光预设）：前额叶 主理本任务
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead('前额叶', '管剧情走向');
+  return buildBrainHead('前额叶', '管剧情走向', 'plot_director');
 }
 
 function buildMoralAttack(_userName: string): string {

@@ -75,6 +75,8 @@ import {
   cleanCharacterAliases as cleanCharacterAliasList,
   normalizeCharacterName as normalizeCharacterNameKey,
   resolveCharacterName as resolveCharacterNameFromEntries,
+  characterReservedKey,
+  stripReservedAliases,
   MEANINGLESS_ALIASES,
   type CharacterNameEntry,
 } from '../utils/characterNames';
@@ -476,8 +478,14 @@ export interface ScriptSettings {
     apiAssignments: ApiAssignments;
     /** 已废弃：自定义破限词入口已下线，字段保留仅为兼容旧数据（不再读写生效） */
     jailbreakOverrides: JailbreakPromptOverrides;
-    /** 破限词模式：legacy = 老模型 / flash = 3.7f · 3.8f */
+    /** 破限词模式（全局默认）：legacy = 老模型 / flash = 3.7f · 3.8f */
     jailbreakMode: 'legacy' | 'flash';
+    /**
+     * 逐分析类型的破限模式覆盖（在「API 库管理 → 分析类型分配」里逐条指定）。
+     * 例：{ small_summary: 'flash' }。未列出的类型回落到 jailbreakMode。
+     * 总开关（全部切老模型 / 全部切 3.7·3.8F）会清空本字段并改写 jailbreakMode。
+     */
+    jailbreakModeByType: Record<string, 'legacy' | 'flash'>;
     /**
      * 状态文档 patch 灰度开关（按模块名开启）—— 即 UI 上的「输出模式：MUV 化」。
      * 缺省 = 该模块走旧的全量 JSON 输出；置 true 才启用 patch 输出。
@@ -708,7 +716,9 @@ const ScriptSettingsSchema = z
           head: z.string().optional(),
           tail: z.string().optional(),
         })).prefault({}),
-        jailbreakMode: z.string().prefault('legacy'), // 'legacy' | 'flash'
+        jailbreakMode: z.string().prefault('legacy'), // 'legacy' | 'flash'（全局默认）
+        // 逐分析类型的破限模式覆盖：{ 类型key: 'legacy'|'flash' }，未列出 = 跟随全局默认
+        jailbreakModeByType: z.record(z.string(), z.string()).prefault({}),
         // MUV 化（输出结构 patch）**默认全关**：实测收益不稳定，降级为「实验性功能」。
         // 存量数据里那份「默认三件套」由 index.ts 做一次性清空（见 muvDefaultOffApplied）。
         statePatchEnabled: z.record(z.string(), z.boolean()).prefault({}),
@@ -1998,6 +2008,31 @@ export const useMainStore = defineStore('main', () => {
     _settingsDirty = true;
     // 设置变更直接落盘到 localStorage（轻量），replaceVariables 走 doPersist
     saveSettingsToLocal(scriptData.value);
+  }
+
+  // ========== 破限词（按分析类型） ==========
+
+  /**
+   * 设置某个分析类型的破限模式（在「API 库管理 → 分析类型分配」里逐条指定）。
+   * @param mode '' = 清除该类型的覆盖，回落到全局默认（jailbreakMode）
+   */
+  function setJailbreakModeForType(analysisType: string, mode: '' | 'legacy' | 'flash') {
+    const type = String(analysisType || '').trim();
+    if (!type) return;
+    const next = { ...(scriptData.value.settings.jailbreakModeByType || {}) };
+    if (mode === 'legacy' || mode === 'flash') next[type] = mode;
+    else delete next[type];
+    updateSettings({ jailbreakModeByType: next } as any);
+  }
+
+  /**
+   * 破限总开关：所有分析类型一键统一成同一套破限。
+   *
+   * 实现上直接改写全局默认并**清空逐类型覆盖** —— 而不是给每个类型写一条，
+   * 这样「全部统一」之后新增的分析类型也会自动跟随，不会留一个孤儿默认值。
+   */
+  function setJailbreakModeAll(mode: 'legacy' | 'flash') {
+    updateSettings({ jailbreakMode: mode, jailbreakModeByType: {} } as any);
   }
 
   // ========== 正文捕获相关 ==========
@@ -3934,6 +3969,51 @@ export const useMainStore = defineStore('main', () => {
   }
 
   /**
+   * 收集「已确立的独立角色」主名 key 集合（口径 = characterReservedKey）。
+   *
+   * 用途：写入期防合并守卫 —— 这些名字不得再被吸收成别的角色的别名。
+   * 数据源只取最权威的两处：顶层 characterMemories 主名 + registry 中非 merged 的 primaryName。
+   * （别名本身不进集合，否则「师尊」这类合法别名会被误拦。）
+   *
+   * @param excludeNames 需要排除的名字（通常是本次正在写入的角色自身）
+   */
+  function collectReservedCharacterNames(excludeNames?: string[]): Set<string> {
+    const reserved = new Set<string>();
+    const exclude = new Set((excludeNames || []).map(n => characterReservedKey(n)).filter(Boolean));
+    const remember = (name?: string) => {
+      const key = characterReservedKey(name);
+      if (key && !exclude.has(key)) reserved.add(key);
+    };
+    for (const mem of chatData.value.characterMemories || []) remember(mem.characterName);
+    const reg = chatData.value.characterRegistry;
+    if (reg?.records) {
+      for (const rec of Object.values(reg.records)) {
+        if (rec.status === 'merged') continue;
+        remember(rec.primaryName);
+      }
+    }
+    return reserved;
+  }
+
+  /**
+   * 写入期防合并守卫：剔除「实为独立角色主名」的别名并记日志。
+   * 返回剔除后的别名数组（未做 clean，调用方自行 clean）。
+   */
+  function guardAliasesAgainstMerge(selfName: string, aliases: string[] | undefined, reserved: Set<string>): string[] {
+    const { kept, stripped } = stripReservedAliases(aliases, selfName, reserved);
+    if (stripped.length > 0) {
+      pushCodeLog({
+        id: _codeLogIdCounter++,
+        timestamp: new Date().toISOString(),
+        module: '存储',
+        level: 'warn',
+        message: `防合并拦截：角色「${selfName}」的别名中「${stripped.join('、')}」已是独立角色，未吸收为别名（避免把两个角色认成一个人）`,
+      });
+    }
+    return kept;
+  }
+
+  /**
    * P2 写入收口：AI 输出的角色记忆归并入库。
    * - resolved（命中唯一角色）→ 按 characterId 归并，mem 标记 _characterId
    * - ambiguous/unknown → 旧 fallback 逻辑入库（不丢数据，不再挂待仲裁队列）
@@ -3942,6 +4022,8 @@ export const useMainStore = defineStore('main', () => {
   function normalizeIncomingCharacterMemories(memories: CharacterMemory[] = []): CharacterMemory[] {
     const registry = ensureCharacterRegistry();
     const byKey = new Map<string, CharacterMemory>();
+    // 防合并守卫的「独立角色」名单，整批算一次（写入过程中不重算，保证本批判定一致）
+    const reserved = collectReservedCharacterNames();
     for (const rawMem of memories) {
       const mem = normalizeCharacterMemoryArrays(rawMem);
       const rawName = mem.characterName;
@@ -3954,14 +4036,18 @@ export const useMainStore = defineStore('main', () => {
         canonical = result.record.primaryName;
         mergeKey = `id:${result.record.id}`;
         mem.characterName = canonical;
-        mem.aliases = cleanCharacterAliases([...(mem.aliases || []), rawName], canonical);
+        mem.aliases = cleanCharacterAliases(
+          guardAliasesAgainstMerge(canonical, [...(mem.aliases || []), rawName], reserved), canonical,
+        );
         (mem as any)._characterId = result.record.id;
       } else {
         canonical = resolveKnownCharacterName(rawName, true);
         if (!canonical) continue;
         mergeKey = `name:${normalizeMemoryCharacterName(canonical)}`;
         mem.characterName = canonical;
-        mem.aliases = cleanCharacterAliases([...(mem.aliases || []), rawName], canonical);
+        mem.aliases = cleanCharacterAliases(
+          guardAliasesAgainstMerge(canonical, [...(mem.aliases || []), rawName], reserved), canonical,
+        );
       }
 
       const existing = byKey.get(mergeKey);
@@ -4006,6 +4092,7 @@ export const useMainStore = defineStore('main', () => {
 
   function normalizeIncomingCharacterTable(table: CharacterEntry[] = []): CharacterEntry[] {
     const byNorm = new Map<string, CharacterEntry>();
+    const reserved = collectReservedCharacterNames();
     for (const entry of table || []) {
       const rawName = entry.name;
       const canonical = resolveKnownCharacterName(rawName, true);
@@ -4014,7 +4101,9 @@ export const useMainStore = defineStore('main', () => {
       const normalized = {
         ...entry,
         name: canonical,
-        aliases: cleanCharacterAliases([...(entry.aliases || []), rawName], canonical),
+        aliases: cleanCharacterAliases(
+          guardAliasesAgainstMerge(canonical, [...(entry.aliases || []), rawName], reserved), canonical,
+        ),
       };
       const existing = byNorm.get(key);
       if (existing) {
@@ -4240,6 +4329,44 @@ export const useMainStore = defineStore('main', () => {
     (standalone as any)._manuallyEdited = true;
 
     updateGraphCharacterAliases(standalone.characterName || name, cleaned);
+
+    // ⭐ 别名编辑必须同步到「全部存储源」—— 否则残留在旧 delta / characterTable / registry 里的旧别名
+    //    会继续把该名字解析回本角色（registry 优先级最高），玩家删完别名照样建不了同名角色 = 死锁。
+    //    见 2026-10-06 玩家反馈：「改名后角色消失，新建又提示已存在」。
+    const aliasSelfKey = normalizeMemoryCharacterName(standalone.characterName || name);
+    const syncMemAliases = (list?: any[]) => {
+      for (const m of list || []) {
+        if (normalizeMemoryCharacterName(m?.characterName) === aliasSelfKey) {
+          m.aliases = cleanCharacterAliases(cleaned, m.characterName || name);
+        }
+      }
+    };
+    const syncTableAliases = (table?: any[]) => {
+      for (const e of table || []) {
+        if (normalizeMemoryCharacterName(e?.name) === aliasSelfKey) {
+          e.aliases = cleanCharacterAliases(cleaned, e.name || name);
+        }
+      }
+    };
+    for (const s of chatData.value.summaries || []) {
+      syncMemAliases(s.characterMemories);
+      syncTableAliases(s.characterTable);
+    }
+    for (const s of chatData.value.summaryHistory || []) {
+      syncMemAliases(s.characterMemories);
+      syncTableAliases(s.characterTable);
+    }
+    // registry：别名编辑落表（名字解析优先读 registry，漏这一步就是死锁）
+    const _aliasRegistry = chatData.value.characterRegistry;
+    if (_aliasRegistry?.records && Object.keys(_aliasRegistry.records).length > 0) {
+      for (const rec of Object.values(_aliasRegistry.records)) {
+        if (rec.status === 'merged') continue;
+        const hitRec = normalizeMemoryCharacterName(rec.primaryName) === aliasSelfKey
+          || (rec.aliases || []).some(a => normalizeMemoryCharacterName(a) === aliasSelfKey);
+        if (hitRec) rec.aliases = cleanCharacterAliases(cleaned, rec.primaryName);
+      }
+    }
+
     const rewriteNorms = new Set([characterName, name, ...cleaned].map(normalizeMemoryCharacterName).filter(Boolean));
     for (const wpMem of chatData.value.worldProgressMemories || []) {
       if (rewriteNorms.has(normalizeMemoryCharacterName(wpMem.characterName))) {
@@ -4323,6 +4450,130 @@ export const useMainStore = defineStore('main', () => {
       message: `已手动新建角色: ${canonical || trimmed}${cleanedAliases.length ? `（别名: ${cleanedAliases.join('、')}）` : ''}${locationName ? ` @ ${locationName}` : ''}`,
     });
     return true;
+  }
+
+  /**
+   * 新建角色前的名称冲突探测（决定 UI 走「硬拒」还是「可拆分」）。
+   * - primary：该名已是某个角色的主名 → 真重复，硬拒
+   * - alias  ：该名只是某个角色的别名 → 可由「拆分」解决（AI 曾把两个角色认成一个人）
+   * - blocked：该名在黑名单里（曾被移除）→ 需先「放出」才能重建，否则建了也不显示
+   * - none   ：未被占用
+   *
+   * 口径与 resolveKnownCharacterName 对齐（registry 优先），避免出现
+   * 「UI 判定无冲突、真正写入时却被拒」的双标。
+   */
+  function checkCharacterNameConflict(name: string): { kind: 'none' | 'primary' | 'alias' | 'blocked'; owner?: string } {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return { kind: 'none' };
+    const norm = characterReservedKey(trimmed);
+    if (!norm) return { kind: 'none' };
+    if (isUserCharacterName(trimmed)) return { kind: 'primary', owner: getUserName() };
+    // 黑名单拦截：该名曾被「移除」，数据已清但名字被拦 —— 不提示的话玩家会以为「建了却没出现」
+    if (isBlacklisted(trimmed)) return { kind: 'blocked' };
+
+    // registry 优先（与 resolveKnownCharacterName 同口径；否则会出现「UI 说没冲突、写时被拒」）
+    const reg = chatData.value.characterRegistry;
+    if (reg?.records && Object.keys(reg.records).length > 0) {
+      const r = resolveOrPending(trimmed, reg);
+      if (r.status === 'resolved' && r.record) {
+        const isPrimary = characterReservedKey(r.record.primaryName) === norm;
+        return { kind: isPrimary ? 'primary' : 'alias', owner: r.record.primaryName };
+      }
+    }
+
+    const entries = getCharacterNameEntries();
+    for (const e of entries) {
+      if (characterReservedKey(e.name) === norm) return { kind: 'primary', owner: e.name };
+    }
+    for (const e of entries) {
+      if ((e.aliases || []).some(a => characterReservedKey(a) === norm)) {
+        return { kind: 'alias', owner: e.name };
+      }
+    }
+    return { kind: 'none' };
+  }
+
+  /**
+   * 「从别名拆出为独立角色」：把 name 从所有宿主的别名中摘掉
+   * （覆盖顶层 characterMemories / 全部 delta / characterTable / 图谱四份存档 / registry），
+   * 再以它为主名新建独立角色。
+   *
+   * 这是「合并有路、拆分无门」的补口 —— 修复玩家「改名后角色消失、新建又提示已存在」的死锁：
+   * 只清 characterMemories 不够，registry 才是名字解析的最高优先级。
+   * 返回 true = 拆分并新建成功。
+   */
+  function extractAliasToNewCharacter(name: string, aliases: string[] = [], locationName?: string): boolean {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return false;
+    const norm = characterReservedKey(trimmed);
+    if (!norm) return false;
+    if (isUserCharacterName(trimmed) || isBlacklisted(trimmed)) return false;
+
+    const hosts = new Set<string>();
+    // 只从「别名列表」里摘掉该名，绝不改任何条目自身的主名
+    const stripFrom = (list?: any[]) => {
+      for (const item of list || []) {
+        const itemName = item?.characterName || item?.name;
+        const itemNorm = characterReservedKey(itemName);
+        if (!itemNorm || itemNorm === norm) continue;
+        const before: string[] = item.aliases || [];
+        const keep = before.filter(a => characterReservedKey(a) !== norm);
+        if (keep.length !== before.length) {
+          item.aliases = keep;
+          hosts.add(itemName);
+        }
+      }
+    };
+    stripFrom(chatData.value.characterMemories);
+    for (const s of chatData.value.summaries || []) {
+      stripFrom(s.characterMemories);
+      stripFrom(s.characterTable);
+    }
+    for (const s of chatData.value.summaryHistory || []) {
+      stripFrom(s.characterMemories);
+      stripFrom(s.characterTable);
+    }
+    // 图谱四份存档（当前图 + 版本 + 历史 + 撤回栈）：防止回滚把别名又带回来
+    const stripGraph = (g: KnowledgeGraph | null) => {
+      if (!g) return;
+      for (const ch of g.characters || []) {
+        const before: string[] = ch.aliases || [];
+        const keep = before.filter(a => characterReservedKey(a) !== norm);
+        if (keep.length !== before.length) {
+          ch.aliases = keep;
+          hosts.add(ch.name);
+        }
+      }
+    };
+    stripGraph(chatData.value.knowledgeGraph);
+    for (const v of chatData.value.knowledgeGraphVersions || []) stripGraph(v.graph || null);
+    for (const g of chatData.value.knowledgeGraphHistory || []) stripGraph(g);
+    for (const g of chatData.value.knowledgeGraphUndoHistory || []) stripGraph(g);
+    // registry：不清这张表的别名，新建时 resolveOrPending 依旧会把名字解析回宿主 → 前功尽弃
+    const reg = chatData.value.characterRegistry;
+    if (reg?.records) {
+      for (const rec of Object.values(reg.records)) {
+        if (rec.status === 'merged') continue;
+        const before: string[] = rec.aliases || [];
+        const keep = before.filter(a => characterReservedKey(a) !== norm);
+        if (keep.length !== before.length) {
+          rec.aliases = keep;
+          hosts.add(rec.primaryName);
+        }
+      }
+    }
+
+    const ok = addCharacter(trimmed, aliases, locationName);
+    if (ok) {
+      pushCodeLog({
+        id: _codeLogIdCounter++,
+        timestamp: new Date().toISOString(),
+        module: '存储',
+        level: 'info',
+        message: `已从别名拆出独立角色: ${trimmed}${hosts.size ? `（原挂在：${[...hosts].join('、')}）` : ''}`,
+      });
+    }
+    return ok;
   }
 
   /**
@@ -6586,6 +6837,8 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     renamePersona,
     // 设置
     updateSettings,
+    setJailbreakModeForType,
+    setJailbreakModeAll,
     // 正文捕获
     captureContent,
     captureFloorZero,
@@ -6628,6 +6881,9 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     resolveKnownCharacterNames,
     updateCharacterAliases,
     addCharacter,
+    checkCharacterNameConflict,
+    extractAliasToNewCharacter,
+    collectReservedCharacterNames,
     applyExtractedCharacters,
     // 角色设定档案
     setCharacterProfile,

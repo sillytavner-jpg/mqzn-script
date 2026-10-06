@@ -79,14 +79,15 @@ const JAILBREAK_ROLES: Record<string, { role: BrainRoleSpec; task: string; ack: 
   world_progress: { role: '前额叶', task: '推演场外行动', ack: '场外的事我来推' },
 };
 
-/** 按分析类型生成破限 head（身份框架 + 认可式应答，内容随当前破限模式变化） */
+/** 按分析类型生成破限 head（身份框架 + 认可式应答，内容随该类型的破限模式变化） */
 function brainHeadFor(key: string): string {
   const cfg = JAILBREAK_ROLES[key] || {
     role: '小左' as BrainRoleSpec,
     task: '整理这份数据',
     ack: '交给我',
   };
-  return roleHead(buildBrainHead(cfg.role, cfg.task), buildBrainAccept(cfg.role, cfg.ack));
+  // 第三参传类型 key：API 库管理里可为该类型单独指定破限模式
+  return roleHead(buildBrainHead(cfg.role, cfg.task, key), buildBrainAccept(cfg.role, cfg.ack));
 }
 
 export const JAILBREAK_PROMPT_TYPES: JailbreakPromptType[] = [

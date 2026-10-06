@@ -636,21 +636,22 @@ function confirmRename() {
   }
 }
 
+/** 新建角色时的「别名冲突」待确认态（kind=alias 时展示拆分入口） */
+const newCharConflict = ref<{ kind: 'none' | 'primary' | 'alias' | 'blocked'; owner?: string } | null>(null);
+
 function openAddPopup() {
   newCharName.value = '';
   newCharAliases.value = '';
   newCharLocation.value = '';
   newCharCustomLoc.value = '';
   newCharError.value = '';
+  newCharConflict.value = null;
   showAddPopup.value = true;
 }
 
-function confirmAddCharacter() {
+/** 从表单读名称 / 别名 / 所在地（新建与拆分共用） */
+function readAddForm() {
   const name = newCharName.value.trim();
-  if (!name) {
-    newCharError.value = '名称不能为空';
-    return;
-  }
   const aliases = newCharAliases.value
     .split('\n')
     .map(a => a.trim())
@@ -661,15 +662,57 @@ function confirmAddCharacter() {
   } else if (newCharLocation.value) {
     locationName = newCharLocation.value;
   }
-  const ok = store.addCharacter(name, aliases, locationName || undefined);
+  return { name, aliases, locationName: locationName || undefined };
+}
+
+function afterAddSuccess(name: string, tip: string) {
+  selectedCharacter.value = name;
+  editingItemIdx.value = -1;
+  isEditingNsfw.value = false;
+  newCharConflict.value = null;
+  showAddPopup.value = false;
+  try { (window as any).toastr?.success(tip, '✅', { timeOut: 3000 }); } catch (_) {}
+}
+
+function confirmAddCharacter() {
+  const { name, aliases, locationName } = readAddForm();
+  if (!name) {
+    newCharError.value = '名称不能为空';
+    return;
+  }
+  newCharError.value = '';
+  newCharConflict.value = null;
+
+  // 先探测冲突：主名冲突 = 真重复（硬拒）；只命中别名 = 可「拆出为独立角色」
+  const conflict = store.checkCharacterNameConflict(name);
+  if (conflict.kind === 'primary') {
+    newCharError.value = `新建失败：已存在同名角色「${conflict.owner || name}」`;
+    return;
+  }
+  if (conflict.kind === 'blocked') {
+    newCharError.value = `「${name}」在黑名单里（曾被移除）。请先打开黑名单弹窗把它「放出」，再新建。`;
+    return;
+  }
+  if (conflict.kind === 'alias') {
+    newCharConflict.value = conflict; // 交给下方「拆出」确认区
+    return;
+  }
+
+  const ok = store.addCharacter(name, aliases, locationName);
+  if (ok) afterAddSuccess(name, `已新建角色「${name}」`);
+  else newCharError.value = '新建失败：该名称或别名已存在角色';
+}
+
+/** 确认「从别名拆出为独立角色」（把该名从宿主别名中摘掉再新建） */
+function confirmExtractAlias() {
+  const { name, aliases, locationName } = readAddForm();
+  if (!name) return;
+  const owner = newCharConflict.value?.owner;
+  const ok = store.extractAliasToNewCharacter(name, aliases, locationName);
   if (ok) {
-    selectedCharacter.value = name;
-    editingItemIdx.value = -1;
-    isEditingNsfw.value = false;
-    showAddPopup.value = false;
-    try { (window as any).toastr?.success(`已新建角色「${name}」`, '✅ 新建成功', { timeOut: 3000 }); } catch (_) {}
+    afterAddSuccess(name, `已从「${owner || '原角色'}」拆出独立角色「${name}」`);
   } else {
-    newCharError.value = '新建失败：该名称或别名已存在角色';
+    newCharError.value = '拆分失败：请检查名称，或先在该角色详情里手动移除该别名后重试';
   }
 }
 
@@ -1238,7 +1281,12 @@ function confirmExtract() {
       <div v-if="newCharError" class="zhino-merge-hint" style="color: var(--zn-danger-rgb, #e06c75);">
         {{ newCharError }}
       </div>
-      <div v-if="newCharName.trim()" class="zhino-merge-preview">
+      <!-- 别名冲突：该名已被吸收成别人的别名（AI 多半把两个角色认成了一个人）→ 提供「拆出」 -->
+      <div v-if="newCharConflict?.kind === 'alias'" class="zhino-merge-preview" style="border-color: var(--zn-warning-rgb, #d19a66);">
+        ⚠️「{{ newCharName.trim() }}」目前是「{{ newCharConflict.owner }}」的<b>别名</b>，所以看不到、也建不了。<br/>
+        <span class="zhino-merge-hint">拆出后：该名会从「{{ newCharConflict.owner }}」的别名中移除，并新建为独立角色（记忆 / 人设各自独立）。</span>
+      </div>
+      <div v-if="newCharName.trim() && newCharConflict?.kind !== 'alias'" class="zhino-merge-preview">
         新建「{{ newCharName.trim() }}」
         <span v-if="newCharAliases.trim()">（别名: {{ newCharAliases.split('\n').map(s=>s.trim()).filter(Boolean).join('、') }}）</span>
         <span v-if="(newCharLocation === '__custom__' ? newCharCustomLoc.trim() : newCharLocation)"> @ {{ newCharLocation === '__custom__' ? newCharCustomLoc.trim() : newCharLocation }}</span>
@@ -1246,6 +1294,13 @@ function confirmExtract() {
       <template #footer>
         <button class="zhino-btn-sm" @click="showAddPopup = false">取消</button>
         <button
+          v-if="newCharConflict?.kind === 'alias'"
+          class="zhino-btn-sm zhino-btn-save"
+          :disabled="!newCharName.trim()"
+          @click="confirmExtractAlias"
+        >拆出并新建</button>
+        <button
+          v-else
           class="zhino-btn-sm zhino-btn-save"
           :disabled="!newCharName.trim()"
           @click="confirmAddCharacter"

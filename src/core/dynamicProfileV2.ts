@@ -32,7 +32,7 @@ export interface DynamicProfileV2 {
 
 // 破限身份（参考星光预设）：小右 主理本任务
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead('小右', '更新角色状态');
+  return buildBrainHead('小右', '更新角色状态', 'dynamic_profile');
 }
 
 function buildMoralAttack(_userName: string): string {

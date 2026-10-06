@@ -101,7 +101,7 @@ const apiModelList = ref<Record<string, string[]>>({});
 const apiModelLoading = ref<Record<string, boolean>>({});
 const apiModelError = ref<Record<string, string>>({});
 
-const ANALYSIS_TYPES: Array<{ key: string; label: string }> = [
+const ANALYSIS_TYPES: Array<{ key: string; label: string; noJailbreak?: boolean }> = [
   { key: 'grand_summary', label: '大总结' },
   { key: 'small_summary', label: '小总结' },
   { key: 'dreamtalk', label: '梦呓分析' },
@@ -112,7 +112,8 @@ const ANALYSIS_TYPES: Array<{ key: string; label: string }> = [
   { key: 'plot_director', label: '剧情导演' },
   { key: 'persona', label: '人设分析' },
   { key: 'character_profile', label: '角色设定' },
-  { key: 'character_extract', label: '世界书提取角色' },
+  // 世界书提取角色使用独立提示词，不经过破限框架 —— UI 上不给假选项
+  { key: 'character_extract', label: '世界书提取角色', noJailbreak: true },
 ];
 
 function addApi() {
@@ -161,6 +162,40 @@ function assignApi(type: string, apiId: string) {
 function getAssignedApiId(type: string): string {
   const assignments = (store.settings as any).apiAssignments || {};
   return assignments[type] || ((store.settings as any).apiLibrary?.[0]?.id ?? '');
+}
+
+// ─── 破限词（按分析类型）───
+
+/**
+ * 该分析类型**当前生效**的破限模式。
+ * 单独设置过就用它，否则回落到全局默认。
+ * UI 上不呈现「跟随」这一概念 —— 一律显示实际生效值，所见即所得。
+ */
+function getJailbreakModeForType(type: string): 'legacy' | 'flash' {
+  const byType = (store.settings as any).jailbreakModeByType || {};
+  const v = byType[type];
+  if (v === 'legacy' || v === 'flash') return v;
+  return (store.settings as any).jailbreakMode === 'flash' ? 'flash' : 'legacy';
+}
+
+function setJailbreakModeForType(type: string, mode: 'legacy' | 'flash') {
+  store.setJailbreakModeForType(type, mode);
+}
+
+/** 总开关显示态：全部一致时显示该模式，存在分歧时显示 ''（混合） */
+const jailbreakAllMode = computed<'' | 'legacy' | 'flash'>(() => {
+  const globalMode: 'legacy' | 'flash' = (store.settings as any).jailbreakMode === 'flash' ? 'flash' : 'legacy';
+  const byType = (store.settings as any).jailbreakModeByType || {};
+  const overrides = ANALYSIS_TYPES
+    .map(t => byType[t.key])
+    .filter((v: any) => v === 'legacy' || v === 'flash');
+  if (overrides.length === 0) return globalMode;
+  if (!overrides.every((v: any) => v === globalMode)) return '';
+  return globalMode;
+});
+
+function setJailbreakAll(mode: 'legacy' | 'flash') {
+  store.setJailbreakModeAll(mode);
 }
 
 async function loadApiModels(id: string) {
@@ -1252,7 +1287,24 @@ function executeSelectiveDelete() {
 
         <!-- 分析类型分配 -->
         <div class="zhino-api-lib-section" v-if="(store.settings as any).apiLibrary?.length">
-          <div class="zhino-api-lib-subtitle">分析类型分配</div>
+          <div class="zhino-api-lib-subtitle zhino-jb-head">
+            <span>分析类型分配</span>
+            <!-- 破限总开关：一键把所有类型切到同一套破限 -->
+            <span class="zhino-jb-all">
+              <span class="zhino-jb-all-label">破限</span>
+              <button
+                class="zhino-jb-btn"
+                :class="{ 'is-on': jailbreakAllMode === 'legacy' }"
+                @click="setJailbreakAll('legacy')"
+              >全部老模型</button>
+              <button
+                class="zhino-jb-btn"
+                :class="{ 'is-on': jailbreakAllMode === 'flash' }"
+                @click="setJailbreakAll('flash')"
+              >全部 3.7 / 3.8F</button>
+              <span v-if="jailbreakAllMode === ''" class="zhino-jb-all-mixed">混合</span>
+            </span>
+          </div>
           <div v-for="t in ANALYSIS_TYPES" :key="t.key" class="zhino-api-lib-assign-row">
             <span class="zhino-api-lib-assign-label">{{ t.label }}</span>
             <select
@@ -1264,6 +1316,24 @@ function executeSelectiveDelete() {
                 {{ api.name || '未命名' }} ({{ api.model || '?' }})
               </option>
             </select>
+            <!-- 破限词：只有两态，点哪个就是哪个 -->
+            <div v-if="!t.noJailbreak" class="zhino-jb-seg">
+              <button
+                class="zhino-jb-btn"
+                :class="{ 'is-on': getJailbreakModeForType(t.key) === 'legacy' }"
+                @click="setJailbreakModeForType(t.key, 'legacy')"
+              >老模型</button>
+              <button
+                class="zhino-jb-btn"
+                :class="{ 'is-on': getJailbreakModeForType(t.key) === 'flash' }"
+                @click="setJailbreakModeForType(t.key, 'flash')"
+              >3.7 / 3.8F</button>
+            </div>
+            <span v-else class="zhino-jb-na" title="该功能使用独立提示词，不经过破限框架">不走破限</span>
+          </div>
+          <div class="zhino-jb-hint">
+            破限词按分析类型生效：<b>老模型</b>（3.1P / DS 系列）= 身份框架 + 认可式；
+            <b>3.7 / 3.8F</b> = 另加「尾部重申 + 输出契约」，并摘掉卡思维链的 prefill。
           </div>
         </div>
     </Modal>
@@ -2253,6 +2323,67 @@ function executeSelectiveDelete() {
   font-size: 12px;
   color: var(--zn-text-regular);
   min-width: 80px;
+}
+
+/* 破限词（分析类型分配区） */
+.zhino-jb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.zhino-jb-all {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.zhino-jb-all-label {
+  font-size: 10px;
+  color: var(--zn-text-muted);
+}
+.zhino-jb-btn {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--zn-border-light);
+  background: var(--zn-bg-surface2);
+  color: var(--zn-text-secondary);
+  cursor: pointer;
+}
+.zhino-jb-btn:hover {
+  color: var(--zn-accent);
+  border-color: var(--zn-accent);
+}
+.zhino-jb-btn.is-on {
+  background: rgba(var(--zn-accent-rgb), 0.14);
+  color: var(--zn-accent);
+  border-color: var(--zn-accent);
+}
+.zhino-jb-all-mixed {
+  font-size: 10px;
+  color: var(--zn-warning, #d19a66);
+}
+/* 行内两态破限切换：点哪个就是哪个 */
+.zhino-jb-seg {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
+  flex: 0 0 auto;
+}
+.zhino-jb-na {
+  flex: 0 0 96px;
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--zn-text-muted);
+  text-align: center;
+}
+.zhino-jb-hint {
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--zn-text-muted);
+  margin-top: 6px;
 }
 .zhino-btn-delete {
   color: rgba(255, 120, 120, 0.8);

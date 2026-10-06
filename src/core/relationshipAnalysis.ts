@@ -58,7 +58,7 @@ type RawWorldbookEntry = Record<string, unknown> & {
 
 // 破限身份（参考星光预设）：小右 主理本任务
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead('小右', '理关系档案');
+  return buildBrainHead('小右', '理关系档案', 'relationship');
 }
 
 function buildMoralAttack(_userName: string): string {

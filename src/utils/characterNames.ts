@@ -8,11 +8,28 @@ export interface CharacterNameIndex {
   byLookupKey: Map<string, string>;
 }
 
+/**
+ * 角色名归一化（判重 / 匹配用的 key 口径）。**不用于显示**，只用于比较。
+ *
+ * 处理三件事：
+ *   1. 去零宽字符（AI 输出常夹带不可见字符，会让「同一个名字」变成两个 key）
+ *   2. 剥末尾括号注释：半角 () / 全角（）/ 半角 [] / 全角【】
+ *      —— AI 常输出「清月（师尊）」「王芳(化名)」这类带注释的名字；
+ *         原先只认半角圆括号，导致「王芳（化名）」与「王芳」判成两个角色（重复/认错人）
+ *   3. 去首尾空白
+ *
+ * ⚠️ 空值保护：整个名字被一组括号包住时（如「【清月】」），末尾剥离会得到空串 ——
+ *    此时保留原值。否则所有此类名字都会被归一化成空 key，互相判重（原实现有此隐患）。
+ */
 export function normalizeCharacterName(name?: string): string {
-  return String(name || '')
+  const raw = String(name || '')
     .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/\s*\(.+?\)\s*$/g, '')
     .trim();
+  if (!raw) return '';
+  const stripped = raw
+    .replace(/\s*(?:\([^)]*\)|（[^）]*）|\[[^\]]*\]|【[^】]*】)\s*$/, '')
+    .trim();
+  return stripped || raw;
 }
 
 function lookupKeys(name?: string): string[] {
@@ -40,6 +57,49 @@ export function cleanCharacterAliases(aliases: string[] | undefined, characterNa
     result.push(alias);
   }
   return result;
+}
+
+/** 归一化 lookup key（与 registry 的 normKey 口径一致：去括号 + lowercase） */
+export function characterReservedKey(name?: string): string {
+  return normalizeCharacterName(name).trim().toLowerCase();
+}
+
+/**
+ * 防「认错人合并」守卫：从候选别名里剔除「已被其它独立角色占用的主名」。
+ *
+ * 动机（2026-10-06 玩家反馈的死锁）：
+ *   本系统以「名字字符串」为主键。AI 偶发把两个不同角色当成同一人的别名，
+ *   写成 `{ name: "甲", aliases: ["乙"] }`。这个名字一旦被吸收成别名：
+ *     · 角色列表只渲染主名 → 玩家看不到它（以为角色消失）
+ *     · 新建查重连别名一起匹配 → 拒绝创建（提示「名称或别名已存在」）
+ *   而 registry 是名字解析的最高优先级且只在改名/合并时更新，配合起来会彻底锁死。
+ *   本函数在**写入前**拦掉「把已确立的独立角色主名当别名吸收」这一个动作。
+ *   非独立角色主名的普通别名（如「师尊」「月儿」）原样保留，不影响正常别名功能。
+ *
+ * @param aliases       候选别名（原值，未归一化）
+ * @param selfName      当前条目自身的主名（永不被剔除）
+ * @param reservedNames 已确立的独立角色主名 key 集合（由 characterReservedKey 生成）
+ * @returns kept=保留的别名；stripped=被拦下的「实为独立角色」的别名
+ */
+export function stripReservedAliases(
+  aliases: string[] | undefined,
+  selfName: string,
+  reservedNames?: Set<string>,
+): { kept: string[]; stripped: string[] } {
+  const list = (aliases || []).map(a => String(a || '').trim()).filter(Boolean);
+  if (!reservedNames || reservedNames.size === 0) return { kept: list, stripped: [] };
+  const self = characterReservedKey(selfName);
+  const kept: string[] = [];
+  const stripped: string[] = [];
+  for (const alias of list) {
+    const key = characterReservedKey(alias);
+    if (key && key !== self && reservedNames.has(key)) {
+      stripped.push(alias);
+      continue;
+    }
+    kept.push(alias);
+  }
+  return { kept, stripped };
 }
 
 export function buildCharacterNameIndex(entries: CharacterNameEntry[]): CharacterNameIndex {

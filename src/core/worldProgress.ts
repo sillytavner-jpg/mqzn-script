@@ -119,7 +119,7 @@ export function createFailedWorldProgressRecord(currentFloor: number, rawJson = 
 
 // 破限身份（参考星光预设）：前额叶 主理本任务
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead('前额叶', '推演场外行动');
+  return buildBrainHead('前额叶', '推演场外行动', 'world_progress');
 }
 
 function buildMoralAttack(_userName: string): string {

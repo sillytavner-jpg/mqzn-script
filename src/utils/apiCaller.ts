@@ -149,9 +149,10 @@ export async function callGenerateRaw(params: GenerateRawParams): Promise<string
  */
 function applyFlashJailbreak(
   prompts: Array<OrderedPrompt | 'user_input'>,
+  analysisType?: string,
 ): Array<OrderedPrompt | 'user_input'> {
-  if (!isFlashMode()) return prompts;
-  const tail = buildFlashTail();
+  if (!isFlashMode(analysisType)) return prompts;
+  const tail = buildFlashTail(analysisType);
   if (!tail) return prompts;
 
   const next = [...prompts];
@@ -198,11 +199,11 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
 
   const modelName = apiConfig.model || '';
   const userName = typeof store.getUserName === 'function' ? store.getUserName() : '{{user}}';
-  // 破限词固定由「总览界面 → 破限词」的模式开关（legacy / flash）决定，
-  // 不再支持逐分析类型的自定义覆盖（「自定义破限词」入口已下线）。
+  // 破限词按「分析类型」生效：API 库管理 → 分析类型分配里可逐条指定 legacy / flash，
+  // 未指定的类型跟随全局默认（总览 → 智脑设置不再提供开关，已移入 API 库管理）。
   const basePrompts = [...params.ordered_prompts];
   // flash 破限：① 摘掉末尾卡思维链的 prefill ② 末尾压「重申 + 输出契约」
-  const tailedPrompts = applyFlashJailbreak(basePrompts);
+  const tailedPrompts = applyFlashJailbreak(basePrompts, params._analysisType);
   // 破限段里的 {{user}} 是脚本字面量，酒馆不会替我们替换，这里补上
   fillUserToken(tailedPrompts, userName);
   const orderedPrompts = adaptClaudePrefill(tailedPrompts, modelName);

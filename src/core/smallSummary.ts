@@ -54,7 +54,7 @@ const InteractingCharactersSchema = z.array(z.string());
 
 // 破限身份（参考星光预设）：小左 主理本任务
 function buildJailbreakHead(_userName: string): string {
-  return buildBrainHead('小左', '整理数据');
+  return buildBrainHead('小左', '整理数据', 'small_summary');
 }
 
 function buildMoralAttack(_userName: string): string {

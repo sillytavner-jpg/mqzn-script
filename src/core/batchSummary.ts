@@ -767,7 +767,9 @@ export async function executeBatchGraphSummary(
       // 累积图谱增量
       if (result.graphDiff) {
         try {
-          graph = applyKnowledgeGraphDiff(graph, result.graphDiff);
+          graph = applyKnowledgeGraphDiff(graph, result.graphDiff, {
+            reservedCharacterNames: store.collectReservedCharacterNames(),
+          });
         } catch (e: any) {
           logWarn('批量图谱', `第${b + 1}批图谱增量合并失败: ${e?.message || e}`);
         }
