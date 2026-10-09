@@ -2137,7 +2137,7 @@ $(() => {
       const previousSummary = store.getLatestSummary();
 
       // === V2 大总结：大总结(时间线) + 角色记忆更新 并发执行 ===
-      // ★ A5.3.11：不再自建重试循环 —— 重试统一交给后台队列
+      // ★ A5.4.0：不再自建重试循环 —— 重试统一交给后台队列
       //   （backgroundQueue.runTaskWithRetry，上限 apiMaxRetries）。
       //   本函数只跑一次；失败即抛出，由队列决定是否重试。
       //   失败最终落到外层 catch：落失败占位（isFailed，不推进游标、不喂下一轮 AI）。

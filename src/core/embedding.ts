@@ -32,7 +32,7 @@ export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
 /**
  * 单条文本 → embedding 向量。
  *
- * ⚠️ A5.3.11：本函数**只发一次请求，不带重试** ——
+ * ⚠️ A5.4.0：本函数**只发一次请求，不带重试** ——
  * 重试统一由外层（后台队列 / 调用方）负责。
  * embedding 走的是 `/embeddings` 端点（非 chat），不经 `callGenerateRaw`，
  * 但同样遵守「全项目重试只发生在一个地方」的约定。
@@ -63,7 +63,7 @@ export async function getEmbedding(text: string, settings: EmbeddingSettings): P
   return json.data[0].embedding;
 }
 
-/** 批量文本 → embedding 向量数组（每批最多32条）。A5.3.11：不带内层重试，交给外层。 */
+/** 批量文本 → embedding 向量数组（每批最多32条）。A5.4.0：不带内层重试，交给外层。 */
 export async function getBatchEmbeddings(
   texts: string[],
   settings: EmbeddingSettings,
@@ -324,7 +324,7 @@ export async function rerankCandidates(
   const rerankModel = model || 'BAAI/bge-reranker-v2-m3';
   const t0 = Date.now();
 
-  // A5.3.11：不带内层重试，单次请求（重试交给外层）
+  // A5.4.0：不带内层重试，单次请求（重试交给外层）
   const resp = await fetch(rerankUrl, {
     method: 'POST',
     headers: {

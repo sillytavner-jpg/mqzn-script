@@ -6226,11 +6226,11 @@ const versions = chatData.value.knowledgeGraphVersions || [];
   }
 
   // ========== API 重试弹窗 ==========
-  // ⚠️ A5.3.11 起重试统一由后台队列负责（见下方"后台队列统一重试弹窗"）。
+  // ⚠️ A5.4.0 起重试统一由后台队列负责（见下方"后台队列统一重试弹窗"）。
   //    原先 `callGenerateRaw` 自带的内层重试已移除，故 apiRetryStatus 相关 UI/API 一并废弃。
 
   // ========== 后台队列统一重试弹窗 ==========
-  // ★ A5.3.11：重试统一由后台队列负责（callGenerateRaw 不再自带重试）。
+  // ★ A5.4.0：重试统一由后台队列负责（callGenerateRaw 不再自带重试）。
   //   任何后台任务失败 → 队列弹这个窗、倒计时后重试同一任务，
   //   上限取 apiMaxRetries（默认 3）。用户可点"停止重试"中断。
 
@@ -6962,7 +6962,7 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     resolveSummaryGuidance,
     skipSummaryGuidance,
     cancelSummaryGuidance,
-    // 后台队列统一重试弹窗（A5.3.11）
+    // 后台队列统一重试弹窗（A5.4.0）
     queueRetryStatus,
     startQueueRetry,
     updateQueueRetryCountdown,

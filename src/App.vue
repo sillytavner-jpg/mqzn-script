@@ -84,7 +84,7 @@
       @cancel="store.cancelSummaryGuidance"
     />
 
-    <!-- 后台任务统一重试弹窗（带"停止重试"按钮）—— A5.3.11 起所有后台任务共用 -->
+    <!-- 后台任务统一重试弹窗（带"停止重试"按钮）—— A5.4.0 起所有后台任务共用 -->
     <Transition name="zhino-retry">
       <div v-if="store.queueRetryStatus" class="zhino-retry-toast">
         <div class="zhino-retry-toast-icon">⚠</div>

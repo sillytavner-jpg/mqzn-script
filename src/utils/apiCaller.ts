@@ -39,7 +39,7 @@ interface GenerateRawParams {
   /** 中止信号：外部可通过 AbortController 取消正在进行的请求 */
   _abortSignal?: AbortSignal;
   /**
-   * @deprecated A5.3.11 起 `callGenerateRaw` 不再自带重试，本参数已无效。
+   * @deprecated A5.4.0 起 `callGenerateRaw` 不再自带重试，本参数已无效。
    * 重试统一由后台队列负责。保留字段仅为兼容旧调用签名，新代码请勿使用。
    */
   _maxRetries?: number;
