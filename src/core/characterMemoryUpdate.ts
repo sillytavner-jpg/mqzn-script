@@ -292,7 +292,7 @@ function parseCharacterMemoryOutput(rawText: string, userName: string): Characte
       }
     }
 
-    if (data?.characterMemories?.length > 0) {
+    if (data && data.characterMemories && data.characterMemories.length > 0) {
       return {
         characterMemories: data.characterMemories.map((m: any) => {
         const allMemories = (m.memories || []).map((mem: any) => ({
@@ -304,9 +304,9 @@ function parseCharacterMemoryOutput(rawText: string, userName: string): Characte
         const coreMemories = allMemories.filter((_: any, idx: number) => coreSet.has(idx));
         const recentMemories = allMemories
           .filter((_: any, idx: number) => !coreSet.has(idx))
-          .map(r => r.time ? `[${r.time}] ${r.text}` : r.text);
+          .map((r: { text: string; time: string }) => r.time ? `[${r.time}] ${r.text}` : r.text);
         // orderedNewMemories：保留AI原始顺序，标记核心/近期，含时间
-        const orderedNewMemories = allMemories.map((item, idx) => ({
+        const orderedNewMemories = allMemories.map((item: { text: string; time: string }, idx: number) => ({
           text: item.text,
           isCore: coreSet.has(idx),
           time: item.time || undefined,
@@ -327,6 +327,7 @@ function parseCharacterMemoryOutput(rawText: string, userName: string): Characte
           preferences: n.preferences || [],
           behaviors: n.behaviors || [],
           memories: n.memories || [],
+          lastUpdatedAt: n.lastUpdatedAt || new Date().toISOString(),
         })),
         rawText,
       };

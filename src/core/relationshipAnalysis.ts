@@ -11,6 +11,7 @@ import { callGenerateRaw } from '../utils/apiCaller';
 import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { RelationshipSchema } from '../utils/schemas';
 import type { CharacterMemory, GrandSummary, RelationshipProfile } from '../stores/mainStore';
+ import type { DynamicProfileV2 } from './dynamicProfileV2';
 import { logInfo, logWarn } from '../utils/logger';
 import { normalizeCharacterName as normalizeCharacterNameKey } from '../utils/characterNames';
 
@@ -132,7 +133,7 @@ function getSharedTimelineEvents(summary: GrandSummary, a: string, b: string): s
 
 export function buildRelationshipCandidates(
   summary: GrandSummary | undefined,
-  dynamicProfiles: DynamicProfile[],
+  dynamicProfiles: DynamicProfileV2[],
   getFusedMemories: (characterName: string) => Array<{ text: string; isCore: boolean }>,
   selectedNames: string[],
   includeAllSelectedPairs = false,
@@ -359,7 +360,7 @@ function buildRelationshipInstruction(userName: string): string {
 
 function buildCharacterMaterial(
   summary: GrandSummary,
-  dynamicProfiles: DynamicProfile[],
+  dynamicProfiles: DynamicProfileV2[],
   worldbookMatches: RelationshipWorldbookMatch[],
   candidates: RelationshipCandidate[],
   getFusedMemories: (characterName: string) => Array<{ text: string; isCore: boolean }>,
@@ -390,7 +391,7 @@ function buildCharacterMaterial(
       }
     }
     if (profile) {
-      parts.push(`[动态人设]\n${profile.dynamicContent}`);
+      parts.push(`[动态人设]\n${profile.dynamicProfile}`);
     }
     if (memory) {
       parts.push(`态度: ${memory.attitude}`);
@@ -467,7 +468,7 @@ function parseRelationshipProfiles(
   const jsonText = extractJson(cleaned);
   if (jsonText) {
     const data = safeJsonParse(jsonText, RelationshipSchema);
-    if (data?.relationships?.length > 0) {
+    if (data && data.relationships && data.relationships.length > 0) {
       return data.relationships.map(rel => ({
         id: rel.id,
         from: rel.characterA,
@@ -654,7 +655,7 @@ export function removeRelationshipInjection(): void {
 
 export async function executeRelationshipAnalysis(params: {
   latestSummary: GrandSummary;
-  dynamicProfiles: DynamicProfile[];
+  dynamicProfiles: DynamicProfileV2[];
   candidates: RelationshipCandidate[];
   getFusedMemories: (characterName: string) => Array<{ text: string; isCore: boolean }>;
   userName: string;

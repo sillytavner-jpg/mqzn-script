@@ -11,7 +11,7 @@
  * - 地点层级(level/parentChain/childrenCount) 从 contains 边反推，不入 store
  */
 
-import type { KnowledgeGraph, GraphLocation, GraphItem, GraphCharacter, GraphEdge } from '../core/knowledgeGraph';
+import type { KnowledgeGraph, GraphEdge } from '../core/knowledgeGraph';
 import { buildStableId } from '../core/knowledgeGraph';
 import { USER_NODE_ID } from '../core/relationshipAnalysis';
 import type { RelationshipProfile } from '../stores/mainStore';
@@ -49,8 +49,6 @@ export interface VEdge {
 }
 
 // ─── 工具 ──────────────────────────────────────────────────
-const slugName = (id: string, fallback = ''): string => fallback || id;
-
 /** 从 contains 边反推每个地点的父 id 映射 */
 function buildParentMap(edges: GraphEdge[]): Map<string, string> {
   const map = new Map<string, string>();
@@ -77,11 +75,6 @@ function locLineage(locId: string, parentMap: Map<string, string>): { level: num
     cur = p;
   }
   return { level: chain.length, chain };
-}
-
-/** 由 id 找到对应的稳定名（在 graph 里查） */
-function nameOfLoc(locId: string, locs: GraphLocation[]): string {
-  return locs.find(l => l.id === locId)?.name || locId;
 }
 
 // ─── 主入口：构建视图数据 ──────────────────────────────────

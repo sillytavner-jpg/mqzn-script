@@ -428,7 +428,7 @@ function serializeDreamtalk(dt: DreamtalkData): string[] {
     p.push('性格调色盘:');
     if (pers.baseColor) p.push(`底色: ${pers.baseColor}`);
     if (pers.mainColor) p.push(`主色调: ${pers.mainColor}`);
-    if (pers.accentColor) p.push(`点缀: ${pers.accentColor}`);
+    if (pers.accent) p.push(`点缀: ${pers.accent}`);
     if (pers.derivations?.length) {
       p.push('衍生:');
       for (const d of pers.derivations) p.push(`- ${d}`);

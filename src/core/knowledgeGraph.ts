@@ -18,7 +18,7 @@ import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { KnowledgeGraphDiffSchema } from '../utils/schemas';
 import { stripReservedAliases } from '../utils/characterNames';
 import { charBigramSimilarity, cosineSimilarity, getBatchEmbeddings, type EmbeddingSettings } from './embedding';
-import { logInfo, logWarn } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 
 /** 地点节点 */
 export interface GraphLocation {
@@ -1325,7 +1325,6 @@ export function buildContextualKgDigestForSmallSummary(options: SmallSummaryKgDi
 
   const centerLocIds = new Set<string>();
   const centerOwnerKeys = new Set<string>();
-  const centerNames = mergeUnique(options.centerCharacterNames || [], options.centerLocationNames || []);
   addNameLookupKeys(centerOwnerKeys, '我', ['玩家', '用户', '主角', '{{user}}', 'user']);
 
   for (const rawName of options.centerCharacterNames || []) {

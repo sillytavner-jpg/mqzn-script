@@ -87,7 +87,6 @@ import {
   renameInRegistry,
   resolveOrPending,
   type CharacterRegistry,
-  type CharacterRecord,
   type PendingResolution,
 } from '../core/characterRegistry';
 
@@ -441,6 +440,7 @@ export interface ScriptSettings {
   settings: {
     personaEnabled: boolean;
     dynamicProfileEnabled: boolean;
+    dynamicProfileInterval: number; // 动态人设触发间隔（每 N 轮对话，默认2；每个AI回复为一轮，开场白第0层单独算一轮）
     captureEnabled: boolean;
     smallSummaryEnabled: boolean;
     memoryActivationEnabled: boolean;
@@ -542,6 +542,14 @@ export interface ScriptSettings {
     rerankCandidateMultiplier: number;
     // API 重试
     apiMaxRetries: number;
+    // 知识图谱（A5.x 顺风车版）
+    kgAutoEnabled: boolean;
+    kgEmbeddingEnabled: boolean;
+    kgEmbeddingDimensions: number; // 0 = 跟随全局 embeddingDimensions
+    kgInjectTopK: number;
+    /** 每个角色（含玩家）当前可用物品的注入上限；0 = 不限制。 */
+    kgPerCharacterItemLimit: number;
+    kgDiagramShowCharacters: boolean;
     // 世界书蒸馏结果（跨聊天复用，跟角色卡走）
     distillRecords: DistillRecord[];
     // ===== A5.x 开关与间隔体系扩展 =====
@@ -557,6 +565,8 @@ export interface ScriptSettings {
     worldProgressInjectionEnabled: boolean;
     plotGuidanceInjectionEnabled: boolean;
     nsfwIsolationEnabled: boolean;
+    // quiet/raw 调用注入守卫：解析变量/后台用途的调用（quiet/command/extension/impersonate 及 generateRaw）不注入智脑内容
+    quietInjectionGuard: boolean;
   };
 }
 
@@ -789,6 +799,13 @@ const ScriptSettingsSchema = z
       .prefault({}),
   })
   .prefault({});
+
+/**
+ * ScriptSettings 的「Zod 推断」版本。
+ * ⚠ 手写 interface ScriptSettings 与 Zod schema 容易漂移（曾漏 8 个字段 → TS2339 一堆）。
+ * 凡是给 `ScriptSettingsSchema.parse(...)` 的产物标注类型的地方，一律用本类型，保证与运行时一致。
+ */
+export type ScriptSettingsInferred = z.infer<typeof ScriptSettingsSchema>;
 
 // ========== Store ==========
 
@@ -1119,7 +1136,6 @@ async function forceSaveCurrentChatMetadata(targetChatId: string): Promise<void>
 
   const metadata = buildCurrentMetadataSnapshot();
   metadata.tainted = true;
-  const metadataBytes = JSON.stringify(metadata).length;
   const header = {
     chat_metadata: metadata,
     user_name: 'unused',
@@ -1344,7 +1360,6 @@ function tryReadData(currentScriptId: string, currentChatId: string): {
   const variableChatRecords = extractChatRecords(primaryChat);
   const metadataChatRecords = extractChatMetadataRecords(currentChatId);
   const chatRecords = { ...variableChatRecords, ...metadataChatRecords };
-  const chatRecordCount = Object.keys(chatRecords).length;
   let currentChatInChatScope = Object.prototype.hasOwnProperty.call(chatRecords, currentChatId);
   const currentChatInStableBackup = Object.prototype.hasOwnProperty.call(stableAllChats, currentChatId);
   const stableCurrentChatData = stableAllChats[currentChatId];
@@ -1455,7 +1470,7 @@ export const useMainStore = defineStore('main', () => {
       : (flatLegacy ? {} : (rawAllChats ?? {})),
   );
 
-  const scriptData = ref<ScriptSettings>(ScriptSettingsSchema.parse(rawSettings ?? {}));
+  const scriptData = ref<ScriptSettingsInferred>(ScriptSettingsSchema.parse(rawSettings ?? {}));
 
   // API 库迁移：旧版 customApiUrl → apiLibrary
   const _rawS = (rawSettings?.settings ?? {}) as any;
@@ -2930,7 +2945,7 @@ export const useMainStore = defineStore('main', () => {
 
   function getActiveWorldProgressMemories(
     characterName: string,
-    floor: number = getWorldProgressMemoryActiveFloor(),
+    _floor: number = getWorldProgressMemoryActiveFloor(),
   ): WorldProgressMemory[] {
     const targetName = normalizeMemoryCharacterName(characterName);
     if (!targetName) return [];
@@ -3066,19 +3081,6 @@ export const useMainStore = defineStore('main', () => {
       profile.imagery ? `意象：${profile.imagery}` : '',
     ].filter(Boolean);
     return parts.join('；');
-  }
-
-  function getDynamicProfileV2Brief(characterName: string): string {
-    const target = normalizeMemoryCharacterName(characterName);
-    if (!target) return '';
-    const profile = (chatData.value.dynamicProfilesV2 || []).find((p: any) =>
-      normalizeMemoryCharacterName(p.characterName) === target,
-    );
-    if (!profile) return '';
-    return [
-      profile.factualState ? `当前事实：${String(profile.factualState).replace(/\s+/g, ' ').trim()}` : '',
-      profile.dynamicProfile ? `动态人设：${String(profile.dynamicProfile).replace(/\s+/g, ' ').trim()}` : '',
-    ].filter(Boolean).join('；').slice(0, 700);
   }
 
   function countTextMentions(text: string, terms: string[]): number {
@@ -5296,28 +5298,24 @@ export const useMainStore = defineStore('main', () => {
         if (matches(it.location)) { location = ''; changed = true; }
         return changed ? { ...it, owner, location } : it;
       });
-      // edges：移除涉及该角色的 belongs_to/关系边（to 或 from 命中）
+      // edges：移除涉及该角色的关系边（from / to 命中）
+      // 注：GraphEdge 只有 from/to 两个 id 字段，没有 fromName/toName（曾误写导致 TS2339，已清理）
       ng.edges = (ng.edges || []).filter(e =>
-        !matches(e.from) && !matches(e.to) && !matches(e.fromName) && !matches(e.toName),
+        !matches(e.from) && !matches(e.to),
       );
       return ng;
     };
     chatData.value.knowledgeGraph = cleanGraph(chatData.value.knowledgeGraph);
     chatData.value.knowledgeGraphVersions = (chatData.value.knowledgeGraphVersions || []).map(v => ({
       ...v,
-      graph: cleanGraph(v.graph || null),
+      graph: cleanGraph(v.graph || null) as KnowledgeGraph,
     }));
     if (chatData.value.knowledgeGraphHistory) {
-      chatData.value.knowledgeGraphHistory = chatData.value.knowledgeGraphHistory.map(v => ({
-        ...v,
-        graph: cleanGraph(v.graph || null),
-      }));
+      // history/undoHistory 存的是 KnowledgeGraph 本体（不是 {graph} 包装），直接清理
+      chatData.value.knowledgeGraphHistory = chatData.value.knowledgeGraphHistory.map(g => cleanGraph(g) as KnowledgeGraph);
     }
     if (chatData.value.knowledgeGraphUndoHistory) {
-      chatData.value.knowledgeGraphUndoHistory = chatData.value.knowledgeGraphUndoHistory.map(v => ({
-        ...v,
-        graph: cleanGraph(v.graph || null),
-      }));
+      chatData.value.knowledgeGraphUndoHistory = chatData.value.knowledgeGraphUndoHistory.map(g => cleanGraph(g) as KnowledgeGraph);
     }
 
     // 11. 物品记忆库：currentOwner/currentLocation 命中则置空（保留物品条目）

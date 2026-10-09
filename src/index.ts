@@ -28,14 +28,13 @@ import { mergeWorldProgressIntoSummary } from './core/memoryMerge';
 import {
   clearFloorSignatureCache,
   diffDeletedFloorIndexes,
-  ensureRecentFloorsVisible as ensureRecentFloorsVisibleCore,
   getCapturedContentMessageIds,
   hideSummaryFloors,
   reapplyHiddenFloors,
   snapshotFloorSignatures,
 } from './core/floorVisibility';
 import { enqueueAnalysis, clearSchedulerQueue } from './core/backgroundQueue';
-import { embedTimelineEvents, embedCharacterMemories, getEmbedding, rerankCandidates, cosineSimilarity } from './core/embedding';
+import { embedTimelineEvents, embedCharacterMemories, getEmbedding, cosineSimilarity } from './core/embedding';
 import { executeSmallSummary, type SmallSummaryKgOptions, type PreviousRoundContext } from './core/smallSummary';
 import { applyKnowledgeGraphDiff, createEmptyKnowledgeGraph, embedKnowledgeGraphNodes, hasMissingEmbedding, buildStableId } from './core/knowledgeGraph';
 import type { KnowledgeGraph } from './core/knowledgeGraph';
@@ -94,6 +93,19 @@ try {
 
 function getSmallSummaryEndFloor(record: any): number {
   return record?.floorRange?.end ?? record?.floorRange?.start ?? -1;
+}
+
+/**
+ * 清除小总结记录引用的 WP 记录的 smallSummaryConsumed 标记。
+ * ⚠ 必须放在模块顶层：调用点 truncateMainResponseArtifactsFromFloor 也是顶层函数，
+ * 若本函数被定义在 `$(() => {...})` 回调内部则无法被访问（曾如此，导致删楼清理抛 ReferenceError）。
+ */
+function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: any): void {
+  if (!ssRecord?.consumedWorldProgressId) return;
+  const wp = (store.chatData.worldProgressRecords || []).find(
+    (r: any) => r.id === ssRecord.consumedWorldProgressId,
+  );
+  if (wp) wp.smallSummaryConsumed = false;
 }
 
 function isCapturedContentCurrent(
@@ -451,12 +463,16 @@ $(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let poller: ReturnType<typeof setInterval> | null = null;
     let done = false;
+    // eventOn 返回 { stop }，没有全局 eventOff —— 必须保存句柄才能注销。
+    // 曾经写成 `eventSource.off(...)`（该变量不存在，被 try/catch 吞掉）→ 监听器从未注销，
+    // 每次重挂载都累积注册 → 重复触发 + 泄漏。
+    const listenerStops: Array<() => void> = [];
     const cleanup = () => {
       if (timer) { clearTimeout(timer); timer = null; }
       if (poller) { clearInterval(poller); poller = null; }
-      try { (eventSource as any)?.off?.('chatLoaded' as any, onChat); } catch { /* noop */ }
-      try { (eventSource as any)?.off?.('chat_id_changed' as any, onChat); } catch { /* noop */ }
-      try { (eventSource as any)?.off?.('app_ready' as any, onChat); } catch { /* noop */ }
+      for (const stop of listenerStops.splice(0)) {
+        try { stop(); } catch { /* noop */ }
+      }
     };
     const tryMount = () => {
       if (done) return;
@@ -474,66 +490,20 @@ $(() => {
     timer = setTimeout(() => {
       if (!done) logWarn('系统', '等待聊天变量切换完成中，暂缓初始化智脑面板');
     }, 5000);
-    try { eventOn('chatLoaded' as any, onChat); } catch { /* noop */ }
-    try { eventOn('chat_id_changed' as any, onChat); } catch { /* noop */ }
-    try { eventOn('app_ready' as any, onChat); } catch { /* noop */ }
+    for (const ev of ['chatLoaded', 'chat_id_changed', 'app_ready'] as const) {
+      try {
+        const handle = eventOn(ev as any, onChat);
+        if (handle?.stop) listenerStops.push(handle.stop);
+      } catch { /* noop */ }
+    }
   };
 
   waitUntilChatReadyThenMount();
 
   // ========== 世界书角色名缓存 ==========
 
-  /** 从世界书条目中提取的角色名集合（每次推演时实时更新） */
-  let worldBookNames = new Set<string>();
-  /** 世界书角色名→内容（用于手动注入到 callGenerateRaw 调用中） */
-  let worldBookContents = new Map<string, string>();
   /** 原始世界书条目（保留用于后续重新扫描） */
   let worldBookRawEntries: any[] = [];
-
-  function refreshWorldBookCache(store: ReturnType<typeof useMainStore>) {
-    if (worldBookRawEntries.length === 0) return;
-    const characterEntries = store.getCharacterNameEntries();
-    const knownNames = [
-      ...characterEntries.map(entry => entry.name),
-      ...(store.worldProgressManualChars || '').split(',').map(s => s.trim()).filter(Boolean),
-    ];
-    const knownNamesSet = new Set(knownNames);
-    if (knownNamesSet.size === 0) return;
-
-    const names = new Set<string>();
-    const contents = new Map<string, string>();
-
-    for (const entry of worldBookRawEntries) {
-      const entryContent: string = (entry as any).content || '';
-      // entry.key / entry.keysecondary 可能是 string 或 string[]
-      const rawKey = (entry as any).key;
-      const rawKeySecondary = (entry as any).keysecondary;
-      const keyStr = Array.isArray(rawKey) ? rawKey.join(',') : (rawKey || '');
-      const keySecStr = Array.isArray(rawKeySecondary) ? rawKeySecondary.join(',') : (rawKeySecondary || '');
-      const keys = [
-        ...keyStr.split(',').map((k: string) => k.trim().toLowerCase()),
-        ...keySecStr.split(',').map((k: string) => k.trim().toLowerCase()),
-      ].filter(Boolean);
-      const contentLower = entryContent.toLowerCase();
-
-      for (const name of knownNamesSet) {
-        const nameLower = name.toLowerCase();
-        const nameNorm = nameLower.replace(/\s*\(.+?\)\s*/g, '').trim();
-        if (keys.some(k => k.includes(nameNorm) || nameNorm.includes(k))
-            || contentLower.includes(nameNorm)
-            || contentLower.includes(nameLower)) {
-          names.add(name);
-          const existing = contents.get(name) || '';
-          contents.set(name, existing ? existing + '\n---\n' + entryContent : entryContent);
-        }
-      }
-    }
-
-    if (names.size > 0) {
-      worldBookNames = names;
-      worldBookContents = contents;
-    }
-  }
 
   eventOn(tavern_events.WORLDINFO_ENTRIES_LOADED, (lores) => {
     updateRelationshipWorldbookCacheFromLore(lores);
@@ -582,7 +552,6 @@ $(() => {
       store.worldBookRawCache,
     );
     store.schedulePersist({ settings: false });
-    refreshWorldBookCache(store);
   });
 
   // ========== 正文捕获系统 ==========
@@ -1200,7 +1169,7 @@ $(() => {
     // quiet/command/extension/impersonate 及无 type 的调用一律跳过，
     // 避免污染"解析变量"等仅用主 API 做轻量解析的后台调用。
     // 直接读 payload.type，时序无关、无残留风险（比监听 GENERATION_STARTED 预标记可靠）。
-    if (store.quietInjectionGuard) {
+    if (store.settings.quietInjectionGuard) {
       const completionType = ((completion as any)?.type || '').toString().toLowerCase();
       const REAL_CHAT_TYPES = new Set(['normal', 'continue']);
       if (!REAL_CHAT_TYPES.has(completionType)) {
@@ -1339,7 +1308,6 @@ $(() => {
         if (timeline.length > 0) {
           // 扩展扫描范围：AI回复 + 用户上条输入
           const lastUserInput = latestUserInputText;
-          const scanTextFull = (lastUserInput + '\n' + scanText).toLowerCase();
 
           const currentVersion = store.getLatestSummary()?.version || 0;
           const recentCount = store.settings.eventRecallRecent || 2;
@@ -1359,7 +1327,6 @@ $(() => {
 
           // 2. 远期事件召回
           const versionRange = Math.max(currentVersion - recentThreshold + 2, 1);
-          const useSemantic = store.settings.embeddingEnabled && store.settings.embeddingApiKey;
           const lastUserInputLower = lastUserInput.toLowerCase();
           const scanTextLower = scanText.toLowerCase();
 
@@ -2040,10 +2007,6 @@ $(() => {
     }
   }
 
-  async function ensureRecentFloorsVisible() {
-    return ensureRecentFloorsVisibleCore('affected');
-  }
-
   // ========== 大总结触发（通过调度器入队） ==========
 
   async function checkAndTriggerSummary(store: ReturnType<typeof useMainStore>) {
@@ -2122,7 +2085,7 @@ $(() => {
     let retryOutcome: 'success' | 'failed' = 'failed'; // 默认失败，成功路径显式置 success
     try {
       // 大总结引导弹窗：用户可填写总结方向
-      let userGuidance = '';
+      // 注：当前 guidance 仅用于「取消即中止」判定，尚未接入总结材料（待接线）
       if (store.requestSummaryGuidance) {
         const guidance = await store.requestSummaryGuidance(pendingContents.length);
         if (guidance === null) {
@@ -2131,7 +2094,6 @@ $(() => {
           store.setSummaryInProgress(false);
           return;
         }
-        userGuidance = guidance;
       }
 
       const previousSummary = store.getLatestSummary();
@@ -2305,7 +2267,7 @@ $(() => {
               store.settings.embeddingModel,
               store.settings.embeddingDimensions,
             );
-            store.syncCharacterMemoryBatchEmbeddings(summary.version, summary.characterMemories);
+            // 核心记忆 embedding 已由 embedCharacterMemories 原地写入 summary.characterMemories，落盘即可
             store.forcePersist({ settings: false });
           });
         }
@@ -2457,15 +2419,6 @@ function buildWorldProgressMaterialForSmallSummary(
     lines.push(...items);
   }
   return { material: lines.join('\n'), consumedWPId: latest.id || null, centerCharacterNames, centerLocationNames };
-}
-
-/** 清除小总结记录引用的 WP 记录的 smallSummaryConsumed 标记 */
-function clearWPConsumedFlag(store: ReturnType<typeof useMainStore>, ssRecord: any): void {
-  if (!ssRecord?.consumedWorldProgressId) return;
-  const wp = (store.chatData.worldProgressRecords || []).find(
-    (r: any) => r.id === ssRecord.consumedWorldProgressId,
-  );
-  if (wp) wp.smallSummaryConsumed = false;
 }
 
   async function triggerWorldProgress(store: ReturnType<typeof useMainStore>, currentFloor: number, recentContents: CapturedContent[] = []): Promise<void> {

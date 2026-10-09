@@ -61,7 +61,7 @@ const relationshipById = computed(() => new Map(store.relationshipProfiles.map(p
 const inferredCandidates = computed(() =>
   buildRelationshipCandidates(
     latestSummary.value,
-    store.dynamicProfiles,
+    store.dynamicProfilesV2,
     store.getFusedMemories,
     allCharacters.value,
     false,
@@ -72,7 +72,7 @@ const inferredCandidates = computed(() =>
 const selectedCandidates = computed(() =>
   buildRelationshipCandidates(
     latestSummary.value,
-    store.dynamicProfiles,
+    store.dynamicProfilesV2,
     store.getFusedMemories,
     selectedNames.value,
     includeAllSelectedPairs.value,

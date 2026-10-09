@@ -356,7 +356,7 @@ export async function executeBatchSummary(
                 undefined,
                 store.settings.embeddingManualMatryoshka,
               ).then(() => {
-                store.syncCharacterMemoryBatchEmbeddings(summary.version, memResult.characterMemories);
+                // 时间线向量由 embedTimelineEvents 原地写入 summary.timeline，落盘即可
                 store.forcePersist();
               }).catch(() => {});
             }

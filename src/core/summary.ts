@@ -242,7 +242,7 @@ function extractStoryTimeFromContent(content: string): string {
 function buildInputMaterial(
   capturedContents: CapturedContent[],
   oldCharacterMemories?: CharacterMemory[],
-  pendingTimeline?: TimelineEvent[],
+  _pendingTimeline?: TimelineEvent[],
   blacklistedNames?: string[],
 ): string {
   const parts: string[] = [];
@@ -561,7 +561,7 @@ function parseCharacterMemorySection(section: string): CharacterMemory[] {
  * 解析旧文本格式的总结输出（用于 mainStore 编辑/汇编原始文本）
  * 旧格式：三个 section 用 ---SECTION--- 分隔
  */
-export function parseSummaryOutput(rawText: string, summaryVersion: number): ParsedSummary {
+export function parseSummaryOutput(rawText: string, _summaryVersion: number): ParsedSummary {
   // 防御：AI 有时在格式化数据前输出角色闲聊，
   // 导致 sections[0] 变成闲聊而非剧情摘要 → 记忆解析拿到剧情 → 全空 → 总结失败
   // 但要注意：如果 AI 用了 <content> 标签包裹，内容已是干净的（### 第一部分 开头），

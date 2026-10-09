@@ -18,7 +18,7 @@ import type { CapturedContent, CharacterProfile } from '../stores/mainStore';
 import { callGenerateRaw } from '../utils/apiCaller';
 import { extractJson, safeJsonParse } from '../utils/jsonParse';
 import { CharacterProfileSchema } from '../utils/schemas';
-import { logInfo, logError } from '../utils/logger';
+import { logInfo } from '../utils/logger';
 import { formatThinkingChainForAnalysis } from '../utils/messageParser';
 
 // ======== 破限常量（参考 dynamicProfileV2） ==========

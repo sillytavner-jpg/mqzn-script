@@ -19,7 +19,7 @@
 import { buildBrainAccept, buildBrainHead } from '../utils/jailbreakIdentity';
 import { callGenerateRaw } from '../utils/apiCaller';
 import { replaceUserReferences } from '../utils/textCleanup';
-import type { GrandSummary, DynamicProfile } from '../stores/mainStore';
+import type { GrandSummary } from '../stores/mainStore';
 import { logInfo, logWarn, logError } from '../utils/logger';
 
 // ========== 数据结构 ==========
@@ -85,9 +85,6 @@ export function buildMultiSummaryInjection(
     ? summaryDeltas.length
     : count;
   const selected = summaryDeltas.slice(-actualCount);
-
-  // 按版本分组时间线事件
-  const versionGroups: Array<{ version: number; generatedAt: string; events: Array<{ time: string; text: string }> }> = [];
 
   // 从最新的 assembled 获取完整时间线（带 summaryVersion 标签）
   // 如果没有 summaryVersion，则把所有事件归到最后一个版本

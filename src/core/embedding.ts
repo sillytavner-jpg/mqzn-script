@@ -226,6 +226,8 @@ export async function embedTimelineEvents(
 export async function embedCharacterMemories(
   characterMemories: Array<{
     characterName: string;
+    aliases?: string[];
+    keywords?: string[];
     coreMemories: Array<{ text: string; embedding?: number[] }>;
   }>,
   apiUrl: string,
@@ -275,8 +277,7 @@ export async function embedCharacterMemories(
     const texts = toEmbed.map(t => t.embedText);
     logInfo('Embedding', `开始生成 ${texts.length} 条核心记忆向量`);
     const t0 = Date.now();
-    const vectors = await getBatchEmbeddings(texts, settings, (done, total) => {
-    });
+    const vectors = await getBatchEmbeddings(texts, settings);
     for (let j = 0; j < toEmbed.length; j++) {
       const item = toEmbed[j];
       const cores = characterMemories[item.charIdx].coreMemories;

@@ -244,7 +244,7 @@ function parseDynamicProfileV2Output(rawText: string): DynamicProfileV2[] {
     }
 
     if (jsonData?.profiles?.length > 0) {
-      const profiles: DynamicProfileV2[] = jsonData.profiles.map(p => ({
+      const profiles: DynamicProfileV2[] = jsonData.profiles.map((p: any) => ({
         characterName: p.characterName,
         factualState: p.updates?.factualState ? `<factual_state>\n${p.updates.factualState}\n</factual_state>` : '',
         dynamicProfile: p.updates?.dynamicProfile ? `<dynamic_profile>\n${p.updates.dynamicProfile}\n</dynamic_profile>` : '',

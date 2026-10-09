@@ -327,7 +327,7 @@ function parseGrandSummaryOutput(rawText: string): GrandSummaryV2Event[] {
  * 执行大总结V2 步骤1：白描事实时间线
  */
 export async function executeGrandSummaryV2(
-  smallSummaries: SmallSummaryRecord[],
+  _smallSummaries: SmallSummaryRecord[],
   capturedContents: CapturedContent[],
   previousSummaryText: string | undefined,
   userName: string = '{{user}}',

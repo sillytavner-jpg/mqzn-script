@@ -11,6 +11,9 @@
 
 import { logInfo, logWarn, logError } from '../utils/logger';
 
+// 酒馆脚本运行在 CommonJS 沙箱里，`require` 可用但无 Node 类型声明（项目其它模块同样声明）
+declare const require: (id: string) => any;
+
 // ========== 类型定义 ==========
 
 export type BackgroundTaskType =
@@ -60,6 +63,7 @@ const PRIORITY: Record<BackgroundTaskType, number> = {
   embedding_mem: 11,
   embedding_item: 10,
   embedding_timeline: 10,
+  world_book_distill: 7,
 };
 
 const TASK_LABELS: Record<BackgroundTaskType, string> = {
@@ -75,6 +79,7 @@ const TASK_LABELS: Record<BackgroundTaskType, string> = {
   embedding_mem: '记忆向量生成',
   embedding_item: '物品向量生成',
   embedding_timeline: '时间线向量生成',
+  world_book_distill: '世界书蒸馏',
 };
 
 // ========== 内部状态 ==========

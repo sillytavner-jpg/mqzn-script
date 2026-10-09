@@ -40,40 +40,6 @@ const PERIOD_MAP: Record<string, string> = {
   '深夜': '00:00',
 };
 
-/** 中文数字 → 阿拉伯数字（简易版，支持零-九、十百千万组合） */
-function chineseToNumber(str: string): number | null {
-  const digits: Record<string, number> = {
-    '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
-    '五': 5, '六': 6, '七': 7, '八': 8, '九': 9,
-  };
-  const units: Record<string, number> = { '十': 10, '百': 100, '千': 1000, '万': 10000 };
-
-  // 先尝试直接当阿拉伯数字解析
-  const direct = Number(str.replace(/[,，]/g, ''));
-  if (!Number.isNaN(direct) && str.trim().length > 0 && /\d/.test(str)) return direct;
-
-  let total = 0;
-  let section = 0;
-  let lastUnit = 1;
-  for (const ch of str) {
-    if (ch in digits) {
-      section = section * 10 + digits[ch];
-      lastUnit = 1;
-    } else if (ch in units) {
-      const u = units[ch];
-      if (u >= 10 && section === 0) section = 1; // "十" 开头视为 10
-      section *= u;
-      if (u >= 10000) {
-        total += section;
-        section = 0;
-      }
-      lastUnit = u;
-    }
-  }
-  total += section;
-  return total || null;
-}
-
 function expandTimeSuffix(time: string): string {
   let result = time;
 

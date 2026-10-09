@@ -32,15 +32,6 @@ import { formatThinkingChainForAnalysis } from '../utils/messageParser';
 //       location 字段必须引用本轮 add.locations 或已有条目里的地名。
 //       旧输出（带 summary）仍能 parse 兼容。
 
-const SmallSummarySchema = z.object({
-  // summary 改 optional（兼容旧 AI 输出；新版可以不输出 summary）
-  summary: z.object({
-    location: z.string().optional().default(''),
-    presentCharacters: z.array(z.string()).optional().default([]),
-  }).optional(),
-  graphDiff: KnowledgeGraphDiffSchema,
-}).optional().default({ graphDiff: { add: { locations: [], items: [], edges: [], characters: [] }, update: [], delete: [] } });
-
 // 兼容旧扁平 schema（兜底用，仅取 location/presentCharacters）
 const FlatSummarySchema = z.object({
   location: z.string().optional().default(''),
