@@ -801,6 +801,15 @@ async function triggerFloorSummary() {
     <!-- 移动端：调度队列（桌面端在侧栏底部） -->
     <SchedulerPanel v-if="isMobile" />
 
+    <!-- 生成进度（流式请求时实时更新；没有进行中的请求就不显示） -->
+    <div v-if="store.apiProgress" class="zhino-gen-progress">
+      <span class="zhino-gen-dot"></span>
+      <span class="zhino-gen-name">{{ store.apiProgress.analysisName }} 生成中…</span>
+      <span class="zhino-gen-meta">
+        {{ store.apiProgress.chars }} 字 · {{ (store.apiProgress.elapsedMs / 1000).toFixed(1) }}s
+      </span>
+    </div>
+
     <!-- 状态仪表盘 -->
     <div class="zhino-stats-grid zn-stagger">
       <div class="zhino-stat-card">
@@ -1046,6 +1055,49 @@ async function triggerFloorSummary() {
 </template>
 
 <style scoped>
+/* ── 生成进度条（流式实时进度） ── */
+.zhino-gen-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--zn-bg-surface1);
+  border-left: 3px solid var(--zn-primary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.zhino-gen-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--zn-primary);
+  animation: zhino-gen-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes zhino-gen-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.75); }
+}
+
+.zhino-gen-name {
+  color: var(--zn-text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zhino-gen-meta {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--zn-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .zhino-overview {
   flex: 1;
   min-height: 0;

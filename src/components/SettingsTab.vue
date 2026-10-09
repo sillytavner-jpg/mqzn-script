@@ -944,6 +944,22 @@ function executeSelectiveDelete() {
               <option value="serial">排队模式（1个1个）</option>
             </select>
           </div>
+
+          <!-- 请求方式：流式 / 非流式 -->
+          <div class="zhino-inline-setting" style="margin-top:6px">
+            <span class="zhino-setting-desc">请求方式：</span>
+            <select
+              class="zhino-input zhino-model-select"
+              :value="(store.settings as any).streamingEnabled === false ? 'off' : 'on'"
+              @change="store.updateSettings({ streamingEnabled: ($event.target as HTMLSelectElement).value === 'on' } as any)"
+            >
+              <option value="on">流式（推荐 · 抗超时 + 有进度）</option>
+              <option value="off">非流式（渠道不支持流式时选）</option>
+            </select>
+          </div>
+          <div class="zhino-setting-hint" style="margin-top:4px">
+            流式让连接持续有数据，不会被代理 / 网关的静默超时掐断；若渠道返回流式失败，会自动退回非流式。
+          </div>
         </div>
 
         <!-- API 重试 -->

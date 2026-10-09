@@ -511,6 +511,12 @@ export interface ScriptSettings {
       time: string[];
     };
     schedulerMode: 'concurrent' | 'serial';
+    /**
+     * 是否用流式（SSE）发请求。默认开。
+     * 流式让连接持续有数据 → 不会被网关 / 代理 / 中转站的"静默超时"掐断，
+     * 同时能实时拿到生成进度。遇到不兼容的渠道可在设置里关掉，退回非流式。
+     */
+    streamingEnabled: boolean;
     // API 监听器（调试用，始终开启）
     apiMonitorEnabled: boolean;
     // 关系档案注入（手动分析后自动注入，默认开启）
@@ -733,6 +739,8 @@ const ScriptSettingsSchema = z
           })
           .prefault({ thinking: [], content: [], time: [] }),
         schedulerMode: z.string().prefault('concurrent'), // 'concurrent' | 'serial'
+        // 流式请求（默认开）；不兼容的渠道可在设置里关掉回退非流式
+        streamingEnabled: z.boolean().prefault(true),
         apiMonitorEnabled: z.boolean().prefault(true),
         relationshipInjectionEnabled: z.boolean().prefault(true),
         // 语义向量召回
@@ -1607,6 +1615,17 @@ export const useMainStore = defineStore('main', () => {
   // ========== 运行状态（不持久化，脚本重载后重置） ==========
 
   const summaryInProgress = ref(false);
+
+  /**
+   * 当前 API 生成进度（流式请求时实时更新；null = 没有进行中的请求）。
+   * 用在总览的状态仪表盘上显示「谁在生成 / 已写多少字 / 跑了多久」——
+   * 非流式时代用户只能干等，分不清是卡住了还是在跑。
+   */
+  const apiProgress = ref<{ analysisName: string; chars: number; elapsedMs: number } | null>(null);
+
+  function setApiProgress(v: { analysisName: string; chars: number; elapsedMs: number } | null): void {
+    apiProgress.value = v;
+  }
   const dreamtalkInProgress = ref(false);
   const characterMemoryInProgress = ref(false);
   const chatContentRevision = ref(0);
@@ -7013,6 +7032,8 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     clampFloorCursorsToLastFloor,
     // 运行状态
     summaryInProgress,
+    apiProgress,
+    setApiProgress,
     dreamtalkInProgress,
     characterMemoryInProgress,
     _isRealChatMessage, // MESSAGE_SENT 触发为 true，仅正常聊天注入梦呓

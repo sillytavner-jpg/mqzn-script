@@ -6,7 +6,7 @@
  */
 
 import { useMainStore, type ApiConfig } from '../stores/mainStore';
-import { logError } from '../utils/logger';
+import { logError, logInfo, logWarn } from '../utils/logger';
 import { isFlashMode, buildFlashTail } from './jailbreakIdentity';
 
 // 模块级 API 失败追踪（供 enqueueSourceChangeReconcile 等模块查询系统稳定性）
@@ -189,6 +189,120 @@ function fillUserToken(prompts: Array<OrderedPrompt | 'user_input'>, userName: s
 }
 
 /** callGenerateRaw 的单次执行体 */
+// ========== 流式（SSE）支持 ==========
+//
+// 为什么改用流式：非流式请求发出后要干等到全部生成完（大总结实测 31 秒），
+// 中间浏览器收不到任何一个字节 —— 代理软件 / 网关 / 中转站的"静默超时"
+// 经常会在这段真空期把连接掐掉，表现为 `Failed to fetch`。
+// 流式让连接持续有数据流动，各层都会视其为活跃连接，同时也能拿到实时进度。
+
+export interface StreamProgress {
+  /** 已累积的正文字符数 */
+  chars: number;
+  /** 从开始接收至今的毫秒数 */
+  elapsedMs: number;
+}
+
+/**
+ * 解析 OpenAI 兼容的 SSE 流，累积正文与思维链。
+ *
+ * 兼容性说明（都是实际踩过的坑）：
+ * - 正文在 `choices[0].delta.content`，但个别渠道用 `message.content` 一次性给全 → 两者都认
+ * - 思维链字段各家不同：`reasoning_content` / `reasoning` / `thinking` → 都收集
+ * - 结束标记是 `data: [DONE]`；也有渠道直接断流 → 断流即视为结束
+ * - 流中可能夹 `data: {"error": ...}` → 抛出交给上层按错误处理
+ * - TCP 分块会把一行切成两半 → 用 buffer 累积到换行再解析
+ * - 看门狗：首字节 60 秒、后续每两个分块之间 120 秒 —— 超时就主动断开，
+ *   否则连接建立了但不再吐数据时会永久挂住
+ */
+async function readSSEStream(
+  response: Response,
+  onProgress?: (p: StreamProgress) => void,
+): Promise<{ content: string; thinking: string; finishReason: string; usage: any }> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('响应没有可读流（该渠道可能不支持流式）');
+
+  const FIRST_BYTE_TIMEOUT_MS = 60_000;
+  const IDLE_TIMEOUT_MS = 120_000;
+
+  const decoder = new TextDecoder('utf-8');
+  const startedAt = Date.now();
+  let buffer = '';
+  let content = '';
+  let thinking = '';
+  let finishReason = '';
+  let usage: any = null;
+  let streamError: any = null;
+  let gotAnyChunk = false;
+  let lastNotify = 0;
+
+  while (true) {
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      const timeoutMs = gotAnyChunk ? IDLE_TIMEOUT_MS : FIRST_BYTE_TIMEOUT_MS;
+      chunk = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => setTimeout(
+          () => reject(new Error(`流式超时：${Math.round(timeoutMs / 1000)} 秒内没有收到数据`)),
+          timeoutMs,
+        )),
+      ]);
+    } catch (err) {
+      try { await reader.cancel(); } catch { /* ignore */ }
+      throw err;
+    }
+
+    if (chunk.done) break;
+    gotAnyChunk = true;
+    buffer += decoder.decode(chunk.value, { stream: true });
+
+    let nlIdx = buffer.indexOf('\n');
+    while (nlIdx >= 0) {
+      const line = buffer.slice(0, nlIdx).replace(/\r$/, '');
+      buffer = buffer.slice(nlIdx + 1);
+      nlIdx = buffer.indexOf('\n');
+
+      if (!line || line.startsWith(':')) continue;          // 空行 / 注释心跳
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+
+      let json: any;
+      try { json = JSON.parse(payload); } catch { continue; }
+
+      if (json?.error) { streamError = json.error; break; }
+      if (json?.usage) usage = json.usage;
+
+      const choice = json?.choices?.[0];
+      if (!choice) continue;
+      if (choice.finish_reason) finishReason = String(choice.finish_reason);
+
+      const delta = choice.delta || choice.message || {};
+      if (typeof delta.content === 'string' && delta.content) content += delta.content;
+      const rc = delta.reasoning_content ?? delta.reasoning ?? delta.thinking;
+      if (typeof rc === 'string' && rc) thinking += rc;
+    }
+    if (streamError) break;
+
+    // 进度回调节流（~150ms）：高频触发响应式更新会把界面拖卡
+    const now = Date.now();
+    if (onProgress && now - lastNotify > 150) {
+      lastNotify = now;
+      onProgress({ chars: content.length, elapsedMs: now - startedAt });
+    }
+  }
+
+  if (streamError) {
+    const msg = typeof streamError === 'string'
+      ? streamError
+      : (streamError.message || JSON.stringify(streamError));
+    throw new Error(`流式返回错误：${msg}`);
+  }
+  if (onProgress) onProgress({ chars: content.length, elapsedMs: Date.now() - startedAt });
+
+  return { content, thinking, finishReason, usage };
+}
+
 async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
   const store = useMainStore();
 
@@ -231,62 +345,120 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
     throw err;
   }
 
-  let response: Response;
-  try {
-    response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiConfig.key}`,
-      },
-      body: JSON.stringify({
-        model: modelName,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-        ...(params._responseFormat ? { response_format: { type: params._responseFormat } } : {}),
-      }),
-      signal: params._abortSignal,
-    });
-  } catch (err: any) {
-    if (err?.name === 'AbortError') throw err;
-    recordApiFailure();
-    logError('API调用', 'fetch失败（CORS或网络问题）', String(err.message || err));
-    // ⚠️ 这条文案会显示在右上角的重试浮层里 —— 必须**自带请求地址**，
-    //    否则用户只知道"失败了"，不知道是哪个 API 挂了，也没法自己排查。
-    const netErr = new Error(
-      `网络请求失败：${err.message || err}\n`
-      + `请求地址：${apiUrl}\n`
-      + '可能原因：① 地址不通（服务未启动 / 端口写错）② 服务端未开启 CORS '
-      + '③ HTTPS 页面调用 HTTP 接口被浏览器拦截（本地 API 常见）④ 网络中断，或被中转站掐断连接。\n'
-      + '注意：这是浏览器层的连接失败，不是 API 返回的错误码；完整请求记录见「总览 → API 监听」。',
-    );
-    recordFailAndThrow('', `网络请求失败: ${err.message || err}`, netErr);
+  // ── ① 优先走流式 ──
+  //    理由见 readSSEStream 上方注释（非流式的长静默期会被代理/网关掐断）。
+  //    任何失败（渠道不支持 / 解析异常 / 看门狗超时）都**自动降级**到下面的非流式，
+  //    保证老渠道也能正常用。
+  let data: any = null;
+  const streamingOn = (store.settings as any)?.streamingEnabled !== false;
+
+  if (streamingOn) {
+    try {
+      const sResp = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiConfig.key}`,
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+          stream: true,
+          ...(params._responseFormat ? { response_format: { type: params._responseFormat } } : {}),
+        }),
+        signal: params._abortSignal,
+      });
+      if (!sResp.ok) throw new Error(`HTTP ${sResp.status} ${sResp.statusText}`);
+
+      const streamed = await readSSEStream(sResp, (p) => {
+        store.setApiProgress({ analysisName, chars: p.chars, elapsedMs: p.elapsedMs });
+      });
+
+      // 拼成与非流式**等价**的 data → 后面的「空内容判定 + finish_reason 分类」原样复用
+      data = {
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: streamed.content },
+          finish_reason: streamed.finishReason || 'stop',
+        }],
+        usage: streamed.usage || { completion_tokens: 0 },
+        _streamed: true,
+      };
+      logInfo(
+        'API调用',
+        `流式完成：正文 ${streamed.content.length} 字（${analysisName}）`,
+        `finish=${streamed.finishReason || '?'}`,
+      );
+    } catch (err: any) {
+      if (err?.name === 'AbortError') throw err;
+      logWarn('API调用', '流式失败，降级为非流式重试', String(err?.message || err));
+      data = null;
+    } finally {
+      store.setApiProgress(null);
+    }
   }
 
-  if (!response.ok) {
-    recordApiFailure();
-    const errorText = await response.text().catch(() => '(无法读取响应)');
-    logError('API调用', `返回错误: ${response.status} ${response.statusText}`);
-
-    if (response.status === 404) {
-      const err404 = new Error(
-        `API 404 Not Found\n` +
-        `请求地址: ${apiUrl}\n` +
-        `提示: 请确认URL是否包含完整路径（通常以 /v1/chat/completions 结尾）`
+  // ── ② 非流式（原有路径；流式关闭或失败时走这里）──
+  if (!data) {
+    let response: Response;
+    try {
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiConfig.key}`,
+        },
+        body: JSON.stringify({
+          model: modelName,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+          ...(params._responseFormat ? { response_format: { type: params._responseFormat } } : {}),
+        }),
+        signal: params._abortSignal,
+      });
+    } catch (err: any) {
+      if (err?.name === 'AbortError') throw err;
+      recordApiFailure();
+      logError('API调用', 'fetch失败（CORS或网络问题）', String(err.message || err));
+      // ⚠️ 这条文案会显示在右上角的重试浮层里 —— 必须**自带请求地址**，
+      //    否则用户只知道"失败了"，不知道是哪个 API 挂了，也没法自己排查。
+      const netErr = new Error(
+        `网络请求失败：${err.message || err}\n`
+        + `请求地址：${apiUrl}\n`
+        + '可能原因：① 地址不通（服务未启动 / 端口写错）② 服务端未开启 CORS '
+        + '③ HTTPS 页面调用 HTTP 接口被浏览器拦截（本地 API 常见）④ 网络中断，或被中转站掐断连接。\n'
+        + '注意：这是浏览器层的连接失败，不是 API 返回的错误码；完整请求记录见「总览 → API 监听」。',
       );
-      recordFailAndThrow(errorText, `API 404 Not Found: ${apiUrl}`, err404);
+      recordFailAndThrow('', `网络请求失败: ${err.message || err}`, netErr);
     }
 
-    const httpErr = new Error(`API请求失败 (${response.status}): ${errorText}`);
-    recordFailAndThrow(errorText, `API ${response.status} ${response.statusText}`, httpErr);
-  }
+    if (!response.ok) {
+      recordApiFailure();
+      const errorText = await response.text().catch(() => '(无法读取响应)');
+      logError('API调用', `返回错误: ${response.status} ${response.statusText}`);
 
-  const data = await response.json().catch(() => null);
-  if (!data) {
-    recordApiFailure();
-    const emptyErr = new Error('API返回了空响应或非JSON格式');
-    recordFailAndThrow('', 'API返回了空响应或非JSON格式', emptyErr);
+      if (response.status === 404) {
+        const err404 = new Error(
+          `API 404 Not Found\n` +
+          `请求地址: ${apiUrl}\n` +
+          `提示: 请确认URL是否包含完整路径（通常以 /v1/chat/completions 结尾）`
+        );
+        recordFailAndThrow(errorText, `API 404 Not Found: ${apiUrl}`, err404);
+      }
+
+      const httpErr = new Error(`API请求失败 (${response.status}): ${errorText}`);
+      recordFailAndThrow(errorText, `API ${response.status} ${response.statusText}`, httpErr);
+    }
+
+    data = await response.json().catch(() => null);
+    if (!data) {
+      recordApiFailure();
+      const emptyErr = new Error('API返回了空响应或非JSON格式');
+      recordFailAndThrow('', 'API返回了空响应或非JSON格式', emptyErr);
+    }
   }
 
   const rawContent = data?.choices?.[0]?.message?.content;
