@@ -2137,88 +2137,34 @@ $(() => {
       const previousSummary = store.getLatestSummary();
 
       // === V2 大总结：大总结(时间线) + 角色记忆更新 并发执行 ===
-      // ★ 失败时自动重试（带重试弹窗+停止按钮），重试同一批楼层；耗尽或被停止则向上抛出，
-      //   由外层 catch 落失败占位（isFailed，不推进游标、不喂下一轮AI）。
+      // ★ A5.3.11：不再自建重试循环 —— 重试统一交给后台队列
+      //   （backgroundQueue.runTaskWithRetry，上限 apiMaxRetries）。
+      //   本函数只跑一次；失败即抛出，由队列决定是否重试。
+      //   失败最终落到外层 catch：落失败占位（isFailed，不推进游标、不喂下一轮 AI）。
       const existingMemories = previousSummary?.characterMemories || [];
-      const maxAttempts = (store.settings as any).apiMaxRetries ?? 3;
-      let v2Result: any = null;
-      let memResult: any = null;
-      let lastGenError: any = null;
-      let generateDone = false;
       const characterMemoryEnabled = store.settings.characterMemoryEnabled;
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        if (store.isSummaryRetryAborted()) {
-          // 用户在上一轮弹窗中点了"停止重试"，直接放弃
-          store.clearSummaryRetry();
-          throw lastGenError || new Error('用户已停止大总结重试');
-        }
-        try {
-          // 统一走 core/summaryChain：并发执行 + 耗时日志 + signal 透传。
-          // ★ 续跑语义：已成功的那条不再重跑（失败时只补缺口）。
-          const chainResult = await runSummaryChain(
-            pendingContents,
-            store.chatData.smallSummaries || [],
-            previousSummary?.rawText,
-            existingMemories,
-            store.getUserName(),
-            {
-              event: true,
-              memory: characterMemoryEnabled,
-              memoryMin: store.settings.memoryMinPerChar,
-              memoryMax: store.settings.memoryMaxPerChar,
-              extraGenerateParams: { _responseFormat: 'json_object' },
-              blacklistedNames: store.getBlacklistedCharacters(),
-              logScope: '大总结链',
-            },
-            { v2Result, memResult },
-          );
-          v2Result = chainResult.v2Result;
-          memResult = chainResult.memResult;
 
-          generateDone = !!v2Result && (!characterMemoryEnabled || !!memResult);
-          store.clearSummaryRetry();
-          if (generateDone) break;
-        } catch (err: any) {
-          lastGenError = err;
-          // ★ summaryChain 失败时会把已成功的部分挂在 err.partial 上，
-          //   下一轮只重试失败的那条（不用整条链重跑）。
-          if (err?.partial) {
-            if (err.partial.v2Result) v2Result = err.partial.v2Result;
-            if (err.partial.memResult) memResult = err.partial.memResult;
-          }
-          if (err?.name === 'AbortError') {
-            store.clearSummaryRetry();
-            throw err;
-          }
-          if (attempt >= maxAttempts || store.isSummaryRetryAborted()) {
-            // 已达上限或用户已点停止 → 放弃，交给外层 catch 落失败占位
-            store.clearSummaryRetry();
-            throw err;
-          }
-          // 失败：显示重试弹窗（带倒计时），给用户"停止重试"窗口。倒计时后自动继续。
-          const countdownSec = 5;
-          const errMsg = err?.message || String(err);
-          store.startSummaryRetry({
-            floors: pendingContents.length,
-            attempt,
-            maxAttempts,
-            error: errMsg,
-            countdownSec,
-          });
-          logWarn('大总结', `大总结生成失败(${errMsg})，${countdownSec}s 后重试 (${attempt}/${maxAttempts})...`);
-          for (let sec = countdownSec; sec > 0; sec--) {
-            if (store.isSummaryRetryAborted()) break;
-            store.updateSummaryRetryCountdown(sec);
-            await new Promise(r => setTimeout(r, 1000));
-          }
-          store.clearSummaryRetry();
-          // 循环回到顶部，attempt++，若用户中途点了 stop，下轮顶部即检测并放弃
-        }
-      }
-      if (!generateDone) {
-        // 理论上不会到这里（上面已 throw），兜底
-        store.clearSummaryRetry();
-        throw lastGenError || new Error('大总结生成失败');
+      const chainResult = await runSummaryChain(
+        pendingContents,
+        store.chatData.smallSummaries || [],
+        previousSummary?.rawText,
+        existingMemories,
+        store.getUserName(),
+        {
+          event: true,
+          memory: characterMemoryEnabled,
+          memoryMin: store.settings.memoryMinPerChar,
+          memoryMax: store.settings.memoryMaxPerChar,
+          extraGenerateParams: { _responseFormat: 'json_object' },
+          blacklistedNames: store.getBlacklistedCharacters(),
+          logScope: '大总结链',
+        },
+      );
+      const v2Result = chainResult.v2Result;
+      const memResult = chainResult.memResult;
+
+      if (!v2Result || (characterMemoryEnabled && !memResult)) {
+        throw new Error('大总结生成不完整（缺少时间线或角色记忆）');
       }
 
       // === 组装 GrandSummary（统一存储格式） ===

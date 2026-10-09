@@ -38,7 +38,10 @@ interface GenerateRawParams {
   _analysisType?: string;
   /** 中止信号：外部可通过 AbortController 取消正在进行的请求 */
   _abortSignal?: AbortSignal;
-  /** 最大重试次数，默认3。设为0跳过自动重试（如批量总结已有外层重试） */
+  /**
+   * @deprecated A5.3.11 起 `callGenerateRaw` 不再自带重试，本参数已无效。
+   * 重试统一由后台队列负责。保留字段仅为兼容旧调用签名，新代码请勿使用。
+   */
   _maxRetries?: number;
   /** 响应格式：json_object 要求API以JSON格式返回（用于大总结/角色记忆等结构化解析） */
   _responseFormat?: 'json_object' | 'text';
@@ -71,64 +74,15 @@ function getApiConfigForType(analysisType?: string): ApiConfig | null {
 /**
  * 调用 LLM 生成（通过 API 库路由）
  * 返回原始响应字符串，与 generateRaw() 返回格式一致
- * 默认自动重试3次（可通过 _maxRetries 覆盖，设为0跳过重试）
+ *
+ * ⚠️ **本函数只发一次请求，不做任何重试** ——
+ * 重试统一由外层负责（后台队列 `backgroundQueue` 的 runTask，或调用方自己的循环）。
+ * 这样保证任何调用链上「重试」只发生在一个地方，不会出现 3×3 = 9 次的叠加放大。
+ *
+ * `_maxRetries` / `apiMaxRetries` 已不再在此生效，保留参数仅为兼容旧调用签名。
  */
 export async function callGenerateRaw(params: GenerateRawParams): Promise<string> {
-  const store = useMainStore();
-  const settingsMaxRetries = (store.settings as any).apiMaxRetries;
-  const maxRetries = params._maxRetries ?? (typeof settingsMaxRetries === 'number' ? settingsMaxRetries : 3);
-  let lastError: any;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    // 循环顶部检查用户是否点了"取消重试"
-    if (store.isApiRetryAborted()) {
-      store.clearApiRetry();
-      throw new Error('用户已取消重试');
-    }
-    if (attempt > 0) {
-      const delay = 0;
-      const delaySec = delay / 1000;
-      const errMsg = lastError?.message || String(lastError || '');
-      store.showApiRetry({
-        analysisName: params._monitorLabel || '后台分析',
-        attempt,
-        maxRetries,
-        error: errMsg,
-        delaySec,
-      });
-      await new Promise(r => setTimeout(r, delay));
-    }
-
-    try {
-      const result = await doCallGenerateRaw(params);
-      if (attempt > 0) store.clearApiRetry();
-      return result;
-    } catch (err: any) {
-      lastError = err;
-      if (err?.name === 'AbortError') {
-        store.clearApiRetry();
-        throw err;
-      }
-      // 用户主动取消，不继续重试，直接外抛由调用方按失败处理
-      if (err?.message === '用户已取消重试') {
-        store.clearApiRetry();
-        throw err;
-      }
-      // 标记为「重试也没用」的错误（如内容被过滤拦截 / 输出被截断）——
-      // 同样的请求再发一次结果不会变，只会白等三轮
-      if ((err as any)?._noRetry) {
-        store.clearApiRetry();
-        logError('API调用', '该错误重试无意义，直接放弃', err?.message || String(err || ''));
-        throw err;
-      }
-      if (attempt >= maxRetries) {
-        store.clearApiRetry();
-        logError('API调用', `重试${maxRetries}次后放弃`, err?.message || String(err || ''));
-        throw err;
-      }
-    }
-  }
-  throw lastError;
+  return doCallGenerateRaw(params);
 }
 
 /**

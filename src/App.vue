@@ -84,32 +84,18 @@
       @cancel="store.cancelSummaryGuidance"
     />
 
-    <!-- API 重试弹窗 -->
+    <!-- 后台任务统一重试弹窗（带"停止重试"按钮）—— A5.3.11 起所有后台任务共用 -->
     <Transition name="zhino-retry">
-      <div v-if="store.apiRetryStatus" class="zhino-retry-toast">
-        <div class="zhino-retry-toast-icon">⚠</div>
-        <div class="zhino-retry-toast-body">
-          <div class="zhino-retry-toast-title">{{ store.apiRetryStatus.analysisName }} 重试中 ({{ store.apiRetryStatus.attempt }}/{{ store.apiRetryStatus.maxRetries }})</div>
-          <div class="zhino-retry-toast-error">{{ store.apiRetryStatus.error }}</div>
-          <div class="zhino-retry-toast-actions">
-            <button class="zhino-retry-stop-btn" @click="store.stopApiRetry">取消重试</button>
-          </div>
-        </div>
-      </div>
-    </Transition>
-
-    <!-- 大总结重试弹窗（带"停止重试"按钮） -->
-    <Transition name="zhino-retry">
-      <div v-if="store.summaryRetryStatus" class="zhino-retry-toast">
+      <div v-if="store.queueRetryStatus" class="zhino-retry-toast">
         <div class="zhino-retry-toast-icon">⚠</div>
         <div class="zhino-retry-toast-body">
           <div class="zhino-retry-toast-title">
-            大总结生成失败，{{ store.summaryRetryStatus.countdownSec }}s 后自动重试
-            ({{ store.summaryRetryStatus.attempt }}/{{ store.summaryRetryStatus.maxAttempts }})
+            {{ store.queueRetryStatus.label }}失败，{{ store.queueRetryStatus.countdownSec }}s 后自动重试
+            ({{ store.queueRetryStatus.attempt }}/{{ store.queueRetryStatus.maxAttempts }})
           </div>
-          <div class="zhino-retry-toast-error">{{ store.summaryRetryStatus.error }}</div>
+          <div class="zhino-retry-toast-error">{{ store.queueRetryStatus.error }}</div>
           <div class="zhino-retry-toast-actions">
-            <button class="zhino-retry-stop-btn" @click="store.stopSummaryRetry">停止重试</button>
+            <button class="zhino-retry-stop-btn" @click="store.stopQueueRetry">停止重试</button>
           </div>
         </div>
       </div>

@@ -278,8 +278,8 @@ export async function executeBatchSummary(
       const lastMsgId = batchContents[batchContents.length - 1].messageId;
       const batchCoveredIds = batchContents.map(c => c.messageId);
 
-      // 每批只跑一次 —— 重试统一交给「智脑整体」那套（callGenerateRaw 的重试弹窗），
-      // 这里不再自己套一层指数退避：两层重试叠在一起时，用户点一次「取消重试」，
+      // 每批只跑一次 —— 重试统一交给后台队列（backgroundQueue.runTaskWithRetry），
+      // 这里不再自建重试：两层叠在一起会出现 3×3=9 次的放大，且用户点一次「停止重试」
       // 外层立刻又发起新一轮、又弹一次窗，看起来就是"点了没用"。
       {
         if (abortSignal?.value) {

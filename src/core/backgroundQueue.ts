@@ -9,7 +9,7 @@
  * 5. 提供完整状态供总览面板展示
  */
 
-import { logInfo, logError } from '../utils/logger';
+import { logInfo, logWarn, logError } from '../utils/logger';
 
 // ========== 类型定义 ==========
 
@@ -324,12 +324,7 @@ function notifyProcess(): void {
 
 async function runTask(task: QueuedTask): Promise<void> {
   try {
-    await Promise.race([
-      task.execute(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`超时 (${TASK_TIMEOUT / 1000}s)`)), TASK_TIMEOUT),
-      ),
-    ]);
+    await runTaskWithRetry(task);
     task.status = 'completed';
     task.completedAt = Date.now();
     task.durationMs = task.completedAt - task.startedAt!;
@@ -348,6 +343,88 @@ async function runTask(task: QueuedTask): Promise<void> {
     setTimeout(() => notifyProcess(), TASK_INTERVAL_SERIAL);
   } else {
     notifyProcess();
+  }
+}
+
+/**
+ * ★ A5.3.11：后台队列统一重试。
+ *
+ * 背景：A5.3.11 起 `callGenerateRaw` 只发一次请求、不再自带重试 ——
+ * 否则会出现「内层 3 次 × 外层循环 3 次 = 最多 9 次」的叠加放大。
+ * 现在**全项目只有这一处重试**，所有后台任务（大总结 / 小总结 / 梦呓 / 动态人设 /
+ * 世界推进 / 剧情导演 / 语义召回 …）共用同一套外层重试。
+ *
+ * 行为：
+ *   - 任务失败 → 弹重试弹窗（带倒计时 + "停止重试"按钮）→ 倒计时后重跑**同一任务**
+ *   - 上限取设置 `apiMaxRetries`（默认 3）
+ *   - 用户点"停止重试" → 立即放弃
+ *   - `_noRetry` 错误（内容被过滤 / 输出截断）→ 重试无意义，直接放弃
+ *   - AbortError / 超时 → 不重试，直接放弃
+ */
+async function runTaskWithRetry(task: QueuedTask): Promise<void> {
+  // 动态取重试上限，避免顶部静态 import 造成循环依赖
+  let maxAttempts = 3;
+  let store: any = null;
+  try {
+    const { useMainStore } = require('../stores/mainStore');
+    store = useMainStore();
+    const v = (store.settings as any).apiMaxRetries;
+    if (typeof v === 'number' && v > 0) maxAttempts = v;
+  } catch {
+    // store 不可用 → 用默认 3
+  }
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await Promise.race([
+        task.execute(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`超时 (${TASK_TIMEOUT / 1000}s)`)), TASK_TIMEOUT),
+        ),
+      ]);
+      if (attempt > 1) store?.clearQueueRetry?.();
+      return; // 成功
+    } catch (error: any) {
+      // 不可重试的情况：直接抛
+      if (error?.name === 'AbortError') { store?.clearQueueRetry?.(); throw error; }
+      if (error?._noRetry) {
+        store?.clearQueueRetry?.();
+        logError('后台队列', `${task.label} 错误重试无意义，直接放弃`, error?.message || String(error));
+        throw error;
+      }
+      if (/^超时 \(/.test(error?.message || '')) { store?.clearQueueRetry?.(); throw error; }
+
+      // 最后一次仍失败 → 抛给上层标 failed
+      if (attempt >= maxAttempts) {
+        store?.clearQueueRetry?.();
+        logError('后台队列', `${task.label} 重试 ${maxAttempts} 次后仍失败`, error?.message || String(error));
+        throw error;
+      }
+
+      // 弹倒计时重试窗，给用户"停止重试"窗口
+      const countdownSec = 5;
+      const errMsg = error?.message || String(error);
+      logWarn('后台队列', `${task.label} 失败(${errMsg})，${countdownSec}s 后重试 (${attempt}/${maxAttempts})...`);
+      store?.startQueueRetry?.({
+        label: task.label,
+        attempt,
+        maxAttempts,
+        error: errMsg,
+        countdownSec,
+      });
+      for (let sec = countdownSec; sec > 0; sec--) {
+        if (store?.isQueueRetryAborted?.()) break;
+        store?.updateQueueRetryCountdown?.(sec);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      const aborted = store?.isQueueRetryAborted?.();
+      store?.clearQueueRetry?.();
+      // 用户中途点了"停止重试" → 放弃，抛给上层标 failed
+      if (aborted) {
+        throw new Error(`用户已停止重试（${task.label}）`);
+      }
+      // 否则循环回到顶部，attempt++ 重跑同一任务
+    }
   }
 }
 

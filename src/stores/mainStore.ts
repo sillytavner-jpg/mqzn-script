@@ -6226,53 +6226,16 @@ const versions = chatData.value.knowledgeGraphVersions || [];
   }
 
   // ========== API 重试弹窗 ==========
+  // ⚠️ A5.3.11 起重试统一由后台队列负责（见下方"后台队列统一重试弹窗"）。
+  //    原先 `callGenerateRaw` 自带的内层重试已移除，故 apiRetryStatus 相关 UI/API 一并废弃。
 
-  /** 当前重试状态（null = 无重试进行中） */
-  const apiRetryStatus = ref<{
-    analysisName: string;
-    attempt: number;
-    maxRetries: number;
-    error: string;
-    delaySec: number;
-  } | null>(null);
+  // ========== 后台队列统一重试弹窗 ==========
+  // ★ A5.3.11：重试统一由后台队列负责（callGenerateRaw 不再自带重试）。
+  //   任何后台任务失败 → 队列弹这个窗、倒计时后重试同一任务，
+  //   上限取 apiMaxRetries（默认 3）。用户可点"停止重试"中断。
 
-  function showApiRetry(info: {
-    analysisName: string;
-    attempt: number;
-    maxRetries: number;
-    error: string;
-    delaySec: number;
-  }) {
-    apiRetryAborted = false; // 每次开始重试前清掉旧的取消信号
-    apiRetryStatus.value = info;
-  }
-
-  function clearApiRetry() {
-    // 连同中止信号一起清干净，避免用户点过一次"取消重试"后，
-    // aborted 永久停在 true，导致后续每次调用在 attempt=0 顶部直接被卡、
-    // 秒抛"用户已取消重试"（showApiRetry 只在重试时才重置，救不回首次调用）。
-    apiRetryAborted = false;
-    apiRetryStatus.value = null;
-  }
-
-  /** 用户是否已点击"取消重试"（showApiRetry 时自动重置） */
-  let apiRetryAborted = false;
-
-  /** 用户点击"取消重试"按钮 → 置位中止信号，重试循环下一轮顶部检测到后抛错停手 */
-  function stopApiRetry() {
-    apiRetryAborted = true;
-    apiRetryStatus.value = null;
-  }
-
-  function isApiRetryAborted(): boolean {
-    return apiRetryAborted;
-  }
-
-  // ========== 大总结重试弹窗 ==========
-  // 失败后自动重试同一批楼层，弹窗展示倒计时;"停止重试"按钮可中断，转为需手动重新总结。
-
-  const summaryRetryStatus = ref<{
-    floors: number;
+  const queueRetryStatus = ref<{
+    label: string;
     attempt: number;
     maxAttempts: number;
     error: string;
@@ -6280,33 +6243,32 @@ const versions = chatData.value.knowledgeGraphVersions || [];
   } | null>(null);
 
   /** 用户是否已点击"停止重试"（每次新一轮重试前置 false） */
-  let summaryRetryAborted = false;
+  let queueRetryAborted = false;
 
-  function startSummaryRetry(info: { floors: number; attempt: number; maxAttempts: number; error: string; countdownSec: number }) {
-    summaryRetryAborted = false;
-    summaryRetryStatus.value = { ...info };
+  function startQueueRetry(info: { label: string; attempt: number; maxAttempts: number; error: string; countdownSec: number }) {
+    queueRetryAborted = false;
+    queueRetryStatus.value = { ...info };
   }
 
-  function updateSummaryRetryCountdown(sec: number) {
-    if (summaryRetryStatus.value) {
-      summaryRetryStatus.value = { ...summaryRetryStatus.value, countdownSec: sec };
+  function updateQueueRetryCountdown(sec: number) {
+    if (queueRetryStatus.value) {
+      queueRetryStatus.value = { ...queueRetryStatus.value, countdownSec: sec };
     }
   }
 
-  function clearSummaryRetry() {
-    // 同 clearApiRetry：清掉中止信号，避免下次大总结 attempt=1 顶部直接被卡死
-    summaryRetryAborted = false;
-    summaryRetryStatus.value = null;
+  function clearQueueRetry() {
+    queueRetryAborted = false;
+    queueRetryStatus.value = null;
   }
 
   /** 用户点击"停止重试" */
-  function stopSummaryRetry() {
-    summaryRetryAborted = true;
-    summaryRetryStatus.value = null;
+  function stopQueueRetry() {
+    queueRetryAborted = true;
+    queueRetryStatus.value = null;
   }
 
-  function isSummaryRetryAborted(): boolean {
-    return summaryRetryAborted;
+  function isQueueRetryAborted(): boolean {
+    return queueRetryAborted;
   }
 
   // ========== 大总结引导弹窗 ==========
@@ -7000,19 +6962,13 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     resolveSummaryGuidance,
     skipSummaryGuidance,
     cancelSummaryGuidance,
-    // API 重试弹窗
-    apiRetryStatus,
-    showApiRetry,
-    clearApiRetry,
-    stopApiRetry,
-    isApiRetryAborted,
-    // 大总结重试弹窗
-    summaryRetryStatus,
-    startSummaryRetry,
-    updateSummaryRetryCountdown,
-    clearSummaryRetry,
-    stopSummaryRetry,
-    isSummaryRetryAborted,
+    // 后台队列统一重试弹窗（A5.3.11）
+    queueRetryStatus,
+    startQueueRetry,
+    updateQueueRetryCountdown,
+    clearQueueRetry,
+    stopQueueRetry,
+    isQueueRetryAborted,
     // 数据管理
     exportAllData,
     checkImportData,

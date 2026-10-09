@@ -29,49 +29,14 @@ export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
   manualMatryoshka: false,
 };
 
-/** 获取 store（动态导入避免循环依赖） */
-async function getStore() {
-  const { useMainStore } = await import('../stores/mainStore');
-  return useMainStore();
-}
-
-/** 从设置获取 API 重试次数 */
-async function getApiMaxRetries(): Promise<number> {
-  try {
-    const store = await getStore();
-    return (store.settings as any).apiMaxRetries ?? 3;
-  } catch {
-    return 3;
-  }
-}
-
-/** 显示重试弹窗 */
-async function showRetryPopup(info: {
-  analysisName: string;
-  attempt: number;
-  maxRetries: number;
-  error: string;
-  delaySec: number;
-}) {
-  try {
-    const store = await getStore();
-    store.showApiRetry(info);
-  } catch {
-    // store 不可用时忽略
-  }
-}
-
-/** 清除重试弹窗 */
-async function clearRetryPopup() {
-  try {
-    const store = await getStore();
-    store.clearApiRetry();
-  } catch {
-    // store 不可用时忽略
-  }
-}
-
-/** 单条文本 → embedding 向量（自动重试，次数由设置控制） */
+/**
+ * 单条文本 → embedding 向量。
+ *
+ * ⚠️ A5.3.11：本函数**只发一次请求，不带重试** ——
+ * 重试统一由外层（后台队列 / 调用方）负责。
+ * embedding 走的是 `/embeddings` 端点（非 chat），不经 `callGenerateRaw`，
+ * 但同样遵守「全项目重试只发生在一个地方」的约定。
+ */
 export async function getEmbedding(text: string, settings: EmbeddingSettings): Promise<number[]> {
   const body: Record<string, unknown> = {
     model: settings.model,
@@ -82,49 +47,28 @@ export async function getEmbedding(text: string, settings: EmbeddingSettings): P
   const dim = decideDimToSend(settings.model, settings.dimensions, settings.manualMatryoshka ?? false);
   if (dim) body.dimensions = dim;
 
-  const maxRetries = await getApiMaxRetries();
-  let lastError: any;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (attempt > 0) {
-      const delay = 0;
-      const delaySec = delay / 1000;
-      const errMsg = lastError?.message || String(lastError || '');
-      logWarn('Embedding', `单条请求失败, ${delaySec}s后重试(${attempt}/${maxRetries})`, errMsg);
-      await showRetryPopup({ analysisName: 'Embedding', attempt, maxRetries, error: errMsg, delaySec });
-      await new Promise(r => setTimeout(r, delay));
-    }
-    try {
-      const resp = await fetch(settings.apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${settings.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => '');
-        throw new Error(`Embedding API ${resp.status}: ${err}`);
-      }
-      const json = await resp.json();
-      if (attempt > 0) await clearRetryPopup();
-      return json.data[0].embedding;
-    } catch (err: any) {
-      lastError = err;
-      if (err?.name === 'AbortError') { await clearRetryPopup(); throw err; }
-      if (attempt >= maxRetries) { await clearRetryPopup(); throw err; }
-    }
+  const resp = await fetch(settings.apiUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${settings.apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '');
+    throw new Error(`Embedding API ${resp.status}: ${err}`);
   }
-  throw lastError;
+  const json = await resp.json();
+  return json.data[0].embedding;
 }
 
-/** 批量文本 → embedding 向量数组（每批最多32条，每批自动重试，次数由设置控制） */
+/** 批量文本 → embedding 向量数组（每批最多32条）。A5.3.11：不带内层重试，交给外层。 */
 export async function getBatchEmbeddings(
   texts: string[],
   settings: EmbeddingSettings,
   onProgress?: (done: number, total: number) => void,
 ): Promise<number[][]> {
-  const maxRetries = await getApiMaxRetries();
   const results: number[][] = new Array(texts.length);
   for (let i = 0; i < texts.length; i += 32) {
     const batch = texts.slice(i, i + 32);
@@ -138,42 +82,23 @@ export async function getBatchEmbeddings(
       if (dim) body.dimensions = dim;
     }
 
-    let lastError: any;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      if (attempt > 0) {
-        const delay = 0;
-        const delaySec = delay / 1000;
-        const errMsg = lastError?.message || String(lastError || '');
-        logWarn('Embedding', `批量请求失败, ${delaySec}s后重试(${attempt}/${maxRetries})`, errMsg);
-        await showRetryPopup({ analysisName: 'Embedding批量', attempt, maxRetries, error: errMsg, delaySec });
-        await new Promise(r => setTimeout(r, delay));
-      }
-      try {
-        const resp = await fetch(settings.apiUrl, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${settings.apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(body),
-        });
-        if (!resp.ok) {
-          const err = await resp.text().catch(() => '');
-          throw new Error(`Embedding API ${resp.status}: ${err}`);
-        }
-        const json = await resp.json();
-        for (const item of json.data) {
-          results[i + item.index] = item.embedding;
-        }
-        onProgress?.(Math.min(i + 32, texts.length), texts.length);
-        if (attempt > 0) await clearRetryPopup();
-        break; // 成功，跳出重试循环
-      } catch (err: any) {
-        lastError = err;
-        if (err?.name === 'AbortError') { await clearRetryPopup(); throw err; }
-        if (attempt >= maxRetries) { await clearRetryPopup(); throw err; }
-      }
+    const resp = await fetch(settings.apiUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${settings.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.text().catch(() => '');
+      throw new Error(`Embedding API ${resp.status}: ${err}`);
     }
+    const json = await resp.json();
+    for (const item of json.data) {
+      results[i + item.index] = item.embedding;
+    }
+    onProgress?.(Math.min(i + 32, texts.length), texts.length);
   }
   return results;
 }
@@ -398,48 +323,30 @@ export async function rerankCandidates(
   const rerankUrl = apiUrl.replace(/\/embeddings\/?$/, '/rerank');
   const rerankModel = model || 'BAAI/bge-reranker-v2-m3';
   const t0 = Date.now();
-  const maxRetries = await getApiMaxRetries();
-  let lastError: any;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (attempt > 0) {
-      const delay = 0;
-      const delaySec = delay / 1000;
-      const errMsg = lastError?.message || String(lastError || '');
-      logWarn('Embedding', `Rerank请求失败, ${delaySec}s后重试(${attempt}/${maxRetries})`, errMsg);
-      await showRetryPopup({ analysisName: 'Rerank重排', attempt, maxRetries, error: errMsg, delaySec });
-      await new Promise(r => setTimeout(r, delay));
-    }
-    try {
-      const resp = await fetch(rerankUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: rerankModel,
-          query,
-          documents: candidates,
-          top_n: topN,
-        }),
-      });
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => '');
-        throw new Error(`Rerank API ${resp.status}: ${err}`);
-      }
-      const json = await resp.json();
-      const results = (json.results || []).map((r: any) => ({
-        text: candidates[r.index] || '',
-        score: r.relevance_score ?? 0,
-      }));
-      logInfo('Embedding', `Rerank完成: ${candidates.length}→${results.length}条 (${Date.now() - t0}ms)`);
-      if (attempt > 0) await clearRetryPopup();
-      return results;
-    } catch (err: any) {
-      lastError = err;
-      if (err?.name === 'AbortError') { await clearRetryPopup(); throw err; }
-      if (attempt >= maxRetries) { await clearRetryPopup(); throw err; }
-    }
+
+  // A5.3.11：不带内层重试，单次请求（重试交给外层）
+  const resp = await fetch(rerankUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: rerankModel,
+      query,
+      documents: candidates,
+      top_n: topN,
+    }),
+  });
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => '');
+    throw new Error(`Rerank API ${resp.status}: ${err}`);
   }
-  throw lastError;
+  const json = await resp.json();
+  const results = (json.results || []).map((r: any) => ({
+    text: candidates[r.index] || '',
+    score: r.relevance_score ?? 0,
+  }));
+  logInfo('Embedding', `Rerank完成: ${candidates.length}→${results.length}条 (${Date.now() - t0}ms)`);
+  return results;
 }
