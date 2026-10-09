@@ -11,6 +11,7 @@ import {
 import { executeDreamtalkAnalysis } from '../core/dreamtalk';
 import { executeGrandSummaryV2 } from '../core/grandSummaryV2';
 import { executeCharacterMemoryUpdate } from '../core/characterMemoryUpdate';
+import { runSummaryChain } from '../core/summaryChain';
 import { embedTimelineEvents, embedCharacterMemories } from '../core/embedding';
 import {
   getCapturedContentMessageIds,
@@ -179,28 +180,22 @@ async function runGrandSummaryAndHide(
   const previousSummary = store.getLatestSummary();
   const existingMemories = previousSummary?.characterMemories || [];
 
-  // V2: 步骤1 — 白描事实时间线
-  const v2Result = await executeGrandSummaryV2(
+  // 统一走 core/summaryChain：大总结V2 + 角色记忆并发执行（与自动触发链路行为一致）
+  const chainResult = await runSummaryChain(
+    contents,
     store.chatData.smallSummaries || [],
-    contents,
     previousSummary?.rawText,
-    store.getUserName(),
-    undefined,
-    undefined,
-    store.getBlacklistedCharacters(),
-  );
-
-  // V2: 步骤2 — 角色记忆+NSFW（调色盘分析）
-  const memResult = await executeCharacterMemoryUpdate(
-    contents,
     existingMemories,
-    store.settings.memoryMinPerChar,
-    store.settings.memoryMaxPerChar,
     store.getUserName(),
-    undefined,
-    undefined,
-    store.getBlacklistedCharacters(),
+    {
+      memoryMin: store.settings.memoryMinPerChar,
+      memoryMax: store.settings.memoryMaxPerChar,
+      blacklistedNames: store.getBlacklistedCharacters(),
+      logScope: '大总结',
+    },
   );
+  const v2Result = chainResult.v2Result!;
+  const memResult = chainResult.memResult!;
 
   // === 组装 GrandSummary ===
   const summarizedMessageIds = getCapturedContentMessageIds(contents);

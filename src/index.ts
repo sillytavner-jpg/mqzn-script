@@ -53,8 +53,7 @@ import { isMvuExtraAnalysis, stripZhinoInjectionsFromCompletion } from './utils/
 import { useMainStore, type CapturedContent, type CharacterMemory, type GrandSummary, type TimelineEvent } from './stores/mainStore';
 
 // ========== 新模块导入 ==========
-import { executeGrandSummaryV2 } from './core/grandSummaryV2';
-import { executeCharacterMemoryUpdate } from './core/characterMemoryUpdate';
+import { runSummaryChain } from './core/summaryChain';
 import { buildDynamicProfileV2Injection, executeDynamicProfileV2, injectDynamicProfileV2, removeDynamicProfileV2Injection } from './core/dynamicProfileV2';
 import {
   buildWorldProgressEntryInjection,
@@ -2154,81 +2153,39 @@ $(() => {
           throw lastGenError || new Error('用户已停止大总结重试');
         }
         try {
-          const tasks: Array<{ key: 'summary' | 'memory'; name: string; promise: Promise<any> }> = [];
-          if (!v2Result) {
-            tasks.push({
-              key: 'summary',
-              name: '大总结V2',
-              promise: executeGrandSummaryV2(
-                store.chatData.smallSummaries || [],
-                pendingContents,
-                previousSummary?.rawText,
-                store.getUserName(),
-                undefined,
-                { _responseFormat: 'json_object' },
-                store.getBlacklistedCharacters(),
-              ),
-            });
-          }
-          if (characterMemoryEnabled && !memResult) {
-            tasks.push({
-              key: 'memory',
-              name: '角色记忆更新',
-              promise: executeCharacterMemoryUpdate(
-                pendingContents,
-                existingMemories,
-                store.settings.memoryMinPerChar,
-                store.settings.memoryMaxPerChar,
-                store.getUserName(),
-                undefined,
-                { _responseFormat: 'json_object' },
-                store.getBlacklistedCharacters(),
-              ),
-            });
-          }
-
-          // 诊断：记录每个子任务的实际耗时。
-          // 判据：总耗时 ≈ 最长者 → 真并发；≈ 各任务之和 → 实际串行了。
-          const chainT0 = Date.now();
-          const settled = await Promise.allSettled(
-            tasks.map(async (task) => {
-              const subT0 = Date.now();
-              const v = await task.promise;
-              logInfo('大总结链', `${task.name} 耗时 ${Date.now() - subT0}ms`);
-              return v;
-            }),
+          // 统一走 core/summaryChain：并发执行 + 耗时日志 + signal 透传。
+          // ★ 续跑语义：已成功的那条不再重跑（失败时只补缺口）。
+          const chainResult = await runSummaryChain(
+            pendingContents,
+            store.chatData.smallSummaries || [],
+            previousSummary?.rawText,
+            existingMemories,
+            store.getUserName(),
+            {
+              event: true,
+              memory: characterMemoryEnabled,
+              memoryMin: store.settings.memoryMinPerChar,
+              memoryMax: store.settings.memoryMaxPerChar,
+              extraGenerateParams: { _responseFormat: 'json_object' },
+              blacklistedNames: store.getBlacklistedCharacters(),
+              logScope: '大总结链',
+            },
+            { v2Result, memResult },
           );
-          logInfo(
-            '大总结链',
-            `并发启动 ${tasks.length} 个任务，总耗时 ${Date.now() - chainT0}ms` +
-            `（≈最长者=并发；≈各任务之和=串行）`,
-          );
-          const failed: Array<{ name: string; reason: any }> = [];
-          for (let i = 0; i < settled.length; i++) {
-            const task = tasks[i];
-            const result = settled[i];
-            if (result.status === 'fulfilled') {
-              if (task.key === 'summary') v2Result = result.value;
-              if (task.key === 'memory') memResult = result.value;
-            } else {
-              failed.push({ name: task.name, reason: result.reason });
-            }
-          }
-
-          if (failed.length > 0) {
-            const abortError = failed.find(f => f.reason?.name === 'AbortError')?.reason;
-            if (abortError) throw abortError;
-            const firstFailed = failed[0];
-            const reason = firstFailed.reason;
-            const message = reason?.message || String(reason);
-            throw new Error(`${firstFailed.name}失败：${message}`);
-          }
+          v2Result = chainResult.v2Result;
+          memResult = chainResult.memResult;
 
           generateDone = !!v2Result && (!characterMemoryEnabled || !!memResult);
           store.clearSummaryRetry();
           if (generateDone) break;
         } catch (err: any) {
           lastGenError = err;
+          // ★ summaryChain 失败时会把已成功的部分挂在 err.partial 上，
+          //   下一轮只重试失败的那条（不用整条链重跑）。
+          if (err?.partial) {
+            if (err.partial.v2Result) v2Result = err.partial.v2Result;
+            if (err.partial.memResult) memResult = err.partial.memResult;
+          }
           if (err?.name === 'AbortError') {
             store.clearSummaryRetry();
             throw err;

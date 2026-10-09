@@ -9,8 +9,7 @@
 
 import { logInfo, logWarn, logError } from '../utils/logger';
 
-import { executeGrandSummaryV2 } from './grandSummaryV2';
-import { executeCharacterMemoryUpdate } from './characterMemoryUpdate';
+import { runSummaryChain } from './summaryChain';
 import { executeSmallSummary } from './smallSummary';
 import {
   applyKnowledgeGraphDiff,
@@ -296,48 +295,35 @@ export async function executeBatchSummary(
           // 版本号续接：取历史最大版本 + 1（不是简单 latest+1，避免与已有版本撞车）
           const summaryVersion = nextSummaryVersion(store);
 
-          // === 步骤1：V2 白描事实时间线（按需） ===
-          let v2Events: any[] = [];
-          if (doEvent) {
-            const v2Result = await executeGrandSummaryV2(
-              [],  // 批量总结无小总结，走 buildInputMaterial 的兜底模式
-              batchContents,
-              previousSummary?.rawText,  // 续接上次事件编号
-              store.getUserName(),
-              controller.signal,
-              { _responseFormat: 'json_object' },
-              store.getBlacklistedCharacters(),
-            );
-            v2Events = v2Result.events || [];
+          // === 统一走 core/summaryChain：大总结 + 角色记忆并发 ===
+          // 批量总结与其他入口共用同一条链，行为一致（并发 + 耗时日志 + signal 透传）。
+          // 每批只跑一次 —— 重试统一交给「智脑整体」那套（callGenerateRaw 的重试弹窗）。
+          const chainResult = await runSummaryChain(
+            batchContents,
+            [],  // 批量总结无小总结，走 buildInputMaterial 的兜底模式
+            previousSummary?.rawText,  // 续接上次事件编号
+            existingMemories,
+            store.getUserName(),
+            {
+              event: doEvent,
+              memory: doMemory,
+              memoryMin: 4,
+              memoryMax: 8,
+              abortSignal: controller.signal,
+              extraGenerateParams: { _responseFormat: 'json_object' },
+              blacklistedNames: store.getBlacklistedCharacters(),
+              logScope: '批量总结',
+            },
+          );
+          const v2Events: any[] = chainResult.v2Result?.events || [];
+          const memResult: { characterMemories: CharacterMemory[]; nsfwMemories: any[] } =
+            chainResult.memResult || { characterMemories: [], nsfwMemories: [] };
 
-            // AI 调用完成后立即检查中止
-            if (abortSignal?.value) {
-              progress.status = 'cancelled';
-              onProgress({ ...progress });
-              return;
-            }
-          }
-
-          // === 步骤2：角色记忆 + NSFW（按需） ===
-          // 未勾选时给空 memories：delta 格式下空数组不会覆盖既有角色记忆
-          let memResult: { characterMemories: CharacterMemory[]; nsfwMemories: any[] } =
-            { characterMemories: [], nsfwMemories: [] };
-          if (doMemory) {
-            memResult = await executeCharacterMemoryUpdate(
-              batchContents,
-              existingMemories,
-              4, 8,
-              store.getUserName(),
-              controller.signal,
-              { _responseFormat: 'json_object' },
-              store.getBlacklistedCharacters(),
-            );
-
-            if (abortSignal?.value) {
-              progress.status = 'cancelled';
-              onProgress({ ...progress });
-              return;
-            }
+          // AI 调用完成后立即检查中止
+          if (abortSignal?.value) {
+            progress.status = 'cancelled';
+            onProgress({ ...progress });
+            return;
           }
 
           // === 组装 GrandSummary 并存储 ===
