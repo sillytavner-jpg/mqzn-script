@@ -235,6 +235,10 @@ async function readSSEStream(
   let streamError: any = null;
   let gotAnyChunk = false;
   let lastNotify = 0;
+  /** 是否解析到过 SSE 事件（一条都没有 = 响应根本不是 SSE 格式 → 抛错交给上层重试） */
+  let sawSseEvent = false;
+  /** 是否收到过 `data: [DONE]` 结束标记（判断"流被掐断"用） */
+  let sawDone = false;
 
   while (true) {
     let chunk: ReadableStreamReadResult<Uint8Array>;
@@ -264,8 +268,10 @@ async function readSSEStream(
 
       if (!line || line.startsWith(':')) continue;          // 空行 / 注释心跳
       if (!line.startsWith('data:')) continue;
+      sawSseEvent = true;
       const payload = line.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
+      if (!payload) continue;
+      if (payload === '[DONE]') { sawDone = true; continue; }
 
       let json: any;
       try { json = JSON.parse(payload); } catch { continue; }
@@ -298,6 +304,23 @@ async function readSSEStream(
       : (streamError.message || JSON.stringify(streamError));
     throw new Error(`流式返回错误：${msg}`);
   }
+  // 响应不是 SSE（一条 data: 事件都没有）→ 直接抛错，交给上层重试。
+  // ⚠️ **故意不做"猜格式"的兼容**：渠道不规范是渠道的问题，
+  //    智脑只需把失败如实暴露、让用户去 API 日志看清现场 —— 猜多了反而更难排查。
+  if (!sawSseEvent) {
+    throw new Error('响应不是 SSE 格式（该渠道可能不支持流式），可在设置里关闭流式改用非流式');
+  }
+
+  // ⚠️ 截断检测：流正常结束时，要么带 finish_reason，要么发过 [DONE] 结束标记。
+  //    两者都没有 = 连接在中途被掐断（网络中断 / 代理超时 / 渠道主动断开），
+  //    此时内容是不完整的 —— **绝不能当完整结果录入**，抛错交给上层重试。
+  if (!finishReason && !sawDone) {
+    throw new Error(
+      '流式响应疑似被截断：连接已结束，但既没有 finish_reason 也没有 [DONE] 结束标记'
+      + `（已收到 ${content.length} 字）。可能是网络中断、代理 / 网关超时，或渠道主动断开。`,
+    );
+  }
+
   if (onProgress) onProgress({ chars: content.length, elapsedMs: Date.now() - startedAt });
 
   return { content, thinking, finishReason, usage };
@@ -345,10 +368,10 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
     throw err;
   }
 
-  // ── ① 优先走流式 ──
-  //    理由见 readSSEStream 上方注释（非流式的长静默期会被代理/网关掐断）。
-  //    任何失败（渠道不支持 / 解析异常 / 看门狗超时）都**自动降级**到下面的非流式，
-  //    保证老渠道也能正常用。
+  // ── 流式请求（默认路径）──
+  //    理由见 readSSEStream 上方注释（非流式的长静默期会被代理 / 网关掐断）。
+  //    ⚠️ **不做自动降级**：失败就如实抛错 → 上层重试 → 仍失败则提示用户看 API 日志。
+  //    只有用户在设置里手动关掉流式（streamingEnabled = false）时才走下面的非流式分支。
   let data: any = null;
   const streamingOn = (store.settings as any)?.streamingEnabled !== false;
 
@@ -391,16 +414,34 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
         `流式完成：正文 ${streamed.content.length} 字（${analysisName}）`,
         `finish=${streamed.finishReason || '?'}`,
       );
+      // ⚠️ 撞上 token 上限：内容虽然拿到了，但很可能是"写一半就断"。
+      //    这种通常紧接着就报 JSON 解析失败 —— 在这里先说清原因，
+      //    免得用户/我们把它误判成"格式跑偏"。
+      if (streamed.finishReason === 'length') {
+        logWarn(
+          'API调用',
+          `⚠️ 输出被 token 上限截断（finish_reason=length，已生成 ${streamed.content.length} 字，${analysisName}）`
+          + '：内容可能不完整',
+        );
+      }
     } catch (err: any) {
       if (err?.name === 'AbortError') throw err;
-      logWarn('API调用', '流式失败，降级为非流式重试', String(err?.message || err));
-      data = null;
+      recordApiFailure();
+      // ⚠️ **不降级、不猜格式**：渠道不规范是渠道的问题 ——
+      //    这里如实抛错，由上层 callGenerateRaw 的重试机制兜住（默认 3 次）；
+      //    重试仍失败时用户看到的就是这条（自带模型、地址与排查入口）。
+      const streamErr = new Error(
+        `API 流式请求失败：${err?.message || err}\n`
+        + `模型：${modelName}｜请求地址：${apiUrl}\n`
+        + '会自动重试；若反复失败，请到「总览 → API 监听」查看完整请求与响应，或看「代码日志」面板。',
+      );
+      recordFailAndThrow('', `流式请求失败: ${err?.message || err}`, streamErr);
     } finally {
       store.setApiProgress(null);
     }
   }
 
-  // ── ② 非流式（原有路径；流式关闭或失败时走这里）──
+  // ── 非流式（仅当用户在设置里手动关掉流式时才会走这里）──
   if (!data) {
     let response: Response;
     try {

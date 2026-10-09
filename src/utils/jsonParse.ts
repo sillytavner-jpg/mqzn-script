@@ -1,5 +1,52 @@
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
+import { logWarn } from './logger';
+
+/**
+ * 给"解析不出来"的输出做一份体检报告 —— 目的是让人一眼看出 AI 到底吐了什么：
+ * 是只回了一句道歉、还是 JSON 写一半被截断了、还是格式整个跑偏。
+ *
+ * 之前解析失败只返回 null，调用方顶多报一句"格式错误"，完全看不到现场。
+ */
+export function describeUnparsableOutput(text: string): string {
+  const raw = (text || '').trim();
+  if (!raw) return '输出为空（一个字都没有）';
+
+  const len = raw.length;
+  const HEAD = 150;
+  const TAIL = 150;
+  const head = raw.slice(0, HEAD).replace(/\s+/g, ' ');
+  const tail = len > HEAD + TAIL ? raw.slice(-TAIL).replace(/\s+/g, ' ') : '';
+
+  const notes: string[] = [];
+  const startsWithJson = /^[[{]/.test(raw);
+  const hasCodeBlock = raw.includes('```');
+
+  if (!startsWithJson && !hasCodeBlock) {
+    notes.push('开头既不是 JSON 也不是代码块 → 模型多半在"说人话"（比如拒绝、道歉、解释）');
+  } else {
+    // 括号配平检查：不配平通常意味着写到一半就断了
+    const openBrace = (raw.match(/\{/g) || []).length;
+    const closeBrace = (raw.match(/\}/g) || []).length;
+    const openBracket = (raw.match(/\[/g) || []).length;
+    const closeBracket = (raw.match(/\]/g) || []).length;
+    if (openBrace !== closeBrace || openBracket !== closeBracket) {
+      notes.push(
+        `花括号 ${openBrace}开/${closeBrace}闭、方括号 ${openBracket}开/${closeBracket}闭，`
+        + '**不配平 → 疑似写一半就断了**',
+      );
+    }
+    if (hasCodeBlock && !raw.trimEnd().endsWith('```')) {
+      notes.push('代码块没有闭合（结尾缺 ```）→ 同样是"写一半断了"的特征');
+    }
+  }
+
+  let out = `输出长度 ${len} 字`;
+  if (notes.length > 0) out += `｜${notes.join('；')}`;
+  out += `\n开头：${head}`;
+  if (tail) out += `\n结尾：…${tail}`;
+  return out;
+}
 
 /**
  * 安全解析 JSON：先尝试直接 parse，失败则用 jsonrepair 修复后再 parse
@@ -27,6 +74,8 @@ export function safeJsonParse<T>(text: string, schema?: z.ZodSchema<T>): T | nul
       }
       return data as T;
     } catch (e) {
+      // 修复也失败 —— 把现场记下来（调用方只会看到 null，所以线索必须留在这里）
+      logWarn('JSON解析', '解析失败，输出内容不合规', describeUnparsableOutput(text));
       return null;
     }
   }
