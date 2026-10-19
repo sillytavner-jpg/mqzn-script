@@ -478,14 +478,14 @@ export interface ScriptSettings {
     apiAssignments: ApiAssignments;
     /** 已废弃：自定义破限词入口已下线，字段保留仅为兼容旧数据（不再读写生效） */
     jailbreakOverrides: JailbreakPromptOverrides;
-    /** 破限词模式（全局默认）：legacy = 老模型 / flash = 3.7f · 3.8f */
-    jailbreakMode: 'legacy' | 'flash';
+    /** 破限词模式（全局默认）：legacy = 老模型 / flash = 3.7f·3.8f / ds41f = DeepSeek V4.1 Flash */
+    jailbreakMode: 'legacy' | 'flash' | 'ds41f';
     /**
      * 逐分析类型的破限模式覆盖（在「API 库管理 → 分析类型分配」里逐条指定）。
-     * 例：{ small_summary: 'flash' }。未列出的类型回落到 jailbreakMode。
-     * 总开关（全部切老模型 / 全部切 3.7·3.8F）会清空本字段并改写 jailbreakMode。
+     * 例：{ small_summary: 'ds41f' }。未列出的类型回落到 jailbreakMode。
+     * 总开关（全部切老模型 / 3.7·3.8F / DS4.1F）会清空本字段并改写 jailbreakMode。
      */
-    jailbreakModeByType: Record<string, 'legacy' | 'flash'>;
+    jailbreakModeByType: Record<string, 'legacy' | 'flash' | 'ds41f'>;
     /**
      * 状态文档 patch 灰度开关（按模块名开启）—— 即 UI 上的「输出模式：MUV 化」。
      * 缺省 = 该模块走旧的全量 JSON 输出；置 true 才启用 patch 输出。
@@ -732,8 +732,8 @@ const ScriptSettingsSchema = z
           head: z.string().optional(),
           tail: z.string().optional(),
         })).prefault({}),
-        jailbreakMode: z.string().prefault('legacy'), // 'legacy' | 'flash'（全局默认）
-        // 逐分析类型的破限模式覆盖：{ 类型key: 'legacy'|'flash' }，未列出 = 跟随全局默认
+        jailbreakMode: z.string().prefault('legacy'), // 'legacy' | 'flash' | 'ds41f'（全局默认）
+        // 逐分析类型的破限模式覆盖：{ 类型key: 'legacy'|'flash'|'ds41f' }，未列出 = 跟随全局默认
         jailbreakModeByType: z.record(z.string(), z.string()).prefault({}),
         // MUV 化（输出结构 patch）**默认全关**：实测收益不稳定，降级为「实验性功能」。
         // 存量数据里那份「默认三件套」由 index.ts 做一次性清空（见 muvDefaultOffApplied）。
@@ -2050,11 +2050,11 @@ export const useMainStore = defineStore('main', () => {
    * 设置某个分析类型的破限模式（在「API 库管理 → 分析类型分配」里逐条指定）。
    * @param mode '' = 清除该类型的覆盖，回落到全局默认（jailbreakMode）
    */
-  function setJailbreakModeForType(analysisType: string, mode: '' | 'legacy' | 'flash') {
+  function setJailbreakModeForType(analysisType: string, mode: '' | 'legacy' | 'flash' | 'ds41f') {
     const type = String(analysisType || '').trim();
     if (!type) return;
     const next = { ...(scriptData.value.settings.jailbreakModeByType || {}) };
-    if (mode === 'legacy' || mode === 'flash') next[type] = mode;
+    if (mode === 'legacy' || mode === 'flash' || mode === 'ds41f') next[type] = mode;
     else delete next[type];
     updateSettings({ jailbreakModeByType: next } as any);
   }
@@ -2065,7 +2065,7 @@ export const useMainStore = defineStore('main', () => {
    * 实现上直接改写全局默认并**清空逐类型覆盖** —— 而不是给每个类型写一条，
    * 这样「全部统一」之后新增的分析类型也会自动跟随，不会留一个孤儿默认值。
    */
-  function setJailbreakModeAll(mode: 'legacy' | 'flash') {
+  function setJailbreakModeAll(mode: 'legacy' | 'flash' | 'ds41f') {
     updateSettings({ jailbreakMode: mode, jailbreakModeByType: {} } as any);
   }
 

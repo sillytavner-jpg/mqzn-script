@@ -167,34 +167,46 @@ function getAssignedApiId(type: string): string {
 // ─── 破限词（按分析类型）───
 
 /**
+ * 破限模式三态：
+ *   legacy = 老模型 / flash = 3.7·3.8F / ds41f = DeepSeek V4.1 Flash
+ * ds41f 与 flash 共用同一套破限文本，额外在请求体里关掉原生思考。
+ */
+type JbMode = 'legacy' | 'flash' | 'ds41f';
+
+/** 把任意持久化值收敛成合法三态（旧数据 / 脏值一律回落 legacy） */
+function normalizeJbMode(v: any): JbMode {
+  return v === 'flash' || v === 'ds41f' ? v : 'legacy';
+}
+
+/**
  * 该分析类型**当前生效**的破限模式。
  * 单独设置过就用它，否则回落到全局默认。
  * UI 上不呈现「跟随」这一概念 —— 一律显示实际生效值，所见即所得。
  */
-function getJailbreakModeForType(type: string): 'legacy' | 'flash' {
+function getJailbreakModeForType(type: string): JbMode {
   const byType = (store.settings as any).jailbreakModeByType || {};
   const v = byType[type];
-  if (v === 'legacy' || v === 'flash') return v;
-  return (store.settings as any).jailbreakMode === 'flash' ? 'flash' : 'legacy';
+  if (v === 'legacy' || v === 'flash' || v === 'ds41f') return v;
+  return normalizeJbMode((store.settings as any).jailbreakMode);
 }
 
-function setJailbreakModeForType(type: string, mode: 'legacy' | 'flash') {
+function setJailbreakModeForType(type: string, mode: JbMode) {
   store.setJailbreakModeForType(type, mode);
 }
 
 /** 总开关显示态：全部一致时显示该模式，存在分歧时显示 ''（混合） */
-const jailbreakAllMode = computed<'' | 'legacy' | 'flash'>(() => {
-  const globalMode: 'legacy' | 'flash' = (store.settings as any).jailbreakMode === 'flash' ? 'flash' : 'legacy';
+const jailbreakAllMode = computed<'' | JbMode>(() => {
+  const globalMode = normalizeJbMode((store.settings as any).jailbreakMode);
   const byType = (store.settings as any).jailbreakModeByType || {};
   const overrides = ANALYSIS_TYPES
     .map(t => byType[t.key])
-    .filter((v: any) => v === 'legacy' || v === 'flash');
+    .filter((v: any) => v === 'legacy' || v === 'flash' || v === 'ds41f');
   if (overrides.length === 0) return globalMode;
   if (!overrides.every((v: any) => v === globalMode)) return '';
   return globalMode;
 });
 
-function setJailbreakAll(mode: 'legacy' | 'flash') {
+function setJailbreakAll(mode: JbMode) {
   store.setJailbreakModeAll(mode);
 }
 
@@ -1318,6 +1330,11 @@ function executeSelectiveDelete() {
                 :class="{ 'is-on': jailbreakAllMode === 'flash' }"
                 @click="setJailbreakAll('flash')"
               >全部 3.7 / 3.8F</button>
+              <button
+                class="zhino-jb-btn"
+                :class="{ 'is-on': jailbreakAllMode === 'ds41f' }"
+                @click="setJailbreakAll('ds41f')"
+              >全部 DS4.1F</button>
               <span v-if="jailbreakAllMode === ''" class="zhino-jb-all-mixed">混合</span>
             </span>
           </div>
@@ -1344,12 +1361,19 @@ function executeSelectiveDelete() {
                 :class="{ 'is-on': getJailbreakModeForType(t.key) === 'flash' }"
                 @click="setJailbreakModeForType(t.key, 'flash')"
               >3.7 / 3.8F</button>
+              <button
+                class="zhino-jb-btn"
+                :class="{ 'is-on': getJailbreakModeForType(t.key) === 'ds41f' }"
+                @click="setJailbreakModeForType(t.key, 'ds41f')"
+              >DS4.1F</button>
             </div>
             <span v-else class="zhino-jb-na" title="该功能使用独立提示词，不经过破限框架">不走破限</span>
           </div>
           <div class="zhino-jb-hint">
             破限词按分析类型生效：<b>老模型</b>（3.1P / DS 系列）= 身份框架 + 认可式；
-            <b>3.7 / 3.8F</b> = 另加「尾部重申 + 输出契约」，并摘掉卡思维链的 prefill。
+            <b>3.7 / 3.8F</b> = 另加「尾部重申 + 输出契约」，并摘掉卡思维链的 prefill；
+            <b>DS4.1F</b> = 同 3.7 / 3.8F，另在请求体里关掉 DeepSeek 原生思考
+            （V4.1 Flash 思考模式默认开启，开着会让 temperature 失效、还白烧 reasoning tokens）。
           </div>
         </div>
     </Modal>
@@ -2333,6 +2357,8 @@ function executeSelectiveDelete() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
   margin-bottom: 8px;
 }
 .zhino-api-lib-assign-label {
@@ -2380,13 +2406,15 @@ function executeSelectiveDelete() {
   font-size: 10px;
   color: var(--zn-warning, #d19a66);
 }
-/* 行内两态破限切换：点哪个就是哪个 */
+/* 行内三态破限切换：点哪个就是哪个；窄屏自动换行，别把 API 下拉挤没 */
 .zhino-jb-seg {
   display: flex;
   align-items: center;
   gap: 3px;
   margin-left: 6px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .zhino-jb-na {
   flex: 0 0 96px;

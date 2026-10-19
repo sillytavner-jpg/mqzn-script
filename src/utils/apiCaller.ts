@@ -7,7 +7,7 @@
 
 import { useMainStore, type ApiConfig } from '../stores/mainStore';
 import { logError, logInfo, logWarn } from '../utils/logger';
-import { isFlashMode, buildFlashTail } from './jailbreakIdentity';
+import { usesTailJailbreak, buildFlashTail, shouldDisableNativeThinking } from './jailbreakIdentity';
 
 // 模块级 API 失败追踪（供 enqueueSourceChangeReconcile 等模块查询系统稳定性）
 let _lastApiFailureTime = 0;
@@ -86,13 +86,13 @@ export async function callGenerateRaw(params: GenerateRawParams): Promise<string
 }
 
 /**
- * flash 模式的破限投放 —— 两件事：
+ * 「现代模型」破限投放（flash / ds41f 共用）—— 两件事：
  *
  *  ① **摘掉末尾的 assistant prefill（卡思维链）**
  *     智脑各模块原本都以 `{role:'assistant', content:'<thinking>'}` 收尾，
  *     用「已经替它开了个头」的方式把模型按进思维链里。
- *     这招对老模型好使，但对 3.7f / 3.8f 这类自带推理机制的新模型是有害的 ——
- *     强行替它起头会**劫持它的原生思维链**，所以 flash 模式绝对不能加。
+ *     这招对老模型好使，但对 3.7f / 3.8f、DS V4.1 Flash 这类自带推理机制的
+ *     新模型是有害的 —— 强行替它起头会**劫持它的原生思维链**，所以现代档位绝对不能加。
  *     （预设里那条 prefill 的 identifier 就叫 `cot_hijack`，标注为「3.1 Pro 破限」）
  *
  *  ② **把「重申 + 输出契约」压到最末**
@@ -105,7 +105,7 @@ function applyFlashJailbreak(
   prompts: Array<OrderedPrompt | 'user_input'>,
   analysisType?: string,
 ): Array<OrderedPrompt | 'user_input'> {
-  if (!isFlashMode(analysisType)) return prompts;
+  if (!usesTailJailbreak(analysisType)) return prompts;
   const tail = buildFlashTail(analysisType);
   if (!tail) return prompts;
 
@@ -343,6 +343,11 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
           temperature,
           max_tokens: maxTokens,
           stream: true,
+          // ds41f 档：显式关掉 DeepSeek 原生思考。
+          //   V4.1 Flash 的思考模式**默认开启**（effort 默认 high），不传就是全程在思考；
+          //   而思考模式下 temperature 静默失效、reasoning tokens 照常计费。
+          //   其它档位不发这个字段 —— 避免给不认识它的渠道塞未知参数。
+          ...(shouldDisableNativeThinking(params._analysisType) ? { thinking: { type: 'disabled' } } : {}),
           ...(params._responseFormat ? { response_format: { type: params._responseFormat } } : {}),
         }),
         signal: params._abortSignal,
@@ -410,6 +415,8 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
           messages,
           temperature,
           max_tokens: maxTokens,
+          // 同流式分支：仅 ds41f 档关闭原生思考
+          ...(shouldDisableNativeThinking(params._analysisType) ? { thinking: { type: 'disabled' } } : {}),
           ...(params._responseFormat ? { response_format: { type: params._responseFormat } } : {}),
         }),
         signal: params._abortSignal,
