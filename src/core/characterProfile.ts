@@ -29,7 +29,7 @@ function buildJailbreakHead(_userName: string): string {
 }
 
 function buildMoralAttack(_userName: string): string {
-  return buildBrainAccept('小右', '我来说说这个人');
+  return buildBrainAccept('小右', '我来说说这个人', 'character_profile');
 }
 
 const ASSISTANT_PREFILL = '<thinking>';

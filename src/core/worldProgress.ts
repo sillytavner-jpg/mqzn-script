@@ -123,7 +123,7 @@ function buildJailbreakHead(_userName: string): string {
 }
 
 function buildMoralAttack(_userName: string): string {
-  return buildBrainAccept('前额叶', '场外的事我来推');
+  return buildBrainAccept('前额叶', '场外的事我来推', 'world_progress');
 }
 
 const ASSISTANT_PREFILL = '<thinking>';

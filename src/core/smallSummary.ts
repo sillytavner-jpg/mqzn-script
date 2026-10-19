@@ -49,7 +49,7 @@ function buildJailbreakHead(_userName: string): string {
 }
 
 function buildMoralAttack(_userName: string): string {
-  return buildBrainAccept('小左', '数据我来记，一条不漏');
+  return buildBrainAccept('小左', '数据我来记，一条不漏', 'small_summary');
 }
 
 // ========== 指令构建 ==========

@@ -191,11 +191,21 @@ async function runGrandSummaryAndHide(
       memoryMin: store.settings.memoryMinPerChar,
       memoryMax: store.settings.memoryMaxPerChar,
       blacklistedNames: store.getBlacklistedCharacters(),
+      // 角色名册：手动总结同样要带，否则群像段落会把多个角色合成一个人
+      characterRoster: store.getCharacterNameEntries({ includeUser: true }),
       logScope: '大总结',
     },
   );
   const v2Result = chainResult.v2Result!;
   const memResult = chainResult.memResult!;
+
+  // ★ 归一提前（同 index.ts）：先归一，再拼 rawText。
+  //   否则 rawText 会带着 AI 原始名字落库，下一轮继续喂回模型，形成污染循环。
+  const normalizedEvents = v2Result.events.map(e => ({
+    ...e,
+    presentCharacters: store.resolveKnownCharacterNames(e.presentCharacters, true),
+  }));
+  const normalizedMemories = store.normalizeIncomingCharacterMemories(memResult.characterMemories);
 
   // === 组装 GrandSummary ===
   const summarizedMessageIds = getCapturedContentMessageIds(contents);
@@ -206,7 +216,7 @@ async function runGrandSummaryAndHide(
   const summaryVersion = (previousSummary?.version || 0) + 1;
 
   // V2 事件 → TimelineEvent[]（summary=速览用于召回，detail=完整经过用于注入）
-  const timeline: TimelineEvent[] = v2Result.events.map(e => ({
+  const timeline: TimelineEvent[] = normalizedEvents.map(e => ({
     time: e.time,
     event: e.summary || e.event.slice(0, 50),
     detail: e.event,
@@ -230,8 +240,8 @@ async function runGrandSummaryAndHide(
     s1Lines.push('');
   }
 
-  // Section 2: 角色记忆
-  const section2 = buildMemorySectionText(memResult.characterMemories);
+  // Section 2: 角色记忆（用归一后的记忆，保证 rawText 与结构化字段一致）
+  const section2 = buildMemorySectionText(normalizedMemories);
 
   // Section 3: NSFW
   let section3 = '[NSFW记录]\n无NSFW内容';
@@ -259,9 +269,9 @@ async function runGrandSummaryAndHide(
   const summary: GrandSummary = {
     version: summaryVersion,
     generatedAt: new Date().toISOString(),
-    characterMemories: memResult.characterMemories,
+    characterMemories: normalizedMemories,
     timeline,
-    characterTable: memResult.characterMemories.map(m => ({
+    characterTable: normalizedMemories.map(m => ({
       name: m.characterName,
       aliases: m.keywords.slice(0, 3),
       identity: '',
@@ -300,14 +310,14 @@ async function runGrandSummaryAndHide(
       }).catch(() => {});
     }
 
-    // 核心记忆向量
-    const totalCores = memResult.characterMemories.reduce(
+    // 核心记忆向量（用归一后的记忆，否则向量会挂在旧名/别名条目上）
+    const totalCores = normalizedMemories.reduce(
       (s, m) => s + (m.coreMemories?.length || 0),
       0,
     );
     if (totalCores > 0) {
       embedCharacterMemories(
-        memResult.characterMemories,
+        normalizedMemories,
         store.settings.embeddingApiUrl,
         store.settings.embeddingApiKey,
         store.settings.embeddingModel,

@@ -87,7 +87,7 @@ function brainHeadFor(key: string): string {
     ack: '交给我',
   };
   // 第三参传类型 key：API 库管理里可为该类型单独指定破限模式
-  return roleHead(buildBrainHead(cfg.role, cfg.task, key), buildBrainAccept(cfg.role, cfg.ack));
+  return roleHead(buildBrainHead(cfg.role, cfg.task, key), buildBrainAccept(cfg.role, cfg.ack, key));
 }
 
 export const JAILBREAK_PROMPT_TYPES: JailbreakPromptType[] = [

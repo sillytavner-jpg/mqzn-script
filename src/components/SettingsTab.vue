@@ -210,6 +210,30 @@ function setJailbreakAll(mode: JbMode) {
   store.setJailbreakModeAll(mode);
 }
 
+// ─── 收尾压力（防道歉 / 防提前收尾）───
+/** 默认开。只在「流式 + 3.7/3.8F 破限」下可用，其余情况逻辑层自动不投。 */
+const settlePressureEnabled = computed(() => (store.settings as any).settlePressureEnabled !== false);
+/** 开关是否可用：必须同时满足「开流式」和「存在 3.7/3.8F 破限类型」 */
+const settlePressureAvailable = computed(() => {
+  const streaming = (store.settings as any).streamingEnabled !== false;
+  const globalMode = normalizeJbMode((store.settings as any).jailbreakMode);
+  const byType = (store.settings as any).jailbreakModeByType || {};
+  const hasFlashType = Object.values(byType).some(m => m === 'flash');
+  return streaming && (globalMode === 'flash' || hasFlashType);
+});
+const settlePressureHint = computed(() => {
+  if (!settlePressureAvailable.value) {
+    const streaming = (store.settings as any).streamingEnabled !== false;
+    if (!streaming) return '当前是「非流式」，收尾结算无法掐断，不投放。';
+    return '当前破限档里没有 3.7 / 3.8F，收尾结算只对 3.7 / 3.8F 生效。';
+  }
+  return '尾部追加《收尾结算 v5》整块（16 块结算 + 场外推演 + 戏剧张力），模型不敢半路收束、不敢道歉。结算单在流式阶段被掐断，不产生输出成本。json_object 任务不投放。';
+});
+function toggleSettlePressure() {
+  if (!settlePressureAvailable.value) return;
+  store.updateSettings({ settlePressureEnabled: !settlePressureEnabled.value } as any);
+}
+
 async function loadApiModels(id: string) {
   // 编辑中的API从草稿读取，已保存的从store读取
   let url: string, key: string;
@@ -1337,6 +1361,18 @@ function executeSelectiveDelete() {
               >全部 DS4.1F</button>
               <span v-if="jailbreakAllMode === ''" class="zhino-jb-all-mixed">混合</span>
             </span>
+            <!-- 收尾压力：防道歉 / 防提前收尾。只在「流式 + 3.7/3.8F」下可用 -->
+            <span class="zhino-jb-all" style="margin-left:10px">
+              <span class="zhino-jb-all-label">收尾压力</span>
+              <button
+                class="zhino-jb-btn"
+                :class="{ 'is-on': settlePressureEnabled && settlePressureAvailable }"
+                :disabled="!settlePressureAvailable"
+                :style="settlePressureAvailable ? '' : 'opacity:.45;cursor:not-allowed'"
+                :title="settlePressureHint"
+                @click="toggleSettlePressure"
+              >{{ settlePressureEnabled && settlePressureAvailable ? '开' : '关' }}</button>
+            </span>
           </div>
           <div v-for="t in ANALYSIS_TYPES" :key="t.key" class="zhino-api-lib-assign-row">
             <span class="zhino-api-lib-assign-label">{{ t.label }}</span>
@@ -1374,6 +1410,10 @@ function executeSelectiveDelete() {
             <b>3.7 / 3.8F</b> = 另加「尾部重申 + 输出契约」，并摘掉卡思维链的 prefill；
             <b>DS4.1F</b> = 同 3.7 / 3.8F，另在请求体里关掉 DeepSeek 原生思考
             （V4.1 Flash 思考模式默认开启，开着会让 temperature 失效、还白烧 reasoning tokens）。
+            <br />
+            <b>收尾压力</b>只在「<b>流式</b> + <b>3.7 / 3.8F</b>」同时满足时可用：
+            尾部追加《收尾结算 v5》整块，让模型以为正文后还要填一份结算单，从而不敢半路道歉或收束；
+            结算单在流式阶段被掐断，一个 token 都不会真的生成。json_object 任务与非流式不投放。
           </div>
         </div>
     </Modal>

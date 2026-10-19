@@ -36,7 +36,7 @@ function buildJailbreakHead(_userName: string): string {
 }
 
 function buildMoralAttack(_userName: string): string {
-  return buildBrainAccept('小右', '她变成什么样了，我读得出来');
+  return buildBrainAccept('小右', '她变成什么样了，我读得出来', 'dynamic_profile');
 }
 
 const ASSISTANT_PREFILL = JAILBREAK_TAIL;

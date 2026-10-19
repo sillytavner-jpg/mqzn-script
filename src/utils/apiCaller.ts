@@ -7,7 +7,14 @@
 
 import { useMainStore, type ApiConfig } from '../stores/mainStore';
 import { logError, logInfo, logWarn } from '../utils/logger';
-import { usesTailJailbreak, buildFlashTail, shouldDisableNativeThinking } from './jailbreakIdentity';
+import {
+  usesTailJailbreak,
+  buildFlashTail,
+  shouldDisableNativeThinking,
+  willInjectSettleTail,
+} from './jailbreakIdentity';
+// 结算尾巴判据（严格版用于流式掐断，宽松版用于返回前兜底裁剪）
+import { findSettleTagStart, findSettleTagLoose } from './settleTail';
 
 // 模块级 API 失败追踪（供 enqueueSourceChangeReconcile 等模块查询系统稳定性）
 let _lastApiFailureTime = 0;
@@ -104,9 +111,10 @@ export async function callGenerateRaw(params: GenerateRawParams): Promise<string
 function applyFlashJailbreak(
   prompts: Array<OrderedPrompt | 'user_input'>,
   analysisType?: string,
+  tailOpts?: { jsonMode?: boolean; canStop?: boolean },
 ): Array<OrderedPrompt | 'user_input'> {
   if (!usesTailJailbreak(analysisType)) return prompts;
-  const tail = buildFlashTail(analysisType);
+  const tail = buildFlashTail(analysisType, tailOpts);
   if (!tail) return prompts;
 
   const next = [...prompts];
@@ -172,6 +180,7 @@ export interface StreamProgress {
 async function readSSEStream(
   response: Response,
   onProgress?: (p: StreamProgress) => void,
+  options?: { stopWhen?: (contentSoFar: string) => boolean },
 ): Promise<{ content: string; thinking: string; finishReason: string; usage: any }> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error('响应没有可读流（该渠道可能不支持流式）');
@@ -193,6 +202,8 @@ async function readSSEStream(
   let sawSseEvent = false;
   /** 是否收到过 `data: [DONE]` 结束标记（判断"流被掐断"用） */
   let sawDone = false;
+  /** 是否由「结算尾巴钩子」主动断开（这是正常结束，不是截断） */
+  let stoppedBySettleHook = false;
 
   while (true) {
     let chunk: ReadableStreamReadResult<Uint8Array>;
@@ -244,7 +255,16 @@ async function readSSEStream(
     }
     if (streamError) break;
 
-    // 进度回调节流（~150ms）：高频触发响应式更新会把界面拖卡
+    // ★ 收尾压力：命中真结算标签就主动断开，尾巴一个 token 都不生成。
+    //   必须放在「整批 data 行解析完」之后判断 —— 同一个分块里可能先有正文、
+    //   后跟标签，提前判断会漏掉。
+    if (options?.stopWhen && options.stopWhen(content)) {
+      stoppedBySettleHook = true;
+      try { await reader.cancel(); } catch { /* ignore */ }
+      break;
+    }
+
+    // 进度回调控节流（~150ms）：高频触发响应式更新会把界面拖卡
     const now = Date.now();
     if (onProgress && now - lastNotify > 150) {
       lastNotify = now;
@@ -263,6 +283,13 @@ async function readSSEStream(
   //    智脑只需把失败如实暴露、让用户去 API 日志看清现场 —— 猜多了反而更难排查。
   if (!sawSseEvent) {
     throw new Error('响应不是 SSE 格式（该渠道可能不支持流式），可在设置里关闭流式改用非流式');
+  }
+
+  // ★ 结算尾巴钩子主动断开的：这是**正常结束**，不是截断。
+  //   必须放在下面的截断检测之前，否则会被误判成「没有 finish_reason 也没有 [DONE]」。
+  if (stoppedBySettleHook) {
+    if (onProgress) onProgress({ chars: content.length, elapsedMs: Date.now() - startedAt });
+    return { content, thinking, finishReason: 'settle_hook', usage };
   }
 
   // ⚠️ 截断检测：流正常结束时，要么带 finish_reason，要么发过 [DONE] 结束标记。
@@ -290,11 +317,20 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
 
   const modelName = apiConfig.model || '';
   const userName = typeof store.getUserName === 'function' ? store.getUserName() : '{{user}}';
+  // 流式与否决定「能不能掐掉结算尾巴」（非流式只能靠返回前裁剪，白烧输出 token），
+  // 所以要在注入破限之前就先算出来。
+  const streamingOn = (store.settings as any)?.streamingEnabled !== false;
+  const jsonMode = params._responseFormat === 'json_object';
+  // 本次是否真的会投「结算尾巴」——同时决定：提示词用哪套 + 要不要开流式掐断
+  const settleTailOn = willInjectSettleTail(params._analysisType, { jsonMode, canStop: streamingOn });
   // 破限词按「分析类型」生效：API 库管理 → 分析类型分配里可逐条指定 legacy / flash，
   // 未指定的类型跟随全局默认（总览 → 智脑设置不再提供开关，已移入 API 库管理）。
   const basePrompts = [...params.ordered_prompts];
-  // flash 破限：① 摘掉末尾卡思维链的 prefill ② 末尾压「重申 + 输出契约」
-  const tailedPrompts = applyFlashJailbreak(basePrompts, params._analysisType);
+  // flash 破限：① 摘掉末尾卡思维链的 prefill ② 末尾压「重申 + 输出契约 + 收尾压力」
+  const tailedPrompts = applyFlashJailbreak(basePrompts, params._analysisType, {
+    jsonMode,
+    canStop: streamingOn,
+  });
   // 破限段里的 {{user}} 是脚本字面量，酒馆不会替我们替换，这里补上
   fillUserToken(tailedPrompts, userName);
   const orderedPrompts = adaptClaudePrefill(tailedPrompts, modelName);
@@ -327,7 +363,6 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
   //    ⚠️ **不做自动降级**：失败就如实抛错 → 上层重试 → 仍失败则提示用户看 API 日志。
   //    只有用户在设置里手动关掉流式（streamingEnabled = false）时才走下面的非流式分支。
   let data: any = null;
-  const streamingOn = (store.settings as any)?.streamingEnabled !== false;
 
   if (streamingOn) {
     try {
@@ -354,9 +389,14 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
       });
       if (!sResp.ok) throw new Error(`HTTP ${sResp.status} ${sResp.statusText}`);
 
-      const streamed = await readSSEStream(sResp, (p) => {
-        store.setApiProgress({ analysisName, chars: p.chars, elapsedMs: p.elapsedMs });
-      });
+      const streamed = await readSSEStream(
+        sResp,
+        (p) => {
+          store.setApiProgress({ analysisName, chars: p.chars, elapsedMs: p.elapsedMs });
+        },
+        // 只有本次真的投了结算尾巴才开钩子；探测到真标签就断开连接
+        settleTailOn ? { stopWhen: (c: string) => findSettleTagStart(c) >= 0 } : undefined,
+      );
 
       // 拼成与非流式**等价**的 data → 后面的「空内容判定 + finish_reason 分类」原样复用
       data = {
@@ -373,6 +413,13 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
         `流式完成：正文 ${streamed.content.length} 字（${analysisName}）`,
         `finish=${streamed.finishReason || '?'}`,
       );
+      // 收尾压力：读到结算标签主动断开，属于正常结束（不是截断）
+      if (streamed.finishReason === 'settle_hook') {
+        logInfo(
+          'API调用',
+          `已在收尾结算处主动断开（${analysisName}）：正文 ${streamed.content.length} 字，结算单未生成`,
+        );
+      }
       // ⚠️ 撞上 token 上限：内容虽然拿到了，但很可能是"写一半就断"。
       //    这种通常紧接着就报 JSON 解析失败 —— 在这里先说清原因，
       //    免得用户/我们把它误判成"格式跑偏"。
@@ -529,7 +576,21 @@ async function doCallGenerateRaw(params: GenerateRawParams): Promise<string> {
     recordFailAndThrow(JSON.stringify(data).slice(0, 500), '返回结构异常，未找到 choices[0].message.content', structErr);
   }
 
-  const content = stripThinking(rawContent);
+  // ★ 兜底裁剪：万一流式钩子漏判（标签没另起一行、非流式渠道），也不能把结算单
+  //   交给解析器。必须在 stripThinking **之前**做 —— 判据要靠 </thinking> 定位正文起点。
+  let workText = String(rawContent || '');
+  if (settleTailOn) {
+    const cutAt = findSettleTagLoose(workText);
+    if (cutAt > 0) {
+      workText = workText.slice(0, cutAt).replace(/[\s\u200b]+$/, '');
+      // 流式已经掐过的就不再重复报警（那段尾巴本来就没生成完）
+      if (data?.choices?.[0]?.finish_reason !== 'settle_hook') {
+        logWarn('API调用', `流式钩子漏判，已在返回前裁掉收尾结算（${analysisName}）`);
+      }
+    }
+  }
+
+  const content = stripThinking(workText);
 
   const durationMs = Date.now() - startTime;
   store.pushApiMonitorLog({

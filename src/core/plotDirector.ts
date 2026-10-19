@@ -59,7 +59,7 @@ function buildJailbreakHead(_userName: string): string {
 }
 
 function buildMoralAttack(_userName: string): string {
-  return buildBrainAccept('前额叶', '大纲和节奏我来管');
+  return buildBrainAccept('前额叶', '大纲和节奏我来管', 'plot_director');
 }
 
 const ASSISTANT_PREFILL = '<thinking>';

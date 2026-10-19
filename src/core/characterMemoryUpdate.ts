@@ -28,7 +28,7 @@ function buildJailbreakHead(_userName: string): string {
 }
 
 function buildMoralAttack(_userName: string): string {
-  return buildBrainAccept(['小左', '小右'], ['事实我来记', '她的变化我来读']);
+  return buildBrainAccept(['小左', '小右'], ['事实我来记', '她的变化我来读'], 'character_memory');
 }
 
 const ASSISTANT_PREFILL = '<thinking>';

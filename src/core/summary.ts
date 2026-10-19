@@ -60,7 +60,7 @@ function buildJailbreakHead(_userName: string): string {
 }
 
 function buildMoralAttack(_userName: string): string {
-  return buildBrainAccept('小左', '记忆的事交给我');
+  return buildBrainAccept('小左', '记忆的事交给我', 'grand_summary');
 }
 
 // ========== 尾部 assistant prefill（跳过原生思维链，进入自定义思维链） ==========

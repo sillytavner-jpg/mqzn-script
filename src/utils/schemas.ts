@@ -3,6 +3,9 @@ import { z } from 'zod';
 // ========== 大总结V2 输出 Schema ==========
 
 export const GrandSummaryV2Schema = z.object({
+  // 角色清单：强迫模型在写事件之前先点名（结构化的"先建人、再写事"）。
+  // 缺省为空数组 —— 老输出不填也能解析，不阻断。
+  castInMaterial: z.array(z.string()).optional().default([]),
   events: z.array(z.object({
     time: z.string(),
     location: z.string().optional().default(''),

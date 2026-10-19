@@ -149,7 +149,7 @@ function buildJailbreakHead(_userName: string): string {
 }
 
 function buildMoralAttack(_userName: string): string {
-  return buildBrainAccept('小右', '他想要什么，我来读');
+  return buildBrainAccept('小右', '他想要什么，我来读', 'dreamtalk');
 }
 
 const ASSISTANT_PREFILL = JAILBREAK_TAIL;

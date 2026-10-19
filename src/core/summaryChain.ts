@@ -19,6 +19,7 @@
  */
 
 import type { CapturedContent, CharacterMemory, SmallSummaryRecord } from '../stores/mainStore';
+import type { CharacterNameEntry } from '../utils/characterNames';
 import { executeGrandSummaryV2 } from './grandSummaryV2';
 import type { GrandSummaryV2Result } from './grandSummaryV2';
 import { executeCharacterMemoryUpdate } from './characterMemoryUpdate';
@@ -41,6 +42,11 @@ export interface SummaryChainOptions {
   extraGenerateParams?: { _responseFormat?: 'json_object' | 'text' };
   /** 角色黑名单 */
   blacklistedNames?: string[];
+  /**
+   * 角色名册（正式名 + 别名），注入大总结提示词。
+   * 不传 = 大总结不带名册（旧行为，群像场景易把多个角色合成一个人）。
+   */
+  characterRoster?: CharacterNameEntry[];
   /** 日志前缀，便于区分调用来源（如 '大总结链' / '批量总结' / '总览页'） */
   logScope?: string;
 }
@@ -107,6 +113,7 @@ export async function runSummaryChain(
         options.abortSignal,
         options.extraGenerateParams,
         options.blacklistedNames,
+        options.characterRoster,
       ),
     });
   }

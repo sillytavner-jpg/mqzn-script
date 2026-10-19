@@ -487,6 +487,17 @@ export interface ScriptSettings {
      */
     jailbreakModeByType: Record<string, 'legacy' | 'flash' | 'ds41f'>;
     /**
+     * 收尾压力开关（防道歉 / 防提前收尾），默认开。
+     *
+     * 原理：尾部破限追加「主体写完再填一份结算单」的要求，模型带着「还没做完」的
+     * 压力写正文，不敢半路收束、不敢退让；而结算单本身由 apiCaller 在流式阶段
+     * 读到 <TAIL> 就断开连接，一个 token 都不生成。
+     *
+     * 只有 flash / ds41f 档生效（legacy 不投尾部破限）。
+     * json_object 任务与非流式渠道会自动降级为「纯自检」——不加尾巴，只约束。
+     */
+    settlePressureEnabled: boolean;
+    /**
      * 状态文档 patch 灰度开关（按模块名开启）—— 即 UI 上的「输出模式：MUV 化」。
      * 缺省 = 该模块走旧的全量 JSON 输出；置 true 才启用 patch 输出。
      * 例：{ small_summary: true }
@@ -735,6 +746,8 @@ const ScriptSettingsSchema = z
         jailbreakMode: z.string().prefault('legacy'), // 'legacy' | 'flash' | 'ds41f'（全局默认）
         // 逐分析类型的破限模式覆盖：{ 类型key: 'legacy'|'flash'|'ds41f' }，未列出 = 跟随全局默认
         jailbreakModeByType: z.record(z.string(), z.string()).prefault({}),
+        // 收尾压力（防道歉 / 防提前收尾）：默认开，只对 flash / ds41f 生效
+        settlePressureEnabled: z.boolean().prefault(true),
         // MUV 化（输出结构 patch）**默认全关**：实测收益不稳定，降级为「实验性功能」。
         // 存量数据里那份「默认三件套」由 index.ts 做一次性清空（见 muvDefaultOffApplied）。
         statePatchEnabled: z.record(z.string(), z.boolean()).prefault({}),
@@ -6858,6 +6871,9 @@ const versions = chatData.value.knowledgeGraphVersions || [];
     getCharacterNameEntries,
     resolveKnownCharacterName,
     resolveKnownCharacterNames,
+    // 写入收口：主名归一 + 别名防合并守卫 + 同名条目归并
+    // （大总结组装前必须先用它，否则 rawText 会带着未归一的脏名字流到下一轮）
+    normalizeIncomingCharacterMemories,
     updateCharacterAliases,
     addCharacter,
     checkCharacterNameConflict,

@@ -312,6 +312,8 @@ export async function executeBatchSummary(
               abortSignal: controller.signal,
               extraGenerateParams: { _responseFormat: 'json_object' },
               blacklistedNames: store.getBlacklistedCharacters(),
+              // 角色名册：避免批量总结在群像段落把多个角色合成一个人
+              characterRoster: store.getCharacterNameEntries({ includeUser: true }),
               logScope: '批量总结',
             },
           );
@@ -326,10 +328,21 @@ export async function executeBatchSummary(
             return;
           }
 
+          // ★ 归一提前（同 index.ts）：先归一，再拼 rawText。
+          //   否则 rawText 会带着 AI 原始名字落库，下一轮继续喂回模型（污染循环）。
+          const normalizedEvents = v2Events.map((e: any) => ({
+            ...e,
+            presentCharacters: store.resolveKnownCharacterNames(e.presentCharacters, true),
+          }));
+          const normalizedMemResult = {
+            ...memResult,
+            characterMemories: store.normalizeIncomingCharacterMemories(memResult.characterMemories),
+          };
+
           // === 组装 GrandSummary 并存储 ===
           const summary = assembleGrandSummary(
-            v2Events,
-            memResult,
+            normalizedEvents,
+            normalizedMemResult,
             summaryVersion,
             previousSummary,
           );
@@ -361,14 +374,14 @@ export async function executeBatchSummary(
               }).catch(() => {});
             }
 
-            // 核心记忆向量
-            const totalCores = memResult.characterMemories.reduce(
+            // 核心记忆向量（用归一后的记忆，否则向量会挂在旧名/别名条目上）
+            const totalCores = normalizedMemResult.characterMemories.reduce(
               (s: number, m: any) => s + (m.coreMemories?.length || 0),
               0,
             );
             if (totalCores > 0) {
               embedCharacterMemories(
-                memResult.characterMemories,
+                normalizedMemResult.characterMemories,
                 store.settings.embeddingApiUrl,
                 store.settings.embeddingApiKey,
                 store.settings.embeddingModel,

@@ -2119,6 +2119,9 @@ $(() => {
           memoryMax: store.settings.memoryMaxPerChar,
           extraGenerateParams: { _responseFormat: 'json_object' },
           blacklistedNames: store.getBlacklistedCharacters(),
+          // 角色名册：大总结此前完全不注入，模型只能从正文自由取名，
+          // 群像场景会把多个角色坍缩成一个人
+          characterRoster: store.getCharacterNameEntries({ includeUser: true }),
           logScope: '大总结链',
         },
       );
@@ -2134,8 +2137,20 @@ $(() => {
       const summarizedUpTo = summarizedMessageIds[summarizedMessageIds.length - 1] ?? store.lastSummaryAtMessageId;
       const summaryVersion = (previousSummary?.version || 0) + 1;
 
+      // ★ 归一必须提前到拼 rawText 之前（P1）。
+      //   原先只有 addSummary 内部归一（mainStore:2154/2158），而 rawText 早已用 AI 原始名拼好，
+      //   造成「结构化字段干净、rawText 脏」的双写分叉：脏名字随上一轮大总结继续喂回模型，
+      //   合并/别名污染就此一轮轮传下去。
+      const normalizedEvents = v2Result.events.map(e => ({
+        ...e,
+        presentCharacters: store.resolveKnownCharacterNames(e.presentCharacters, true),
+      }));
+      const normalizedNewMemories = memResult
+        ? store.normalizeIncomingCharacterMemories(memResult.characterMemories)
+        : null;
+
       // V2 事件 → TimelineEvent[]（summary=速览用于召回，detail=完整经过用于注入）
-      const timeline: TimelineEvent[] = v2Result.events.map(e => ({
+      const timeline: TimelineEvent[] = normalizedEvents.map(e => ({
         time: e.time,
         event: e.summary || e.event.slice(0, 50),
         detail: e.event,
@@ -2163,7 +2178,8 @@ $(() => {
       }
 
       // Section 2: 角色记忆（从本次角色记忆更新结果读取）
-      let memCharMemories = memResult?.characterMemories || store.chatData.characterMemories || [];
+      // ★ 优先用已归一化的本批结果；角色记忆关闭（memResult=null）时才沿用已入库的旧数据。
+      let memCharMemories = normalizedNewMemories ?? store.chatData.characterMemories ?? [];
 
       // 把本次大总结覆盖楼层内的世界推进记忆合并进角色记忆，并按剧情时间排序
       const lastSummaryUpTo = previousSummary?.upToMessageId ?? 0;
@@ -2219,8 +2235,9 @@ $(() => {
         })),
         rawText,
       };
-      // 同步角色记忆到独立存储（保持 chatData.characterMemories 与 summary 一致）
-      store.chatData.characterMemories = memCharMemories;
+      // 注意：chatData.characterMemories 由 addSummary 统一写入（mainStore:2205）。
+      // 此处不再提前赋值——原先的双写会在 addSummary 走失败占位（isFailed）分支时
+      // 把未提交的记忆留在 chatData 里，与 summary 分叉。
 
       // Toastr 弹窗警告：AI 输出的角色记忆为空
       const totalNewMemories = summary.characterMemories.reduce(
